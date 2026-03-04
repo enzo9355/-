@@ -1,8 +1,9 @@
-Flask==3.0.0
-line-bot-sdk==3.5.0
-yfinance==0.2.36
-twstock==0.1.3
-scikit-learn==1.3.2
-matplotlib==3.8.2
-pandas==2.1.4
-gunicorn==21.2.0
+Flask
+line-bot-sdk
+yfinance
+twstock
+scikit-learn
+matplotlib
+pandas
+gunicorn
+
