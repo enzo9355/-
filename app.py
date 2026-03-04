@@ -1,10 +1,6 @@
-!pip install flask line-bot-sdk yfinance pyngrok scikit-learn matplotlib pandas twstock
-
-!wget -O taipei_sans.ttf https://github.com/googlefonts/noto-cjk/raw/main/Sans/OTF/TraditionalChinese/NotoSansCJKtc-Regular.otf
-
 import os
 import time
-import random
+import urllib.request
 import pandas as pd
 import numpy as np
 import yfinance as yf
@@ -19,19 +15,22 @@ from linebot.models import (
     MessageEvent, TextMessage, TextSendMessage, ImageSendMessage,
     QuickReply, QuickReplyButton, MessageAction, FlexSendMessage
 )
-from pyngrok import ngrok
 from sklearn.cluster import KMeans
 from sklearn.ensemble import RandomForestClassifier
 
+# 1. 自動下載並設定中文字體
 font_path = 'taipei_sans.ttf'
+if not os.path.exists(font_path):
+    print("⏳ 下載中文字體...")
+    urllib.request.urlretrieve("https://github.com/googlefonts/noto-cjk/raw/main/Sans/OTF/TraditionalChinese/NotoSansCJKtc-Regular.otf", font_path)
+
 fm.fontManager.addfont(font_path)
 plt.rcParams['font.family'] = fm.FontProperties(fname=font_path).get_name()
 matplotlib.use('Agg')
 
+# 2. LINE Bot 設定
 LINE_CHANNEL_ACCESS_TOKEN = 'lQyeonM1HkZGZXABONH+Xpd9atZVkppAIt5qnCZkz8D131NdHiW06EmtXXSQyJ2rc8CCbylLOBZLb+zbqvynFtkzGpp/7X0+MDLbk2FD3oMTATtUw2Kpf+PzMtpx07ofZ0vC9Do2KVYQN1Tl328otAdB04t89/1O/w1cDnyilFU='
 LINE_CHANNEL_SECRET = 'e5370d4d8f54d87f04a5cced565c1d4b'
-NGROK_AUTH_TOKEN = '36V3gQnX2Nphqg4ca1gOaaLK59P_2HXiyxL9UL77wwwjGRsn1'
-
 
 industry_map = {
     "半導體業": ['2330', '2454', '2303', '3034', '2379', '3711', '3443', '6488', '2408', '3035', '3006', '3532', '8016', '6531', '5471', '3661', '3189', '8299'],
@@ -222,36 +221,31 @@ def calculate_backtest(stock_code, stock_name=""):
         
         test_days = len(test_df)
         
-        # 白話且具備行動指南的結論
         if strategy_cum > bnh_cum:
             if sharpe > 1:
                 conclusion = (
-                    "✅ 【AI 表現優異 (高CP值)】\n"
-                    "這檔股票走勢規律，AI 抓得很準。\n\n"
-                    "🛒 想買入：優質標的！若最新預測為看漲，可直接進場試單。\n"
+                    "✅ AI 表現優異：這檔股票走勢規律，AI 抓得很準。\n"
+                    "🛒 想買入：優質標的！若最新預測為看漲，可考慮進場。\n"
                     "💰 想賣出：看 AI 臉色！預測看漲就抱著，轉為看跌請果斷獲利了結。"
                 )
             else:
                 conclusion = (
-                    "✅ 【AI 表現贏過大盤 (起伏大)】\n"
-                    "長期會賺錢，但過程暴漲暴跌。\n\n"
+                    "✅ AI 表現贏過大盤：長期會賺錢，但過程暴漲暴跌。\n"
                     "🛒 想買入：可以買，嚴禁 All-in！建議將資金拆分，分批往下買進。\n"
                     "💰 想賣出：見好就收！若已有獲利且不想承受震盪，建議先停利一半。"
                 )
         else:
             if mdd > -15:
                 conclusion = (
-                    "⏸️ 【AI 表現防禦 (抗跌溫吞)】\n"
-                    "賺得比死抱著少，但在大跌時能保命。\n\n"
-                    "🛒 想買入：適合保守存股！心臟大顆、想賺快錢的千萬別買。\n"
-                    "💰 想賣出：想賺快錢就換股！若不想資金卡住，可直接賣出換股操作。"
+                    "⏸️ AI 表現防禦：賺得比死抱著少，但在大跌時能保命。\n"
+                    "🛒 想買入：適合保守存股！想賺快錢的千萬別碰。\n"
+                    "💰 想賣出：若不想資金卡住，可考慮賣出換股操作。"
                 )
             else:
                 conclusion = (
-                    "⚠️ 【AI 表現不佳 (模型失效)】\n"
-                    "AI 抓不到這檔的邏輯，容易被雙巴。\n\n"
-                    "🛒 想買入：連碰都不要碰！請直接去尋找其他 AI 表現優異的標的。\n"
-                    "💰 想賣出：看線圖手動停損！AI 已失效，跌破月線或成本請立刻賣出。"
+                    "⚠️ AI 表現不佳：AI 抓不到這檔的邏輯，容易被雙巴。\n"
+                    "🛒 想買入：連碰都不要碰！請尋找其他 AI 表現優異的標的。\n"
+                    "💰 想賣出：AI 已失效！請看線圖手動停損，跌破月線或成本請立刻賣出。"
                 )
 
         res_text = (
@@ -263,7 +257,7 @@ def calculate_backtest(stock_code, stock_name=""):
             f"🛡️ 風險評估\n"
             f"🎯 AI 勝率：{win_rate:.1f}%\n"
             f"⚠️ 最慘曾跌掉：{mdd:.2f}%\n"
-            f"⚖️ 承擔風險CP值(夏普值)：{sharpe:.2f}\n\n"
+            f"⚖️ 承擔風險CP值：{sharpe:.2f}\n\n"
             f"💡 行動指南：\n{conclusion}"
         )
         return res_text
@@ -409,7 +403,8 @@ def handle_message(event):
         if target_code:
             img_name, analysis_txt = analyze_and_predict_stock(target_code, target_name)
             if img_name and analysis_txt:
-                img_url = f"{public_url}/static/tmp/{img_name}".replace("http://", "https://")
+                # 使用 request.host_url 動態抓取伺服器網址
+                img_url = f"{request.host_url}static/tmp/{img_name}".replace("http://", "https://")
                 
                 flex_content = {
                     "type": "bubble",
@@ -445,10 +440,10 @@ def handle_message(event):
             else: line_bot_api.reply_message(event.reply_token, TextSendMessage(text="❌ 資料不足，無法分析此股票。"))
         else: line_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"❌ 找不到「{msg}」，請輸入正確代碼或名稱。"))
 
-ngrok.set_auth_token(NGROK_AUTH_TOKEN)
-ngrok.kill()
-public_url = ngrok.connect(5000).public_url
-print(f"\n======== Webhook URL ========\n{public_url}/callback\n=============================\n")
-
+# 3. 初始化數據並啟動伺服器
 init_data()
+if __name__ == "__main__":
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port)
+
 app.run(port=5000)
