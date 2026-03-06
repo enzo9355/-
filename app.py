@@ -28,28 +28,26 @@ fm.fontManager.addfont(font_path)
 plt.rcParams['font.family'] = fm.FontProperties(fname=font_path).get_name()
 matplotlib.use('Agg')
 
-# 2. LINE Bot 設定
+# 2. LINE Bot 設定 (請確保 Token 與 Secret 正確)
 LINE_CHANNEL_ACCESS_TOKEN = 'lQyeonM1HkZGZXABONH+Xpd9atZVkppAIt5qnCZkz8D131NdHiW06EmtXXSQyJ2rc8CCbylLOBZLb+zbqvynFtkzGpp/7X0+MDLbk2FD3oMTATtUw2Kpf+PzMtpx07ofZ0vC9Do2KVYQN1Tl328otAdB04t89/1O/w1cDnyilFU='
 LINE_CHANNEL_SECRET = 'e5370d4d8f54d87f04a5cced565c1d4b'
 
 industry_map = {
-    "半導體業": ['2330', '2454', '2303', '3034', '2379', '3711', '3443', '6488', '2408', '3035', '3006', '3532', '8016', '6531', '5471', '3661', '3189', '8299'],
-    "電腦周邊": ['2317', '2382', '3231', '2357', '2356', '2324', '6669', '2301', '2353', '2376', '2377', '2352', '4938', '3017', '2421', '3013', '2395'],
-    "通信網路": ['2412', '3045', '4904', '2345', '5388', '3062', '2455', '3702', '6285', '3596', '4906', '3419'],
+    "半導體業": ['2330', '2454', '2303', '3034', '3711', '3443', '2408', '3035', '3006', '3532'],
+    "電腦周邊": ['2317', '2382', '3231', '2357', '2356', '2324', '6669', '2353', '2377', '2352'],
+    "通信網路": ['2412', '3045', '4904', '2345', '5388', '3062', '2455', '3702', '6285', '3596'],
     "光電產業": ['3008', '2409', '3481', '6706', '4956', '6176', '3406', '2448', '3504', '3019'],
-    "電子零組件": ['2308', '2327', '3037', '2383', '2059', '3042', '3044', '2492', '2313', '2316', '2392', '6278'],
-    "金融保險": ['2881', '2882', '2886', '2891', '5880', '2892', '2884', '2885', '2880', '2883', '2890', '2887', '5871', '5876', '2834', '2812', '2883'],
-    "航運業": ['2603', '2609', '2615', '2618', '2610', '2606', '2637', '2633', '5608', '2605', '2636'],
+    "電子零組件": ['2308', '2327', '3037', '2383', '2059', '3042', '3044', '2492', '2313', '2316'],
+    "金融保險": ['2881', '2882', '2886', '2891', '5880', '2892', '2884', '2885', '2880', '2890'],
+    "航運業": ['2603', '2609', '2615', '2618', '2610', '2606', '2637', '2633', '5608', '2605'],
     "鋼鐵工業": ['2002', '2014', '2006', '2027', '2031', '2023', '2015', '2009', '2034'],
-    "塑膠化學": ['1301', '1303', '6505', '1326', '1304', '1308', '1312', '1310', '1313', '4739', '1710'],
-    "熱門ETF": ['0050', '0056', '00878', '00919', '00929', '00940', '00939', '00881', '00713', '006208', '00679B', '0052', '00692', '00915', '00918']
+    "塑膠化學": ['1301', '1303', '6505', '1326', '1304', '1308', '1312', '1310', '1313', '4739'],
+    "熱門ETF": ['0050', '0056', '00878', '00919', '00929', '00940', '00939', '00881', '00713', '006208']
 }
 
 all_watch_list = []
 for stocks in industry_map.values():
     all_watch_list.extend(stocks)
-
-global_df_market = None
 
 def get_stock_name(stock_code):
     try:
@@ -66,46 +64,6 @@ def search_stock_code(keyword):
         if keyword == info.name or keyword in info.name:
             if len(code) <= 6: return code, info.name
     return None, None
-
-def generate_mock_data_for_industry(industry_name):
-    mock_data = []
-    codes = industry_map.get(industry_name, [])
-    if not codes: codes = industry_map['熱門ETF'][:5]
-    for code in codes:
-        mock_data.append({
-            'Code': code, 'Name': get_stock_name(code),
-            'Return': np.random.uniform(-0.10, 0.40),
-            'Volatility': np.random.uniform(0.01, 0.06),
-            'Price': np.random.uniform(20, 800),
-            'Industry': industry_name
-        })
-    return pd.DataFrame(mock_data)
-
-def init_data():
-    global global_df_market
-    stock_features = []
-    try:
-        tickers_list = [f"{code}.TW" for code in all_watch_list]
-        data = yf.download(tickers_list, period="3mo", progress=False)['Close']
-        if not data.empty:
-            for code in all_watch_list:
-                ticker = f"{code}.TW"
-                if ticker in data.columns:
-                    series = data[ticker].dropna()
-                    if len(series) > 10:
-                        start_p, end_p = float(series.iloc[0]), float(series.iloc[-1])
-                        ret = (end_p - start_p) / start_p
-                        vol = series.pct_change().std()
-                        my_ind = "其他"
-                        for ind, codes in industry_map.items():
-                            if code in codes:
-                                my_ind = ind
-                                break
-                        stock_features.append({'Code': code, 'Name': get_stock_name(code), 'Return': ret, 'Volatility': vol, 'Price': end_p, 'Industry': my_ind})
-    except Exception as e: print(f"❌ 初始化失敗: {e}")
-    
-    if len(stock_features) > 0: global_df_market = pd.DataFrame(stock_features)
-    else: global_df_market = pd.DataFrame()
 
 def analyze_and_predict_stock(stock_code, stock_name=None):
     try:
@@ -152,12 +110,9 @@ def analyze_and_predict_stock(stock_code, stock_name=None):
         current_price = float(df['Close'].iloc[-1])
         ma20 = float(df['MA_20'].iloc[-1])
         
-        if up_probability > 60:
-            pred_msg = f"強勢看漲 📈 ({up_probability:.1f}%)"
-        elif up_probability < 40:
-            pred_msg = f"弱勢看跌 📉 ({100-up_probability:.1f}%)"
-        else:
-            pred_msg = f"震盪整理 ⚖️ ({up_probability:.1f}%)"
+        if up_probability > 60: pred_msg = f"強勢看漲 📈 ({up_probability:.1f}%)"
+        elif up_probability < 40: pred_msg = f"弱勢看跌 📉 ({100-up_probability:.1f}%)"
+        else: pred_msg = f"震盪整理 ⚖️ ({up_probability:.1f}%)"
 
         analysis_text = (
             f"📊 {stock_name} ({stock_code})\n\n"
@@ -222,31 +177,11 @@ def calculate_backtest(stock_code, stock_name=""):
         test_days = len(test_df)
         
         if strategy_cum > bnh_cum:
-            if sharpe > 1:
-                conclusion = (
-                    "✅ AI 表現優異：這檔股票走勢規律，AI 抓得很準。\n"
-                    "🛒 想買入：優質標的！若最新預測為看漲，可考慮進場。\n"
-                    "💰 想賣出：看 AI 臉色！預測看漲就抱著，轉為看跌請果斷獲利了結。"
-                )
-            else:
-                conclusion = (
-                    "✅ AI 表現贏過大盤：長期會賺錢，但過程暴漲暴跌。\n"
-                    "🛒 想買入：可以買，嚴禁 All-in！建議將資金拆分，分批往下買進。\n"
-                    "💰 想賣出：見好就收！若已有獲利且不想承受震盪，建議先停利一半。"
-                )
+            if sharpe > 1: conclusion = "✅ AI 表現優異：這檔股票走勢規律，AI 抓得很準。\n🛒 想買入：優質標的！若最新預測為看漲，可考慮進場。\n💰 想賣出：看 AI 臉色！預測看漲就抱著，轉為看跌請果斷獲利了結。"
+            else: conclusion = "✅ AI 表現贏過大盤：長期會賺錢，但過程暴漲暴跌。\n🛒 想買入：可以買，嚴禁 All-in！建議將資金拆分，分批往下買進。\n💰 想賣出：見好就收！若已有獲利且不想承受震盪，建議先停利一半。"
         else:
-            if mdd > -15:
-                conclusion = (
-                    "⏸️ AI 表現防禦：賺得比死抱著少，但在大跌時能保命。\n"
-                    "🛒 想買入：適合保守存股！想賺快錢的千萬別碰。\n"
-                    "💰 想賣出：若不想資金卡住，可考慮賣出換股操作。"
-                )
-            else:
-                conclusion = (
-                    "⚠️ AI 表現不佳：AI 抓不到這檔的邏輯，容易被雙巴。\n"
-                    "🛒 想買入：連碰都不要碰！請尋找其他 AI 表現優異的標的。\n"
-                    "💰 想賣出：AI 已失效！請看線圖手動停損，跌破月線或成本請立刻賣出。"
-                )
+            if mdd > -15: conclusion = "⏸️ AI 表現防禦：賺得比死抱著少，但在大跌時能保命。\n🛒 想買入：適合保守存股！想賺快錢的千萬別碰。\n💰 想賣出：若不想資金卡住，可考慮賣出換股操作。"
+            else: conclusion = "⚠️ AI 表現不佳：AI 抓不到這檔的邏輯，容易被雙巴。\n🛒 想買入：連碰都不要碰！請尋找其他 AI 表現優異的標的。\n💰 想賣出：AI 已失效！請看線圖手動停損，跌破月線或成本請立刻賣出。"
 
         res_text = (
             f"📑 {stock_name} ({stock_code}) 策略回測\n"
@@ -262,7 +197,6 @@ def calculate_backtest(stock_code, stock_name=""):
         )
         return res_text
     except Exception as e:
-        print(f"回測錯誤: {e}")
         return "❌ 回測計算發生錯誤，請確認資料是否齊全。"
 
 app = Flask(__name__)
@@ -274,6 +208,11 @@ if not os.path.exists(static_tmp_path): os.makedirs(static_tmp_path)
 
 @app.route('/static/tmp/<path:filename>')
 def serve_static(filename): return send_from_directory(static_tmp_path, filename)
+
+# 👇 UptimeRobot 專用的首頁路由
+@app.route("/")
+def home():
+    return "LINE Bot 正常運作中！"
 
 @app.route("/callback", methods=['POST'])
 def callback():
@@ -288,21 +227,11 @@ def handle_message(event):
     msg = event.message.text.strip()
 
     if msg == "教學":
-        reply_text = (
-            "🔍 個股查詢教學\n\n"
-            "不需要按選單，請直接在聊天框輸入：\n"
-            "👉 股票代碼（例：2330）\n"
-            "👉 股票名稱（例：台積電）\n\n"
-            "系統將自動產出 AI 技術線圖與漲跌預測！"
-        )
+        reply_text = "🔍 個股查詢教學\n\n直接在聊天框輸入：\n👉 股票代碼（例：2330）\n👉 股票名稱（例：台積電）\n\n系統將自動產出 AI 技術線圖與漲跌預測！"
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
 
     elif msg == "免責聲明":
-        reply_text = (
-            "⚠️ 免責聲明\n\n"
-            "本系統提供之 AI 分群與回測數據，僅供學術研究與程式開發交流。\n\n"
-            "模型歷史勝率不代表未來績效，本機器人不構成任何買賣建議。投資一定有風險，下單前請自行評估並嚴設停損。"
-        )
+        reply_text = "⚠️ 免責聲明\n\n本系統數據僅供學術研究與程式開發交流。\n模型歷史勝率不代表未來績效，不構成買賣建議。投資一定有風險，下單前請自行評估並嚴設停損。"
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
 
     elif msg == "預測":
@@ -311,7 +240,7 @@ def handle_message(event):
             items.append(QuickReplyButton(action=MessageAction(label=industry[:20], text=f"選產業_{industry}")))
         line_bot_api.reply_message(
             event.reply_token,
-            TextSendMessage(text="請選擇您想分析的產業類別：👇", quick_reply=QuickReply(items=items))
+            TextSendMessage(text="請選擇想分析的產業類別：👇", quick_reply=QuickReply(items=items))
         )
 
     elif msg.startswith("選產業_"):
@@ -330,16 +259,27 @@ def handle_message(event):
         target_industry = parts[1]
         risk_type = parts[2] if len(parts) > 2 else "穩健"
         
-        if global_df_market is None or global_df_market.empty: init_data()
+        # 動態抓取該產業股票 (避免被 Yahoo 封鎖)
+        if target_industry == "全市場": codes = ['2330', '2317', '2454', '2308', '2881', '2603', '2002', '1301', '0050', '0056']
+        else: codes = industry_map.get(target_industry, industry_map['熱門ETF'][:10])
 
-        if target_industry == "全市場": df_target = global_df_market.copy()
-        else: df_target = global_df_market[global_df_market['Industry'] == target_industry].copy() if global_df_market is not None else pd.DataFrame()
+        stock_features = []
+        try:
+            tickers_list = [f"{code}.TW" for code in codes]
+            data = yf.download(tickers_list, period="3mo", progress=False)['Close']
+            
+            for code in codes:
+                ticker = f"{code}.TW"
+                if ticker in data.columns:
+                    series = data[ticker].dropna()
+                    if len(series) > 10:
+                        start_p, end_p = float(series.iloc[0]), float(series.iloc[-1])
+                        ret = (end_p - start_p) / start_p
+                        vol = series.pct_change().std()
+                        stock_features.append({'Code': code, 'Name': get_stock_name(code), 'Return': ret, 'Volatility': vol})
+        except Exception as e: print(f"動態抓取失敗: {e}")
 
-        if len(df_target) < 5:
-            if target_industry != "全市場":
-                mock_df = generate_mock_data_for_industry(target_industry)
-                df_target = pd.concat([df_target, mock_df], ignore_index=True)
-            df_target = df_target.drop_duplicates(subset=['Code'], keep='first')
+        df_target = pd.DataFrame(stock_features)
 
         if len(df_target) >= 5:
             X = df_target[['Return', 'Volatility']]
@@ -356,33 +296,19 @@ def handle_message(event):
                     chosen_cluster = df_target.groupby('Cluster')['Return'].mean().idxmax()
                     potential_stocks = df_target[df_target['Cluster'] == chosen_cluster].copy()
                     top_5 = potential_stocks.sort_values('Return', ascending=False).head(5)
-
-                if len(top_5) < 5:
-                    other_stocks = df_target[df_target['Cluster'] != chosen_cluster].copy()
-                    if risk_type == "穩健":
-                        other_stocks['Score'] = other_stocks['Return'] / (other_stocks['Volatility'] + 0.0001)
-                        other_top = other_stocks.sort_values('Score', ascending=False)
-                    else:
-                        other_top = other_stocks.sort_values('Return', ascending=False)
-                    top_5 = pd.concat([top_5, other_top]).head(5)
             except: 
-                if risk_type == "穩健":
-                    df_target['Score'] = df_target['Return'] / (df_target['Volatility'] + 0.0001)
-                    top_5 = df_target.sort_values('Score', ascending=False).head(5)
-                else:
-                    top_5 = df_target.sort_values('Return', ascending=False).head(5)
-        else: 
-            if risk_type == "穩健":
-                df_target['Score'] = df_target['Return'] / (df_target['Volatility'] + 0.0001)
-                top_5 = df_target.sort_values('Score', ascending=False).head(5)
-            else:
                 top_5 = df_target.sort_values('Return', ascending=False).head(5)
+        else: 
+            if not df_target.empty: top_5 = df_target.sort_values('Return', ascending=False).head(5)
+            else: top_5 = pd.DataFrame()
+
+        if top_5.empty:
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="❌ 資料不足或抓取過於頻繁，請稍後再試。"))
+            return
 
         reply_text = f"🚀 AI 智選｜{target_industry}\n🎯 風格：{risk_type}\n\n"
-        
         emoji_list = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]
         for i, (_, row) in enumerate(top_5.iterrows()):
-            if i >= 5: break
             reply_text += f"{emoji_list[i]} {row['Name']} ({row['Code']})\n"
             reply_text += f"📈 報酬: {row['Return']*100:.1f}% ｜ ⚡ 波動: {row['Volatility']:.2f}\n\n"
             
@@ -403,45 +329,23 @@ def handle_message(event):
         if target_code:
             img_name, analysis_txt = analyze_and_predict_stock(target_code, target_name)
             if img_name and analysis_txt:
-                # 使用 request.host_url 動態抓取伺服器網址
                 img_url = f"{request.host_url}static/tmp/{img_name}".replace("http://", "https://")
-                
                 flex_content = {
                     "type": "bubble",
                     "hero": {
-                        "type": "image",
-                        "url": img_url,
-                        "size": "full",
-                        "aspectRatio": "10:6",
-                        "aspectMode": "cover",
-                        "action": {
-                            "type": "message",
-                            "label": "action",
-                            "text": f"詳細策略_{target_code}"
-                        }
+                        "type": "image", "url": img_url, "size": "full", "aspectRatio": "10:6", "aspectMode": "cover",
+                        "action": {"type": "message", "label": "action", "text": f"詳細策略_{target_code}"}
                     },
                     "body": {
-                        "type": "box",
-                        "layout": "vertical",
-                        "contents": [
-                            {
-                                "type": "text",
-                                "text": analysis_txt,
-                                "wrap": True,
-                                "size": "sm"
-                            }
-                        ]
+                        "type": "box", "layout": "vertical",
+                        "contents": [{"type": "text", "text": analysis_txt, "wrap": True, "size": "sm"}]
                     }
                 }
-                line_bot_api.reply_message(
-                    event.reply_token,
-                    FlexSendMessage(alt_text=f"{target_name} AI 分析", contents=flex_content)
-                )
-            else: line_bot_api.reply_message(event.reply_token, TextSendMessage(text="❌ 資料不足，無法分析此股票。"))
+                line_bot_api.reply_message(event.reply_token, FlexSendMessage(alt_text=f"{target_name} AI 分析", contents=flex_content))
+            else: line_bot_api.reply_message(event.reply_token, TextSendMessage(text="❌ 資料不足或查詢過於頻繁，請稍後再試。"))
         else: line_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"❌ 找不到「{msg}」，請輸入正確代碼或名稱。"))
 
-# 3. 初始化數據並啟動伺服器
-init_data()
+# 3. 啟動伺服器
 if __name__ == "__main__":
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
