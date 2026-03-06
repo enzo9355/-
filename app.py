@@ -17,8 +17,15 @@ from linebot.models import (
 )
 from sklearn.cluster import KMeans
 from sklearn.ensemble import RandomForestClassifier
+import requests
 
-# 1. 自動下載並設定中文字體
+# 建立偽裝成 Chrome 瀏覽器的 Session，避免被 Yahoo 封鎖
+yf_session = requests.Session()
+yf_session.headers.update({
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+})
+
+# 自動下載並設定中文字體
 font_path = 'taipei_sans.ttf'
 if not os.path.exists(font_path):
     print("⏳ 下載中文字體...")
@@ -28,7 +35,7 @@ fm.fontManager.addfont(font_path)
 plt.rcParams['font.family'] = fm.FontProperties(fname=font_path).get_name()
 matplotlib.use('Agg')
 
-# 2. LINE Bot 設定 (請確保 Token 與 Secret 正確)
+# LINE Bot 設定 (請確保 Token 與 Secret 正確)
 LINE_CHANNEL_ACCESS_TOKEN = 'lQyeonM1HkZGZXABONH+Xpd9atZVkppAIt5qnCZkz8D131NdHiW06EmtXXSQyJ2rc8CCbylLOBZLb+zbqvynFtkzGpp/7X0+MDLbk2FD3oMTATtUw2Kpf+PzMtpx07ofZ0vC9Do2KVYQN1Tl328otAdB04t89/1O/w1cDnyilFU='
 LINE_CHANNEL_SECRET = 'e5370d4d8f54d87f04a5cced565c1d4b'
 
@@ -70,7 +77,8 @@ def analyze_and_predict_stock(stock_code, stock_name=None):
         ticker = f"{stock_code}.TW"
         if not stock_name: stock_name = get_stock_name(stock_code)
 
-        df = yf.download(ticker, period="1y", progress=False)
+        # 加入 session 偽裝
+        df = yf.download(ticker, period="1y", progress=False, session=yf_session)
         if df.empty or len(df) < 30: return None, None
 
         df['MA_10'] = df['Close'].rolling(window=10).mean()
@@ -130,7 +138,8 @@ def analyze_and_predict_stock(stock_code, stock_name=None):
 def calculate_backtest(stock_code, stock_name=""):
     try:
         ticker = f"{stock_code}.TW"
-        df = yf.download(ticker, period="2y", progress=False)
+        # 加入 session 偽裝
+        df = yf.download(ticker, period="2y", progress=False, session=yf_session)
         if df.empty or len(df) < 100:
             return "❌ 資料不足，無法進行回測計算。"
 
@@ -209,7 +218,6 @@ if not os.path.exists(static_tmp_path): os.makedirs(static_tmp_path)
 @app.route('/static/tmp/<path:filename>')
 def serve_static(filename): return send_from_directory(static_tmp_path, filename)
 
-# 👇 UptimeRobot 專用的首頁路由
 @app.route("/")
 def home():
     return "LINE Bot 正常運作中！"
@@ -259,14 +267,14 @@ def handle_message(event):
         target_industry = parts[1]
         risk_type = parts[2] if len(parts) > 2 else "穩健"
         
-        # 動態抓取該產業股票 (避免被 Yahoo 封鎖)
         if target_industry == "全市場": codes = ['2330', '2317', '2454', '2308', '2881', '2603', '2002', '1301', '0050', '0056']
         else: codes = industry_map.get(target_industry, industry_map['熱門ETF'][:10])
 
         stock_features = []
         try:
             tickers_list = [f"{code}.TW" for code in codes]
-            data = yf.download(tickers_list, period="3mo", progress=False)['Close']
+            # 加入 session 偽裝
+            data = yf.download(tickers_list, period="3mo", progress=False, session=yf_session)['Close']
             
             for code in codes:
                 ticker = f"{code}.TW"
@@ -345,7 +353,6 @@ def handle_message(event):
             else: line_bot_api.reply_message(event.reply_token, TextSendMessage(text="❌ 資料不足或查詢過於頻繁，請稍後再試。"))
         else: line_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"❌ 找不到「{msg}」，請輸入正確代碼或名稱。"))
 
-# 3. 啟動伺服器
 if __name__ == "__main__":
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
