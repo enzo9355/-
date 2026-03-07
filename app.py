@@ -34,7 +34,6 @@ matplotlib.use('Agg')
 LINE_CHANNEL_ACCESS_TOKEN = 'lQyeonM1HkZGZXABONH+Xpd9atZVkppAIt5qnCZkz8D131NdHiW06EmtXXSQyJ2rc8CCbylLOBZLb+zbqvynFtkzGpp/7X0+MDLbk2FD3oMTATtUw2Kpf+PzMtpx07ofZ0vC9Do2KVYQN1Tl328otAdB04t89/1O/w1cDnyilFU='
 LINE_CHANNEL_SECRET = 'e5370d4d8f54d87f04a5cced565c1d4b'
 
-# 移除 ETF，保留其他產業
 industry_map = {
     "半導體業": ['2330', '2454', '2303', '3034', '3711', '3443', '2408', '3035', '3006', '3532'],
     "電腦周邊": ['2317', '2382', '3231', '2357', '2356', '2324', '6669', '2353', '2377', '2352'],
@@ -73,11 +72,10 @@ def search_stock_code(keyword):
 def get_taiwan_stock_data(stock_code, period_days):
     """透過 FinMind API 獲取台股歷史資料"""
     try:
-        # 👇 在引號裡面貼上您剛剛複製的 FinMind Token 👇
+        # 👇👇👇 請務必把下面這行換成您的 Token 👇👇👇
         finmind_token = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJkYXRlIjoiMjAyNi0wMy0wNyAyMDoyNzoxNSIsInVzZXJfaWQiOiJlbnpvOTM1NSIsImVtYWlsIjoicm9sbGluZzI5OThAZ21haWwuY29tIiwiaXAiOiIxMTguMTUwLjE3Ny4xOTEifQ.9mPnHEwZdt2LOooFPBLe_1eWWkeJ_3NVEAM64qDiYAw"
         
         start_date = (datetime.datetime.now() - datetime.timedelta(days=period_days)).strftime('%Y-%m-%d')
-        # 網址後面加上了 token 參數
         url = f"https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockPrice&data_id={stock_code}&start_date={start_date}&token={finmind_token}"
         res = requests.get(url, timeout=10)
         data = res.json()
@@ -108,7 +106,12 @@ def analyze_and_predict_stock(stock_code, stock_name=None):
         df['Future_Return'] = df['Close'].shift(-5) / df['Close'] - 1
         df['Target'] = np.where(df['Future_Return'] > 0, 1, 0)
 
+        # 🛡️ 新增保護機制：過濾掉無限大 (inf) 的髒資料
+        df.replace([np.inf, -np.inf], np.nan, inplace=True)
         train_df = df.dropna()
+        
+        if train_df.empty: return None, None
+
         features = ['MA_10', 'MA_20', 'Volatility', 'Momentum']
         X = train_df[features]
         y = train_df['Target']
@@ -168,7 +171,12 @@ def calculate_backtest(stock_code, stock_name=""):
         df['Next_Return'] = df['Close'].shift(-1) / df['Close'] - 1
         df['Target'] = np.where(df['Next_Return'] > 0, 1, 0)
         
+        # 🛡️ 新增保護機制：過濾掉無限大 (inf) 的髒資料
+        df.replace([np.inf, -np.inf], np.nan, inplace=True)
         df = df.dropna()
+        
+        if len(df) < 50: return "❌ 有效資料不足，無法回測。"
+        
         split_idx = int(len(df) * 0.8)
         train_df = df.iloc[:split_idx]
         test_df = df.iloc[split_idx:].copy()
@@ -264,8 +272,6 @@ def handle_message(event):
         items = [QuickReplyButton(action=MessageAction(label="全市場", text="選產業_全市場"))]
         for industry in industry_map.keys():
             items.append(QuickReplyButton(action=MessageAction(label=industry[:20], text=f"選產業_{industry}")))
-        
-        # 新增大盤預測按鈕
         items.append(QuickReplyButton(action=MessageAction(label="📊 台股大盤預測", text="大盤預測")))
 
         line_bot_api.reply_message(
@@ -273,7 +279,6 @@ def handle_message(event):
             TextSendMessage(text="請選擇想分析的產業類別：👇", quick_reply=QuickReply(items=items))
         )
 
-    # 處理大盤專屬通道
     elif msg == "大盤預測":
         img_name, analysis_txt = analyze_and_predict_stock("TAIEX", "台股加權指數(大盤)")
         if img_name and analysis_txt:
@@ -323,9 +328,14 @@ def handle_message(event):
                     vol = series.pct_change().std()
                     stock_features.append({'Code': code, 'Name': get_stock_name(code), 'Return': ret, 'Volatility': vol})
             except Exception as e:
-                print(f"動態抓取失敗 {code}: {e}")
+                pass # 略過個別異常股票
 
         df_target = pd.DataFrame(stock_features)
+
+        if not df_target.empty:
+            # 🛡️ 新增保護機制：過濾掉無限大 (inf) 的髒資料
+            df_target.replace([np.inf, -np.inf], np.nan, inplace=True)
+            df_target.dropna(inplace=True)
 
         if len(df_target) >= 5:
             X = df_target[['Return', 'Volatility']]
@@ -394,5 +404,3 @@ def handle_message(event):
 if __name__ == "__main__":
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
-
-
