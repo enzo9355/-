@@ -14,24 +14,25 @@ from linebot.models import (
     MessageEvent, TextMessage, TextSendMessage, ImageSendMessage,
     QuickReply, QuickReplyButton, MessageAction, FlexSendMessage
 )
-from sklearn.cluster import KMeans
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.preprocessing import StandardScaler
+from lightgbm import LGBMClassifier
 import requests
 import datetime
 
 # ==========================================
-# 1. 核心設定與字體下載
+# 1. 核心設定與字體
 # ==========================================
 font_path = 'taipei_sans.ttf'
 if not os.path.exists(font_path):
     urllib.request.urlretrieve("https://github.com/googlefonts/noto-cjk/raw/main/Sans/OTF/TraditionalChinese/NotoSansCJKtc-Regular.otf", font_path)
-
 fm.fontManager.addfont(font_path)
 plt.rcParams['font.family'] = fm.FontProperties(fname=font_path).get_name()
 matplotlib.use('Agg')
 
-LINE_CHANNEL_ACCESS_TOKEN = 'lQyeonM1HkZGZXABONH+Xpd9atZVkppAIt5qnCZkz8D131NdHiW06EmtXXSQyJ2rc8CCbylLOBZLb+zbqvynFtkzGpp/7X0+MDLbk2FD3oMTATtUw2Kpf+PzMtpx07ofZ0vC9Do2KVYQN1Tl328otAdB04t89/1O/w1cDnyilFU='
-LINE_CHANNEL_SECRET = 'e5370d4d8f54d87f04a5cced565c1d4b'
+# 🛡️ 安全升級：從環境變數讀取金鑰，不寫死在程式碼中
+LINE_CHANNEL_ACCESS_TOKEN = os.getenv('LINE_CHANNEL_ACCESS_TOKEN')
+LINE_CHANNEL_SECRET = os.getenv('LINE_CHANNEL_SECRET')
+FINMIND_TOKEN = os.getenv('FINMIND_TOKEN')
 
 industry_map = {
     "半導體業": ['2330', '2454', '2303', '3034', '3711', '3443', '2408', '3035', '3006', '3532'],
@@ -45,12 +46,28 @@ industry_map = {
     "塑膠化學": ['1301', '1303', '6505', '1326', '1304', '1308', '1312', '1310', '1313', '4739']
 }
 
-all_watch_list = []
-for stocks in industry_map.values():
-    all_watch_list.extend(stocks)
+all_watch_list = [stock for stocks in industry_map.values() for stock in stocks]
+
+app = Flask(__name__)
+line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
+handler = WebhookHandler(LINE_CHANNEL_SECRET)
+
+static_tmp_path = 'static/tmp'
+os.makedirs(static_tmp_path, exist_ok=True)
+
+# 🧹 系統大掃除：防止圖片塞爆伺服器
+def cleanup_images():
+    try:
+        files = [os.path.join(static_tmp_path, f) for f in os.listdir(static_tmp_path) if f.endswith('.png')]
+        if len(files) > 100:
+            files.sort(key=os.path.getmtime)
+            for f in files[:50]:
+                os.remove(f)
+    except Exception as e:
+        print(f"清理圖片失敗: {e}")
 
 # ==========================================
-# 2. 資料獲取與處理 (FinMind API)
+# 2. 資料獲取與特徵工程 (OHLCV版)
 # ==========================================
 def get_stock_name(stock_code):
     try:
@@ -68,191 +85,220 @@ def search_stock_code(keyword):
             if len(code) <= 6: return code, info.name
     return None, None
 
-def get_taiwan_stock_data(stock_code, period_days):
+def get_taiwan_stock_data(stock_code, period_days=730):
     try:
-        finmind_token = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJkYXRlIjoiMjAyNi0wMy0wNyAyMDoyNzoxNSIsInVzZXJfaWQiOiJlbnpvOTM1NSIsImVtYWlsIjoicm9sbGluZzI5OThAZ21haWwuY29tIiwiaXAiOiIxMTguMTUwLjE3Ny4xOTEifQ.9mPnHEwZdt2LOooFPBLe_1eWWkeJ_3NVEAM64qDiYAw"
-        
         start_date = (datetime.datetime.now() - datetime.timedelta(days=period_days)).strftime('%Y-%m-%d')
-        url = f"https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockPrice&data_id={stock_code}&start_date={start_date}&token={finmind_token}"
+        url = f"https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockPrice&data_id={stock_code}&start_date={start_date}&token={FINMIND_TOKEN}"
         res = requests.get(url, timeout=10)
         data = res.json()
-        
         if data.get("msg") == "success" and len(data.get("data", [])) > 0:
             df = pd.DataFrame(data["data"])
-            df = df.rename(columns={'close': 'Close', 'date': 'Date'})
+            df = df.rename(columns={'date': 'Date', 'open': 'Open', 'max': 'High', 'min': 'Low', 'close': 'Close', 'volume': 'Volume'})
             df['Date'] = pd.to_datetime(df['Date'])
             df.set_index('Date', inplace=True)
-            df['Close'] = pd.to_numeric(df['Close'], errors='coerce')
-            return df[['Close']].dropna()
+            for col in ['Open', 'High', 'Low', 'Close', 'Volume']: 
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+            return df[['Open', 'High', 'Low', 'Close', 'Volume']].dropna()
     except Exception as e:
-        print(f"FinMind API 抓取失敗 ({stock_code}): {e}")
+        print(f"FinMind 抓取失敗 ({stock_code}): {e}")
     return pd.DataFrame()
 
 def add_advanced_features(df):
-    df['MA_10'] = df['Close'].rolling(window=10).mean()
-    df['MA_20'] = df['Close'].rolling(window=20).mean()
-    df['Volatility'] = df['Close'].rolling(window=10).std()
-    df['Momentum'] = df['Close'].pct_change(periods=5)
+    if len(df) < 60: return df
     
+    # 均線與動能
+    df['MA_5'] = df['Close'].rolling(5).mean()
+    df['MA_10'] = df['Close'].rolling(10).mean()
+    df['MA_20'] = df['Close'].rolling(20).mean()
+    df['MA_60'] = df['Close'].rolling(60).mean()
+    df['RET_1'] = df['Close'].pct_change()
+    df['RET_5'] = df['Close'].pct_change(5)
+    df['Volatility'] = df['RET_1'].rolling(20).std()
+    
+    # RSI
     delta = df['Close'].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+    gain = delta.clip(lower=0).rolling(14).mean()
+    loss = -delta.clip(upper=0).rolling(14).mean()
     rs = gain / (loss + 1e-9)
     df['RSI_14'] = 100 - (100 / (1 + rs))
     
+    # MACD
     exp1 = df['Close'].ewm(span=12, adjust=False).mean()
     exp2 = df['Close'].ewm(span=26, adjust=False).mean()
     df['MACD'] = exp1 - exp2
     df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
     
-    return df
+    # 成交量與相對強度
+    df['Volume_MA20'] = df['Volume'].rolling(20).mean()
+    df['OBV'] = (np.sign(df['Close'].diff()) * df['Volume']).cumsum()
+    df['RS_60'] = df['Close'] / df['Close'].rolling(60).mean()
+    
+    # 真實 ATR (利用高低價)
+    tr = np.maximum(df['High'] - df['Low'], 
+         np.maximum(abs(df['High'] - df['Close'].shift()), 
+                    abs(df['Low'] - df['Close'].shift())))
+    df['ATR_14'] = tr.rolling(14).mean()
+    
+    df.replace([np.inf, -np.inf], np.nan, inplace=True)
+    return df.dropna()
 
+FEATURES = ['MA_5', 'MA_10', 'MA_20', 'MA_60', 'RET_1', 'RET_5', 'Volatility', 
+            'RSI_14', 'MACD', 'MACD_Signal', 'Volume_MA20', 'OBV', 'RS_60', 'ATR_14']
+
+# ==========================================
+# 3. 預測函數 (LGBM + StandardScaler)
+# ==========================================
 def analyze_and_predict_stock(stock_code, stock_name=None):
     try:
         if not stock_name: stock_name = get_stock_name(stock_code)
-
-        df = get_taiwan_stock_data(stock_code, 365)
-        if df.empty or len(df) < 30: return None, None
-
-        df = add_advanced_features(df)
+        df = get_taiwan_stock_data(stock_code, 730)
+        if df.empty or len(df) < 100: return None, None
         
-        df['Future_Return'] = df['Close'].shift(-5) / df['Close'] - 1
-        df['Target'] = np.where(df['Future_Return'] > 0, 1, 0)
-
-        df.replace([np.inf, -np.inf], np.nan, inplace=True)
-        train_df = df.dropna()
-        if train_df.empty: return None, None
-
-        features = ['MA_10', 'MA_20', 'Volatility', 'Momentum', 'RSI_14', 'MACD', 'MACD_Signal']
-        X = train_df[features]
+        df = add_advanced_features(df)
+        if len(df) < 60: return None, None
+        
+        df['Target'] = (df['Close'].shift(-1) > df['Close']).astype(int)
+        df = df.dropna()
+        if len(df) < 50: return None, None
+        
+        train_df = df.iloc[:-1]
+        latest_features = df[FEATURES].iloc[-1:]
+        
+        X = train_df[FEATURES]
         y = train_df['Target']
-
-        rf_model = RandomForestClassifier(n_estimators=100, max_depth=5, random_state=42)
-        rf_model.fit(X, y)
-
-        latest_features = df[features].iloc[-1].values.reshape(1, -1)
-        up_probability = rf_model.predict_proba(latest_features)[0][1] * 100
-
+        
+        # 👑 特徵縮放與 LightGBM 訓練
+        scaler = StandardScaler()
+        X_scaled = scaler.fit_transform(X)
+        
+        model = LGBMClassifier(n_estimators=150, learning_rate=0.05, max_depth=6, random_state=42, verbose=-1)
+        model.fit(X_scaled, y)
+        
+        latest_scaled = scaler.transform(latest_features)
+        up_prob = model.predict_proba(latest_scaled)[0][1] * 100
+        
+        cleanup_images() # 存圖前先打掃
+        
         plt.figure(figsize=(10, 6))
         plt.plot(df.index[-60:], df['Close'].iloc[-60:], label='收盤價', color='black', linewidth=2)
-        plt.plot(df.index[-60:], df['MA_10'].iloc[-60:], label='10日線', color='blue', linestyle='--')
-        plt.plot(df.index[-60:], df['MA_20'].iloc[-60:], label='20日線(月線)', color='red', linestyle='-.')
-        plt.title(f'{stock_code} {stock_name} - AI 預測模型', fontsize=16)
+        plt.plot(df.index[-60:], df['MA_10'].iloc[-60:], label='10日均線', color='blue', linestyle='--')
+        plt.plot(df.index[-60:], df['MA_20'].iloc[-60:], label='20日均線', color='red', linestyle='-.')
+        plt.title(f'{stock_code} {stock_name} - LGBM 預測', fontsize=16)
         plt.xlabel('日期', fontsize=12)
         plt.ylabel('價格', fontsize=12)
         plt.legend(prop={'size': 12})
         plt.grid(True, alpha=0.3)
-
+        
         filename = f"{stock_code}_{int(time.time())}.png"
         filepath = os.path.join(static_tmp_path, filename)
-        plt.savefig(filepath, dpi=100)
+        plt.savefig(filepath, dpi=100, bbox_inches='tight')
         plt.close()
-
+        
         current_price = float(df['Close'].iloc[-1])
         ma20 = float(df['MA_20'].iloc[-1])
-        current_rsi = float(df['RSI_14'].iloc[-1])
+        rsi = float(df['RSI_14'].iloc[-1])
         
-        if up_probability > 60: pred_msg = f"強勢看漲 📈 ({up_probability:.1f}%)"
-        elif up_probability < 40: pred_msg = f"弱勢看跌 📉 ({100-up_probability:.1f}%)"
-        else: pred_msg = f"震盪整理 ⚖️ ({up_probability:.1f}%)"
-
+        if up_prob > 60: pred_msg = f"強勢看漲 📈 ({up_prob:.1f}%)"
+        elif up_prob < 40: pred_msg = f"偏向看跌 📉 ({up_prob:.1f}%)"
+        else: pred_msg = f"中性震盪 ⚖️ ({up_prob:.1f}%)"
+        
         analysis_text = (
             f"📊 {stock_name} ({stock_code})\n\n"
-            f"💰 收盤價：{current_price:.2f}\n"
-            f"🌊 月線值：{ma20:.2f}\n"
-            f"🌡️ RSI(14)：{current_rsi:.1f}\n"
-            f"⚡ 狀態：{'多頭趨勢' if current_price > ma20 else '空頭趨勢'}\n\n"
-            f"🤖 5日預測：{pred_msg}\n\n"
-            f"👆 點擊上方圖表，查看進階策略"
+            f"💰 最新收盤：{current_price:.2f}\n"
+            f"🌊 20日均線：{ma20:.2f}\n"
+            f"🌡️ RSI(14)：{rsi:.1f}\n"
+            f"趨勢：{'多頭' if current_price > ma20 else '空頭'}\n\n"
+            f"🤖 AI 上漲機率：{pred_msg}\n\n"
+            f"📌 點擊上方圖表查看詳細策略回測"
         )
         return filename, analysis_text
-    except Exception as e: 
-        print(f"分析失敗: {e}")
+        
+    except Exception as e:
+        print(f"分析失敗 {stock_code}: {e}")
         return None, None
 
+# ==========================================
+# 4. 回測 (LGBM Walk-Forward)
+# ==========================================
 def calculate_backtest(stock_code, stock_name=""):
     try:
         df = get_taiwan_stock_data(stock_code, 730)
-        if df.empty or len(df) < 100:
-            return "❌ 資料不足，無法進行回測計算。"
-
+        if len(df) < 200: return "❌ 資料不足，無法回測。"
+        
         df = add_advanced_features(df)
-        
-        df['Next_Return'] = df['Close'].shift(-1) / df['Close'] - 1
-        df['Target'] = np.where(df['Next_Return'] > 0, 1, 0)
-        
-        df.replace([np.inf, -np.inf], np.nan, inplace=True)
+        df['Target'] = (df['Close'].shift(-1) > df['Close']).astype(int)
         df = df.dropna()
-        if len(df) < 50: return "❌ 有效資料不足，無法回測。"
+        if len(df) < 100: return "❌ 有效資料太少。"
         
-        split_idx = int(len(df) * 0.8)
-        train_df = df.iloc[:split_idx]
-        test_df = df.iloc[split_idx:].copy()
+        signals = []
+        actual_returns = []
         
-        features = ['MA_10', 'MA_20', 'Volatility', 'Momentum', 'RSI_14', 'MACD', 'MACD_Signal']
-        X_train, y_train = train_df[features], train_df['Target']
-        X_test = test_df[features]
+        # 為了保持 LINE 回應速度，Backtest 迴圈模型參數調輕量
+        model = LGBMClassifier(n_estimators=50, max_depth=4, random_state=42, verbose=-1)
+        scaler = StandardScaler()
         
-        rf_model = RandomForestClassifier(n_estimators=100, max_depth=5, random_state=42)
-        rf_model.fit(X_train, y_train)
+        for i in range(100, len(df)-1):
+            train = df.iloc[:i]
+            test = df.iloc[i:i+1]
+            
+            X_train_scaled = scaler.fit_transform(train[FEATURES])
+            model.fit(X_train_scaled, train['Target'])
+            
+            X_test_scaled = scaler.transform(test[FEATURES])
+            prob = model.predict_proba(X_test_scaled)[0][1]
+            
+            signal = 1 if prob > 0.60 else 0
+            next_return = df['Close'].iloc[i+1] / df['Close'].iloc[i] - 1
+            
+            signals.append(signal)
+            actual_returns.append(next_return if signal else 0)
         
-        test_df['Prob'] = rf_model.predict_proba(X_test)[:, 1]
-        test_df['Signal'] = np.where(test_df['Prob'] > 0.55, 1, 0)
+        if not signals: return "❌ 回測期間無訊號。"
         
-        test_df['Strategy_Return'] = test_df['Signal'] * test_df['Next_Return']
-        test_df['B&H_Return'] = test_df['Next_Return']
+        strategy_ret = np.array(actual_returns)
+        bh_cum = (df['Close'].iloc[-1] / df['Close'].iloc[99]) - 1
+        strat_cum = (1 + strategy_ret).cumprod()[-1] - 1
         
-        strategy_cum = (1 + test_df['Strategy_Return']).cumprod().iloc[-1] - 1
-        bnh_cum = (1 + test_df['B&H_Return']).cumprod().iloc[-1] - 1
-        
-        trades = test_df[test_df['Signal'] == 1]
-        win_rate = (trades['Strategy_Return'] > 0).mean() * 100 if len(trades) > 0 else 0
-        
-        roll_max = (1 + test_df['Strategy_Return']).cumprod().cummax()
-        drawdown = (1 + test_df['Strategy_Return']).cumprod() / roll_max - 1
+        win_rate = (strategy_ret > 0).mean() * 100 if len(strategy_ret[strategy_ret != 0]) > 0 else 0
+        roll_max = (1 + strategy_ret).cumprod().cummax()
+        drawdown = (1 + strategy_ret).cumprod() / roll_max - 1
         mdd = drawdown.min() * 100
         
-        std_dev = test_df['Strategy_Return'].std()
-        sharpe = (test_df['Strategy_Return'].mean() / std_dev) * np.sqrt(252) if std_dev != 0 else 0
-        test_days = len(test_df)
+        std_dev = strategy_ret.std()
+        sharpe = (strategy_ret.mean() / std_dev) * np.sqrt(252) if std_dev != 0 else 0
         
-        if len(trades) == 0:
-            conclusion = "⏸️ 訊號空窗：這段期間 AI 沒有發現勝率夠高的進場點，選擇空手觀望。\n🛒 買入建議：目前缺乏明確多頭動能，建議資金先停泊或尋找其他標的。\n💰 賣出建議：若已持有，請嚴守個人的停損停利點。"
-        elif strategy_cum > bnh_cum:
-            if sharpe > 1: conclusion = "✅ 策略優勢：AI 準確抓到波段，不僅創造超額報酬，且波動風險控制得宜。\n🛒 買入建議：屬於模型擅長判讀的優質標的。若最新預測看漲可伺機進場。\n💰 賣出建議：嚴格跟隨 AI 轉弱訊號，預測轉跌時果斷停利。"
-            else: conclusion = "✅ 擊敗單純持有：長期能創造超額報酬，但過程資金震盪幅度較大。\n🛒 買入建議：可進場，但基於風險考量，務必分批佈局以攤平波動成本。\n💰 賣出建議：見好就收，若已達獲利目標可考慮先減碼一半。"
+        if sum(signals) == 0:
+            conclusion = "⏸️ 訊號空窗：模型未發現高勝率進場點，選擇空手觀望。\n🛒 買入建議：缺乏多頭動能，建議資金先停泊。\n💰 賣出建議：若已持有，請嚴守個人停損。"
+        elif strat_cum > bh_cum:
+            if sharpe > 1: conclusion = "✅ 策略優勢：LGBM 精準抓到波段，高報酬且風險控制優異。\n🛒 買入建議：屬於模型極度擅長的標的，若預測看漲可進場。\n💰 賣出建議：預測轉跌時果斷停利。"
+            else: conclusion = "✅ 擊敗大盤：能創造超額報酬，但過程資金震盪幅度較大。\n🛒 買入建議：可進場，但務必分批佈局攤平波動。\n💰 賣出建議：見好就收，適時減碼。"
         else:
-            if mdd > -15: conclusion = "🛡️ 下檔保護：雖然總獲利輸給大盤基準，但在大跌時發揮了良好的避險抗跌作用。\n🛒 買入建議：適合偏好低風險、防禦型資產配置的部位。\n💰 賣出建議：若不想資金長期閒置，可考慮轉換至動能更強的標的。"
-            else: conclusion = "⚠️ 模型失真：AI 策略在這檔股票上容易追高殺低，產生無謂的摩擦成本。\n🛒 買入建議：請避開。此標的走勢不符合目前模型的運算邏輯。\n💰 賣出建議：回歸基本技術面判斷，跌破重要支撐（如月線）請立即停損。"
-
+            if mdd > -15: conclusion = "🛡️ 下檔保護：總獲利雖輸給死抱不放，但大跌時有發揮避險作用。\n🛒 買入建議：適合防禦型配置。\n💰 賣出建議：不想資金閒置可轉換至強勢股。"
+            else: conclusion = "⚠️ 模型失真：模型在此標的容易追高殺低。\n🛒 買入建議：請避開，不符合模型邏輯。\n💰 賣出建議：回歸均線判斷，跌破請停損。"
+        
         res_text = (
-            f"📑 {stock_name} ({stock_code}) 策略回測報告\n"
-            f"⏳ 測試區間：近 {test_days} 個交易日\n\n"
+            f"📑 {stock_name} ({stock_code}) LGBM 回測報告\n"
+            f"⏳ 測試區間：近 {len(signals)} 個交易日\n\n"
             f"📊 歷史績效\n"
-            f"🤖 AI 策略報酬：{strategy_cum*100:.2f}% (依訊號進出)\n"
-            f"📈 買進持有報酬：{bnh_cum*100:.2f}% (死抱不放)\n\n"
+            f"🤖 AI 策略報酬：{strat_cum*100:.2f}%\n"
+            f"📈 買進持有報酬：{bh_cum*100:.2f}%\n\n"
             f"🛡️ 風險與穩定度\n"
             f"🎯 進場勝率：{win_rate:.1f}%\n"
-            f"⚠️ 最大回檔：{mdd:.2f}% (最差情況的資金縮水幅度)\n"
-            f"⚖️ 夏普值：{sharpe:.2f} (承受每單位風險換取的超額報酬)\n\n"
+            f"⚠️ 最大回檔：{mdd:.2f}%\n"
+            f"⚖️ 夏普值：{sharpe:.2f}\n\n"
             f"💡 資產管理評估：\n{conclusion}"
         )
         return res_text
+        
     except Exception as e:
-        return "❌ 回測計算發生錯誤，請確認資料是否齊全。"
+        return f"❌ 回測錯誤：{str(e)}"
 
 # ==========================================
-# 3. Flask 伺服器與 LINE Webhook 路由
+# 5. LINE Bot 路由
 # ==========================================
-app = Flask(__name__)
-line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
-handler = WebhookHandler(LINE_CHANNEL_SECRET)
-
-static_tmp_path = 'static/tmp'
-if not os.path.exists(static_tmp_path): os.makedirs(static_tmp_path)
-
-@app.route('/static/tmp/<path:filename>')
-def serve_static(filename): return send_from_directory(static_tmp_path, filename)
+@app.route("/static/tmp/<path:filename>")
+def serve_static(filename):
+    return send_from_directory(static_tmp_path, filename)
 
 @app.route("/")
 def home():
@@ -269,146 +315,74 @@ def callback():
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     msg = event.message.text.strip()
-
+    
     if msg == "教學":
-        reply_text = "🔍 個股查詢教學\n\n直接在聊天框輸入：\n👉 股票代碼（例：2330）\n👉 股票名稱（例：台積電）\n\n系統將自動產出 AI 技術線圖與漲跌預測！"
+        reply_text = "🔍 個股查詢教學\n\n直接輸入：\n👉 股票代碼（例：2330）\n👉 股票名稱（例：台積電）\n\n系統將使用 LightGBM 產出分析與預測！"
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
-
+        return
     elif msg == "免責聲明":
-        reply_text = "⚠️ 免責聲明\n\n本系統數據僅供學術研究與程式開發交流。\n模型歷史勝率不代表未來績效，不構成買賣建議。投資一定有風險，下單前請自行評估並嚴設停損。"
+        reply_text = "⚠️ 免責聲明\n\n數據僅供程式開發交流。歷史勝率不代表未來績效，不構成買賣建議。請自行評估風險。"
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
-
+        return
     elif msg == "預測":
         items = [QuickReplyButton(action=MessageAction(label="全市場", text="選產業_全市場"))]
         for industry in industry_map.keys():
             items.append(QuickReplyButton(action=MessageAction(label=industry[:20], text=f"選產業_{industry}")))
         items.append(QuickReplyButton(action=MessageAction(label="📊 台股大盤預測", text="大盤預測")))
-
         line_bot_api.reply_message(
             event.reply_token,
-            TextSendMessage(text="請選擇想分析的產業類別：👇", quick_reply=QuickReply(items=items))
+            TextSendMessage(text="請選擇產業類別：👇", quick_reply=QuickReply(items=items))
         )
-
+        return
     elif msg == "大盤預測":
         img_name, analysis_txt = analyze_and_predict_stock("TAIEX", "台股加權指數(大盤)")
         if img_name and analysis_txt:
             img_url = f"{request.host_url}static/tmp/{img_name}".replace("http://", "https://")
             flex_content = {
                 "type": "bubble",
-                "hero": {
-                    "type": "image", "url": img_url, "size": "full", "aspectRatio": "10:6", "aspectMode": "cover",
-                    "action": {"type": "message", "label": "action", "text": "詳細策略_TAIEX"}
-                },
-                "body": {
-                    "type": "box", "layout": "vertical",
-                    "contents": [{"type": "text", "text": analysis_txt, "wrap": True, "size": "sm"}]
-                }
+                "hero": {"type": "image", "url": img_url, "size": "full", "aspectRatio": "10:6", "aspectMode": "cover",
+                         "action": {"type": "message", "label": "action", "text": "詳細策略_TAIEX"}},
+                "body": {"type": "box", "layout": "vertical",
+                         "contents": [{"type": "text", "text": analysis_txt, "wrap": True, "size": "sm"}]}
             }
-            line_bot_api.reply_message(event.reply_token, FlexSendMessage(alt_text="台股大盤預測", contents=flex_content))
-        else: 
-            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="❌ 大盤資料獲取失敗，請稍後再試。"))
-
+            line_bot_api.reply_message(event.reply_token, FlexSendMessage(alt_text="大盤預測", contents=flex_content))
+        else:
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="❌ 資料獲取失敗，請稍後再試。"))
+        return
     elif msg.startswith("選產業_"):
         target_industry = msg.split("_")[1]
-        items = [
-            QuickReplyButton(action=MessageAction(label="🛡️ 穩健 (重風險控管)", text=f"分析_{target_industry}_穩健")),
-            QuickReplyButton(action=MessageAction(label="⚔️ 激進 (追高報酬)", text=f"分析_{target_industry}_激進"))
-        ]
         line_bot_api.reply_message(
             event.reply_token,
-            TextSendMessage(text=f"已鎖定【{target_industry}】\n\n請選擇您的「風險偏好」：", quick_reply=QuickReply(items=items))
+            TextSendMessage(text=f"已鎖定【{target_industry}】，因演算法升級需消耗大量算力，全產業群體掃描功能暫時維護中，請直接輸入「個股代碼」查詢！")
         )
-
-    elif msg.startswith("分析_"):
-        parts = msg.split("_")
-        target_industry = parts[1]
-        risk_type = parts[2] if len(parts) > 2 else "穩健"
-        
-        if target_industry == "全市場": codes = ['2330', '2317', '2454', '2308', '2881', '2603', '2002', '1301', '0050', '0056']
-        else: codes = industry_map.get(target_industry, [])
-
-        stock_features = []
-        for code in codes:
-            try:
-                df_hist = get_taiwan_stock_data(code, 90)
-                if not df_hist.empty and len(df_hist) > 10:
-                    series = df_hist['Close']
-                    start_p, end_p = float(series.iloc[0]), float(series.iloc[-1])
-                    ret = (end_p - start_p) / start_p
-                    vol = series.pct_change().std()
-                    stock_features.append({'Code': code, 'Name': get_stock_name(code), 'Return': ret, 'Volatility': vol})
-            except Exception as e:
-                pass
-
-        df_target = pd.DataFrame(stock_features)
-
-        if not df_target.empty:
-            df_target.replace([np.inf, -np.inf], np.nan, inplace=True)
-            df_target.dropna(inplace=True)
-
-        if len(df_target) >= 5:
-            X = df_target[['Return', 'Volatility']]
-            try:
-                kmeans = KMeans(n_clusters=2, random_state=42, n_init=10)
-                df_target['Cluster'] = kmeans.fit_predict(X)
-                
-                if risk_type == "穩健":
-                    chosen_cluster = df_target.groupby('Cluster')['Volatility'].mean().idxmin()
-                    potential_stocks = df_target[df_target['Cluster'] == chosen_cluster].copy()
-                    potential_stocks['Score'] = potential_stocks['Return'] / (potential_stocks['Volatility'] + 0.0001)
-                    top_5 = potential_stocks.sort_values('Score', ascending=False).head(5)
-                else:
-                    chosen_cluster = df_target.groupby('Cluster')['Return'].mean().idxmax()
-                    potential_stocks = df_target[df_target['Cluster'] == chosen_cluster].copy()
-                    top_5 = potential_stocks.sort_values('Return', ascending=False).head(5)
-            except: 
-                top_5 = df_target.sort_values('Return', ascending=False).head(5)
-        else: 
-            if not df_target.empty: top_5 = df_target.sort_values('Return', ascending=False).head(5)
-            else: top_5 = pd.DataFrame()
-
-        if top_5.empty:
-            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="❌ 資料不足或抓取過於頻繁，請稍後再試。"))
-            return
-
-        reply_text = f"🚀 AI 智選｜{target_industry}\n🎯 風格：{risk_type}\n\n"
-        emoji_list = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]
-        for i, (_, row) in enumerate(top_5.iterrows()):
-            reply_text += f"{emoji_list[i]} {row['Name']} ({row['Code']})\n"
-            reply_text += f"📈 報酬: {row['Return']*100:.1f}% ｜ ⚡ 波動: {row['Volatility']:.2f}\n\n"
-            
-        reply_text += "💡 提示：輸入股票代碼即可查看預測圖表！"
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
-
+        return
     elif msg.startswith("詳細策略_"):
         stock_code = msg.split("_")[1]
         stock_name = "台股加權指數(大盤)" if stock_code == "TAIEX" else get_stock_name(stock_code)
         backtest_report = calculate_backtest(stock_code, stock_name)
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=backtest_report))
-
+        return
+    
+    target_code, target_name = None, None
+    if msg.isdigit() and 4 <= len(msg) <= 6: target_code = msg
+    else: target_code, target_name = search_stock_code(msg)
+    
+    if target_code:
+        img_name, analysis_txt = analyze_and_predict_stock(target_code, target_name)
+        if img_name and analysis_txt:
+            img_url = f"{request.host_url}static/tmp/{img_name}".replace("http://", "https://")
+            flex_content = {
+                "type": "bubble",
+                "hero": {"type": "image", "url": img_url, "size": "full", "aspectRatio": "10:6", "aspectMode": "cover",
+                         "action": {"type": "message", "label": "詳細回測", "text": f"詳細策略_{target_code}"}},
+                "body": {"type": "box", "layout": "vertical",
+                         "contents": [{"type": "text", "text": analysis_txt, "wrap": True, "size": "sm"}]}
+            }
+            line_bot_api.reply_message(event.reply_token, FlexSendMessage(alt_text=f"{target_name} 分析", contents=flex_content))
+        else:
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="❌ 資料不足，無法分析"))
     else:
-        target_code, target_name = None, None
-        if msg.isdigit() and 4 <= len(msg) <= 6: target_code = msg
-        else: target_code, target_name = search_stock_code(msg)
-
-        if target_code:
-            img_name, analysis_txt = analyze_and_predict_stock(target_code, target_name)
-            if img_name and analysis_txt:
-                img_url = f"{request.host_url}static/tmp/{img_name}".replace("http://", "https://")
-                flex_content = {
-                    "type": "bubble",
-                    "hero": {
-                        "type": "image", "url": img_url, "size": "full", "aspectRatio": "10:6", "aspectMode": "cover",
-                        "action": {"type": "message", "label": "action", "text": f"詳細策略_{target_code}"}
-                    },
-                    "body": {
-                        "type": "box", "layout": "vertical",
-                        "contents": [{"type": "text", "text": analysis_txt, "wrap": True, "size": "sm"}]
-                    }
-                }
-                line_bot_api.reply_message(event.reply_token, FlexSendMessage(alt_text=f"{target_name} AI 分析", contents=flex_content))
-            else: line_bot_api.reply_message(event.reply_token, TextSendMessage(text="❌ 資料不足，無法分析此股票。"))
-        else: line_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"❌ 找不到「{msg}」，請輸入正確代碼或名稱。"))
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"找不到「{msg}」，請輸入正確代碼或名稱"))
 
 if __name__ == "__main__":
     port = int(os.environ.get('PORT', 5000))
