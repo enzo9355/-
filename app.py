@@ -239,7 +239,7 @@ def analyze_and_predict_stock(stock_code, stock_name=None):
         return None, None
 
 # ==========================================
-# 4. 回測 (高速切割版，防逾時)
+# 4. 回測 (底層純 Numpy 數學版，絕對防呆)
 # ==========================================
 def calculate_backtest(stock_code, stock_name=""):
     try:
@@ -251,7 +251,6 @@ def calculate_backtest(stock_code, stock_name=""):
         df = df.dropna()
         if len(df) < 100: return "❌ 有效資料太少。"
         
-        # 🚀 提速修改：改用 80/20 切割，秒速運算取代緩慢的每日迴圈
         split_idx = int(len(df) * 0.8)
         train_df = df.iloc[:split_idx]
         test_df = df.iloc[split_idx:].copy()
@@ -266,24 +265,29 @@ def calculate_backtest(stock_code, stock_name=""):
         test_df['Signal'] = np.where(test_df['Prob'] > 0.60, 1, 0)
         
         test_df['Next_Return'] = test_df['Close'].shift(-1) / test_df['Close'] - 1
-        test_df = test_df.dropna() # 去掉最後一筆算不出未來報酬的資料
+        test_df = test_df.dropna()
         
         test_df['Strategy_Return'] = test_df['Signal'] * test_df['Next_Return']
         
-        signals = test_df['Signal'].values
+        # 🚀 終極修復：強制轉成純粹的 Numpy 陣列進行最底層的數學運算，保證不會崩潰
         strategy_ret = test_df['Strategy_Return'].values
         bh_ret = test_df['Next_Return'].values
+        signals = test_df['Signal'].values
         
-        if len(signals) == 0: return "❌ 回測期間無訊號。"
+        if len(signals) == 0 or len(strategy_ret) == 0: 
+            return "❌ 回測期間無有效資料。"
         
-        strat_cum = (1 + strategy_ret).cumprod()[-1] - 1
-        bh_cum = (1 + bh_ret).cumprod()[-1] - 1
+        # 數學計算 (純 Numpy)
+        strat_cum = np.cumprod(1 + strategy_ret)[-1] - 1
+        bh_cum = np.cumprod(1 + bh_ret)[-1] - 1
         
         trades = strategy_ret[signals == 1]
         win_rate = (trades > 0).mean() * 100 if len(trades) > 0 else 0
         
-        roll_max = (1 + strategy_ret).cumprod().cummax()
-        drawdown = (1 + strategy_ret).cumprod() / roll_max - 1
+        # 最大回檔計算 (Numpy 防呆寫法)
+        cum_ret = np.cumprod(1 + strategy_ret)
+        roll_max = np.maximum.accumulate(cum_ret)
+        drawdown = cum_ret / roll_max - 1
         mdd = drawdown.min() * 100
         
         std_dev = strategy_ret.std()
