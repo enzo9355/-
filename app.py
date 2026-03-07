@@ -24,7 +24,6 @@ import datetime
 # ==========================================
 font_path = 'taipei_sans.ttf'
 if not os.path.exists(font_path):
-    print("⏳ 下載中文字體...")
     urllib.request.urlretrieve("https://github.com/googlefonts/noto-cjk/raw/main/Sans/OTF/TraditionalChinese/NotoSansCJKtc-Regular.otf", font_path)
 
 fm.fontManager.addfont(font_path)
@@ -70,9 +69,7 @@ def search_stock_code(keyword):
     return None, None
 
 def get_taiwan_stock_data(stock_code, period_days):
-    """透過 FinMind API 獲取台股歷史資料"""
     try:
-        # 👇👇👇 請務必把下面這行換成您的 Token 👇👇👇
         finmind_token = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJkYXRlIjoiMjAyNi0wMy0wNyAyMDoyNzoxNSIsInVzZXJfaWQiOiJlbnpvOTM1NSIsImVtYWlsIjoicm9sbGluZzI5OThAZ21haWwuY29tIiwiaXAiOiIxMTguMTUwLjE3Ny4xOTEifQ.9mPnHEwZdt2LOooFPBLe_1eWWkeJ_3NVEAM64qDiYAw"
         
         start_date = (datetime.datetime.now() - datetime.timedelta(days=period_days)).strftime('%Y-%m-%d')
@@ -91,6 +88,25 @@ def get_taiwan_stock_data(stock_code, period_days):
         print(f"FinMind API 抓取失敗 ({stock_code}): {e}")
     return pd.DataFrame()
 
+def add_advanced_features(df):
+    df['MA_10'] = df['Close'].rolling(window=10).mean()
+    df['MA_20'] = df['Close'].rolling(window=20).mean()
+    df['Volatility'] = df['Close'].rolling(window=10).std()
+    df['Momentum'] = df['Close'].pct_change(periods=5)
+    
+    delta = df['Close'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+    rs = gain / (loss + 1e-9)
+    df['RSI_14'] = 100 - (100 / (1 + rs))
+    
+    exp1 = df['Close'].ewm(span=12, adjust=False).mean()
+    exp2 = df['Close'].ewm(span=26, adjust=False).mean()
+    df['MACD'] = exp1 - exp2
+    df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
+    
+    return df
+
 def analyze_and_predict_stock(stock_code, stock_name=None):
     try:
         if not stock_name: stock_name = get_stock_name(stock_code)
@@ -98,21 +114,16 @@ def analyze_and_predict_stock(stock_code, stock_name=None):
         df = get_taiwan_stock_data(stock_code, 365)
         if df.empty or len(df) < 30: return None, None
 
-        df['MA_10'] = df['Close'].rolling(window=10).mean()
-        df['MA_20'] = df['Close'].rolling(window=20).mean()
-        df['Volatility'] = df['Close'].rolling(window=10).std()
-        df['Momentum'] = df['Close'].pct_change(periods=5)
+        df = add_advanced_features(df)
         
         df['Future_Return'] = df['Close'].shift(-5) / df['Close'] - 1
         df['Target'] = np.where(df['Future_Return'] > 0, 1, 0)
 
-        # 🛡️ 新增保護機制：過濾掉無限大 (inf) 的髒資料
         df.replace([np.inf, -np.inf], np.nan, inplace=True)
         train_df = df.dropna()
-        
         if train_df.empty: return None, None
 
-        features = ['MA_10', 'MA_20', 'Volatility', 'Momentum']
+        features = ['MA_10', 'MA_20', 'Volatility', 'Momentum', 'RSI_14', 'MACD', 'MACD_Signal']
         X = train_df[features]
         y = train_df['Target']
 
@@ -139,6 +150,7 @@ def analyze_and_predict_stock(stock_code, stock_name=None):
 
         current_price = float(df['Close'].iloc[-1])
         ma20 = float(df['MA_20'].iloc[-1])
+        current_rsi = float(df['RSI_14'].iloc[-1])
         
         if up_probability > 60: pred_msg = f"強勢看漲 📈 ({up_probability:.1f}%)"
         elif up_probability < 40: pred_msg = f"弱勢看跌 📉 ({100-up_probability:.1f}%)"
@@ -148,7 +160,8 @@ def analyze_and_predict_stock(stock_code, stock_name=None):
             f"📊 {stock_name} ({stock_code})\n\n"
             f"💰 收盤價：{current_price:.2f}\n"
             f"🌊 月線值：{ma20:.2f}\n"
-            f"⚡ 狀態：{'站上月線 (多頭)' if current_price > ma20 else '跌破月線 (空頭)'}\n\n"
+            f"🌡️ RSI(14)：{current_rsi:.1f}\n"
+            f"⚡ 狀態：{'多頭趨勢' if current_price > ma20 else '空頭趨勢'}\n\n"
             f"🤖 5日預測：{pred_msg}\n\n"
             f"👆 點擊上方圖表，查看進階策略"
         )
@@ -163,25 +176,20 @@ def calculate_backtest(stock_code, stock_name=""):
         if df.empty or len(df) < 100:
             return "❌ 資料不足，無法進行回測計算。"
 
-        df['MA_10'] = df['Close'].rolling(window=10).mean()
-        df['MA_20'] = df['Close'].rolling(window=20).mean()
-        df['Volatility'] = df['Close'].rolling(window=10).std()
-        df['Momentum'] = df['Close'].pct_change(periods=5)
+        df = add_advanced_features(df)
         
         df['Next_Return'] = df['Close'].shift(-1) / df['Close'] - 1
         df['Target'] = np.where(df['Next_Return'] > 0, 1, 0)
         
-        # 🛡️ 新增保護機制：過濾掉無限大 (inf) 的髒資料
         df.replace([np.inf, -np.inf], np.nan, inplace=True)
         df = df.dropna()
-        
         if len(df) < 50: return "❌ 有效資料不足，無法回測。"
         
         split_idx = int(len(df) * 0.8)
         train_df = df.iloc[:split_idx]
         test_df = df.iloc[split_idx:].copy()
         
-        features = ['MA_10', 'MA_20', 'Volatility', 'Momentum']
+        features = ['MA_10', 'MA_20', 'Volatility', 'Momentum', 'RSI_14', 'MACD', 'MACD_Signal']
         X_train, y_train = train_df[features], train_df['Target']
         X_test = test_df[features]
         
@@ -208,24 +216,26 @@ def calculate_backtest(stock_code, stock_name=""):
         sharpe = (test_df['Strategy_Return'].mean() / std_dev) * np.sqrt(252) if std_dev != 0 else 0
         test_days = len(test_df)
         
-        if strategy_cum > bnh_cum:
-            if sharpe > 1: conclusion = "✅ AI 表現優異：走勢規律，AI 抓得很準。\n🛒 想買入：優質標的！若最新預測看漲可進場。\n💰 想賣出：預測看漲就抱著，看跌請獲利了結。"
-            else: conclusion = "✅ AI 表現贏過大盤：長期會賺，但過程震盪。\n🛒 想買入：可以買，建議分批往下買進。\n💰 想賣出：見好就收！不想承受震盪建議先停利一半。"
+        if len(trades) == 0:
+            conclusion = "⏸️ 訊號空窗：這段期間 AI 沒有發現勝率夠高的進場點，選擇空手觀望。\n🛒 買入建議：目前缺乏明確多頭動能，建議資金先停泊或尋找其他標的。\n💰 賣出建議：若已持有，請嚴守個人的停損停利點。"
+        elif strategy_cum > bnh_cum:
+            if sharpe > 1: conclusion = "✅ 策略優勢：AI 準確抓到波段，不僅創造超額報酬，且波動風險控制得宜。\n🛒 買入建議：屬於模型擅長判讀的優質標的。若最新預測看漲可伺機進場。\n💰 賣出建議：嚴格跟隨 AI 轉弱訊號，預測轉跌時果斷停利。"
+            else: conclusion = "✅ 擊敗單純持有：長期能創造超額報酬，但過程資金震盪幅度較大。\n🛒 買入建議：可進場，但基於風險考量，務必分批佈局以攤平波動成本。\n💰 賣出建議：見好就收，若已達獲利目標可考慮先減碼一半。"
         else:
-            if mdd > -15: conclusion = "⏸️ AI 表現防禦：賺得比死抱著少，大跌時能保命。\n🛒 想買入：適合保守存股，想賺快錢別碰。\n💰 想賣出：若不想資金卡住可考慮換股。"
-            else: conclusion = "⚠️ AI 表現不佳：容易被雙巴。\n🛒 想買入：請尋找其他 AI 表現優異的標的。\n💰 想賣出：看線圖手動停損，破月線請賣出。"
+            if mdd > -15: conclusion = "🛡️ 下檔保護：雖然總獲利輸給大盤基準，但在大跌時發揮了良好的避險抗跌作用。\n🛒 買入建議：適合偏好低風險、防禦型資產配置的部位。\n💰 賣出建議：若不想資金長期閒置，可考慮轉換至動能更強的標的。"
+            else: conclusion = "⚠️ 模型失真：AI 策略在這檔股票上容易追高殺低，產生無謂的摩擦成本。\n🛒 買入建議：請避開。此標的走勢不符合目前模型的運算邏輯。\n💰 賣出建議：回歸基本技術面判斷，跌破重要支撐（如月線）請立即停損。"
 
         res_text = (
-            f"📑 {stock_name} ({stock_code}) 策略回測\n"
-            f"⏳ 測試期間：近 {test_days} 個交易日\n\n"
-            f"📊 實際績效\n"
-            f"👑 跟著 AI 買賣：{strategy_cum*100:.2f}%\n"
-            f"🗿 死抱著不放：{bnh_cum*100:.2f}%\n\n"
-            f"🛡️ 風險評估\n"
-            f"🎯 AI 勝率：{win_rate:.1f}%\n"
-            f"⚠️ 最慘曾跌掉：{mdd:.2f}%\n"
-            f"⚖️ CP值：{sharpe:.2f}\n\n"
-            f"💡 行動指南：\n{conclusion}"
+            f"📑 {stock_name} ({stock_code}) 策略回測報告\n"
+            f"⏳ 測試區間：近 {test_days} 個交易日\n\n"
+            f"📊 歷史績效\n"
+            f"🤖 AI 策略報酬：{strategy_cum*100:.2f}% (依訊號進出)\n"
+            f"📈 買進持有報酬：{bnh_cum*100:.2f}% (死抱不放)\n\n"
+            f"🛡️ 風險與穩定度\n"
+            f"🎯 進場勝率：{win_rate:.1f}%\n"
+            f"⚠️ 最大回檔：{mdd:.2f}% (最差情況的資金縮水幅度)\n"
+            f"⚖️ 夏普值：{sharpe:.2f} (承受每單位風險換取的超額報酬)\n\n"
+            f"💡 資產管理評估：\n{conclusion}"
         )
         return res_text
     except Exception as e:
@@ -328,12 +338,11 @@ def handle_message(event):
                     vol = series.pct_change().std()
                     stock_features.append({'Code': code, 'Name': get_stock_name(code), 'Return': ret, 'Volatility': vol})
             except Exception as e:
-                pass # 略過個別異常股票
+                pass
 
         df_target = pd.DataFrame(stock_features)
 
         if not df_target.empty:
-            # 🛡️ 新增保護機制：過濾掉無限大 (inf) 的髒資料
             df_target.replace([np.inf, -np.inf], np.nan, inplace=True)
             df_target.dropna(inplace=True)
 
