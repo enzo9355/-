@@ -3,7 +3,6 @@ import time
 import urllib.request
 import pandas as pd
 import numpy as np
-import yfinance as yf
 import twstock
 import matplotlib
 import matplotlib.pyplot as plt
@@ -18,14 +17,11 @@ from linebot.models import (
 from sklearn.cluster import KMeans
 from sklearn.ensemble import RandomForestClassifier
 import requests
+import datetime
 
-# 建立偽裝成 Chrome 瀏覽器的 Session，避免被 Yahoo 封鎖
-yf_session = requests.Session()
-yf_session.headers.update({
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-})
-
-# 自動下載並設定中文字體
+# ==========================================
+# 1. 核心設定與字體下載
+# ==========================================
 font_path = 'taipei_sans.ttf'
 if not os.path.exists(font_path):
     print("⏳ 下載中文字體...")
@@ -35,7 +31,6 @@ fm.fontManager.addfont(font_path)
 plt.rcParams['font.family'] = fm.FontProperties(fname=font_path).get_name()
 matplotlib.use('Agg')
 
-# LINE Bot 設定 (請確保 Token 與 Secret 正確)
 LINE_CHANNEL_ACCESS_TOKEN = 'lQyeonM1HkZGZXABONH+Xpd9atZVkppAIt5qnCZkz8D131NdHiW06EmtXXSQyJ2rc8CCbylLOBZLb+zbqvynFtkzGpp/7X0+MDLbk2FD3oMTATtUw2Kpf+PzMtpx07ofZ0vC9Do2KVYQN1Tl328otAdB04t89/1O/w1cDnyilFU='
 LINE_CHANNEL_SECRET = 'e5370d4d8f54d87f04a5cced565c1d4b'
 
@@ -56,6 +51,9 @@ all_watch_list = []
 for stocks in industry_map.values():
     all_watch_list.extend(stocks)
 
+# ==========================================
+# 2. 資料獲取與處理 (改用 FinMind API)
+# ==========================================
 def get_stock_name(stock_code):
     try:
         if stock_code in twstock.codes: return twstock.codes[stock_code].name
@@ -72,13 +70,30 @@ def search_stock_code(keyword):
             if len(code) <= 6: return code, info.name
     return None, None
 
+def get_taiwan_stock_data(stock_code, period_days):
+    """透過 FinMind API 獲取台股歷史資料"""
+    try:
+        start_date = (datetime.datetime.now() - datetime.timedelta(days=period_days)).strftime('%Y-%m-%d')
+        url = f"https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockPrice&data_id={stock_code}&start_date={start_date}"
+        res = requests.get(url, timeout=10)
+        data = res.json()
+        
+        if data.get("msg") == "success" and len(data.get("data", [])) > 0:
+            df = pd.DataFrame(data["data"])
+            df = df.rename(columns={'close': 'Close', 'date': 'Date'})
+            df['Date'] = pd.to_datetime(df['Date'])
+            df.set_index('Date', inplace=True)
+            df['Close'] = pd.to_numeric(df['Close'], errors='coerce')
+            return df[['Close']].dropna()
+    except Exception as e:
+        print(f"FinMind API 抓取失敗 ({stock_code}): {e}")
+    return pd.DataFrame()
+
 def analyze_and_predict_stock(stock_code, stock_name=None):
     try:
-        ticker = f"{stock_code}.TW"
         if not stock_name: stock_name = get_stock_name(stock_code)
 
-        # 加入 session 偽裝
-        df = yf.download(ticker, period="1y", progress=False, session=yf_session)
+        df = get_taiwan_stock_data(stock_code, 365) # 抓取過去 1 年資料
         if df.empty or len(df) < 30: return None, None
 
         df['MA_10'] = df['Close'].rolling(window=10).mean()
@@ -137,9 +152,7 @@ def analyze_and_predict_stock(stock_code, stock_name=None):
 
 def calculate_backtest(stock_code, stock_name=""):
     try:
-        ticker = f"{stock_code}.TW"
-        # 加入 session 偽裝
-        df = yf.download(ticker, period="2y", progress=False, session=yf_session)
+        df = get_taiwan_stock_data(stock_code, 730) # 抓取過去 2 年資料
         if df.empty or len(df) < 100:
             return "❌ 資料不足，無法進行回測計算。"
 
@@ -152,7 +165,6 @@ def calculate_backtest(stock_code, stock_name=""):
         df['Target'] = np.where(df['Next_Return'] > 0, 1, 0)
         
         df = df.dropna()
-        
         split_idx = int(len(df) * 0.8)
         train_df = df.iloc[:split_idx]
         test_df = df.iloc[split_idx:].copy()
@@ -182,15 +194,14 @@ def calculate_backtest(stock_code, stock_name=""):
         
         std_dev = test_df['Strategy_Return'].std()
         sharpe = (test_df['Strategy_Return'].mean() / std_dev) * np.sqrt(252) if std_dev != 0 else 0
-        
         test_days = len(test_df)
         
         if strategy_cum > bnh_cum:
-            if sharpe > 1: conclusion = "✅ AI 表現優異：這檔股票走勢規律，AI 抓得很準。\n🛒 想買入：優質標的！若最新預測為看漲，可考慮進場。\n💰 想賣出：看 AI 臉色！預測看漲就抱著，轉為看跌請果斷獲利了結。"
-            else: conclusion = "✅ AI 表現贏過大盤：長期會賺錢，但過程暴漲暴跌。\n🛒 想買入：可以買，嚴禁 All-in！建議將資金拆分，分批往下買進。\n💰 想賣出：見好就收！若已有獲利且不想承受震盪，建議先停利一半。"
+            if sharpe > 1: conclusion = "✅ AI 表現優異：走勢規律，AI 抓得很準。\n🛒 想買入：優質標的！若最新預測看漲可進場。\n💰 想賣出：預測看漲就抱著，看跌請獲利了結。"
+            else: conclusion = "✅ AI 表現贏過大盤：長期會賺，但過程震盪。\n🛒 想買入：可以買，建議分批往下買進。\n💰 想賣出：見好就收！不想承受震盪建議先停利一半。"
         else:
-            if mdd > -15: conclusion = "⏸️ AI 表現防禦：賺得比死抱著少，但在大跌時能保命。\n🛒 想買入：適合保守存股！想賺快錢的千萬別碰。\n💰 想賣出：若不想資金卡住，可考慮賣出換股操作。"
-            else: conclusion = "⚠️ AI 表現不佳：AI 抓不到這檔的邏輯，容易被雙巴。\n🛒 想買入：連碰都不要碰！請尋找其他 AI 表現優異的標的。\n💰 想賣出：AI 已失效！請看線圖手動停損，跌破月線或成本請立刻賣出。"
+            if mdd > -15: conclusion = "⏸️ AI 表現防禦：賺得比死抱著少，大跌時能保命。\n🛒 想買入：適合保守存股，想賺快錢別碰。\n💰 想賣出：若不想資金卡住可考慮換股。"
+            else: conclusion = "⚠️ AI 表現不佳：容易被雙巴。\n🛒 想買入：請尋找其他 AI 表現優異的標的。\n💰 想賣出：看線圖手動停損，破月線請賣出。"
 
         res_text = (
             f"📑 {stock_name} ({stock_code}) 策略回測\n"
@@ -201,13 +212,16 @@ def calculate_backtest(stock_code, stock_name=""):
             f"🛡️ 風險評估\n"
             f"🎯 AI 勝率：{win_rate:.1f}%\n"
             f"⚠️ 最慘曾跌掉：{mdd:.2f}%\n"
-            f"⚖️ 承擔風險CP值：{sharpe:.2f}\n\n"
+            f"⚖️ CP值：{sharpe:.2f}\n\n"
             f"💡 行動指南：\n{conclusion}"
         )
         return res_text
     except Exception as e:
         return "❌ 回測計算發生錯誤，請確認資料是否齊全。"
 
+# ==========================================
+# 3. Flask 伺服器與 LINE Webhook 路由
+# ==========================================
 app = Flask(__name__)
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
@@ -271,21 +285,17 @@ def handle_message(event):
         else: codes = industry_map.get(target_industry, industry_map['熱門ETF'][:10])
 
         stock_features = []
-        try:
-            tickers_list = [f"{code}.TW" for code in codes]
-            # 加入 session 偽裝
-            data = yf.download(tickers_list, period="3mo", progress=False, session=yf_session)['Close']
-            
-            for code in codes:
-                ticker = f"{code}.TW"
-                if ticker in data.columns:
-                    series = data[ticker].dropna()
-                    if len(series) > 10:
-                        start_p, end_p = float(series.iloc[0]), float(series.iloc[-1])
-                        ret = (end_p - start_p) / start_p
-                        vol = series.pct_change().std()
-                        stock_features.append({'Code': code, 'Name': get_stock_name(code), 'Return': ret, 'Volatility': vol})
-        except Exception as e: print(f"動態抓取失敗: {e}")
+        for code in codes:
+            try:
+                df_hist = get_taiwan_stock_data(code, 90) # 抓取 3 個月資料算特徵
+                if not df_hist.empty and len(df_hist) > 10:
+                    series = df_hist['Close']
+                    start_p, end_p = float(series.iloc[0]), float(series.iloc[-1])
+                    ret = (end_p - start_p) / start_p
+                    vol = series.pct_change().std()
+                    stock_features.append({'Code': code, 'Name': get_stock_name(code), 'Return': ret, 'Volatility': vol})
+            except Exception as e:
+                print(f"動態抓取失敗 {code}: {e}")
 
         df_target = pd.DataFrame(stock_features)
 
@@ -350,9 +360,10 @@ def handle_message(event):
                     }
                 }
                 line_bot_api.reply_message(event.reply_token, FlexSendMessage(alt_text=f"{target_name} AI 分析", contents=flex_content))
-            else: line_bot_api.reply_message(event.reply_token, TextSendMessage(text="❌ 資料不足或查詢過於頻繁，請稍後再試。"))
+            else: line_bot_api.reply_message(event.reply_token, TextSendMessage(text="❌ 資料不足，無法分析此股票。"))
         else: line_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"❌ 找不到「{msg}」，請輸入正確代碼或名稱。"))
 
 if __name__ == "__main__":
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
+
