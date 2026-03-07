@@ -73,8 +73,12 @@ def search_stock_code(keyword):
 def get_taiwan_stock_data(stock_code, period_days):
     """透過 FinMind API 獲取台股歷史資料"""
     try:
+        # 👇 在引號裡面貼上您剛剛複製的 FinMind Token 👇
+        finmind_token = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJkYXRlIjoiMjAyNi0wMy0wNyAyMDoyNzoxNSIsInVzZXJfaWQiOiJlbnpvOTM1NSIsImVtYWlsIjoicm9sbGluZzI5OThAZ21haWwuY29tIiwiaXAiOiIxMTguMTUwLjE3Ny4xOTEifQ.9mPnHEwZdt2LOooFPBLe_1eWWkeJ_3NVEAM64qDiYAw"
+        
         start_date = (datetime.datetime.now() - datetime.timedelta(days=period_days)).strftime('%Y-%m-%d')
-        url = f"https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockPrice&data_id={stock_code}&start_date={start_date}"
+        # 網址後面加上了 token 參數
+        url = f"https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockPrice&data_id={stock_code}&start_date={start_date}&token={finmind_token}"
         res = requests.get(url, timeout=10)
         data = res.json()
         
@@ -390,4 +394,5 @@ def handle_message(event):
 if __name__ == "__main__":
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
+
 
