@@ -34,6 +34,7 @@ matplotlib.use('Agg')
 LINE_CHANNEL_ACCESS_TOKEN = 'lQyeonM1HkZGZXABONH+Xpd9atZVkppAIt5qnCZkz8D131NdHiW06EmtXXSQyJ2rc8CCbylLOBZLb+zbqvynFtkzGpp/7X0+MDLbk2FD3oMTATtUw2Kpf+PzMtpx07ofZ0vC9Do2KVYQN1Tl328otAdB04t89/1O/w1cDnyilFU='
 LINE_CHANNEL_SECRET = 'e5370d4d8f54d87f04a5cced565c1d4b'
 
+# 移除 ETF，保留其他產業
 industry_map = {
     "半導體業": ['2330', '2454', '2303', '3034', '3711', '3443', '2408', '3035', '3006', '3532'],
     "電腦周邊": ['2317', '2382', '3231', '2357', '2356', '2324', '6669', '2353', '2377', '2352'],
@@ -43,8 +44,7 @@ industry_map = {
     "金融保險": ['2881', '2882', '2886', '2891', '5880', '2892', '2884', '2885', '2880', '2890'],
     "航運業": ['2603', '2609', '2615', '2618', '2610', '2606', '2637', '2633', '5608', '2605'],
     "鋼鐵工業": ['2002', '2014', '2006', '2027', '2031', '2023', '2015', '2009', '2034'],
-    "塑膠化學": ['1301', '1303', '6505', '1326', '1304', '1308', '1312', '1310', '1313', '4739'],
-    "熱門ETF": ['0050', '0056', '00878', '00919', '00929', '00940', '00939', '00881', '00713', '006208']
+    "塑膠化學": ['1301', '1303', '6505', '1326', '1304', '1308', '1312', '1310', '1313', '4739']
 }
 
 all_watch_list = []
@@ -52,7 +52,7 @@ for stocks in industry_map.values():
     all_watch_list.extend(stocks)
 
 # ==========================================
-# 2. 資料獲取與處理 (改用 FinMind API)
+# 2. 資料獲取與處理 (FinMind API)
 # ==========================================
 def get_stock_name(stock_code):
     try:
@@ -93,7 +93,7 @@ def analyze_and_predict_stock(stock_code, stock_name=None):
     try:
         if not stock_name: stock_name = get_stock_name(stock_code)
 
-        df = get_taiwan_stock_data(stock_code, 365) # 抓取過去 1 年資料
+        df = get_taiwan_stock_data(stock_code, 365)
         if df.empty or len(df) < 30: return None, None
 
         df['MA_10'] = df['Close'].rolling(window=10).mean()
@@ -152,7 +152,7 @@ def analyze_and_predict_stock(stock_code, stock_name=None):
 
 def calculate_backtest(stock_code, stock_name=""):
     try:
-        df = get_taiwan_stock_data(stock_code, 730) # 抓取過去 2 年資料
+        df = get_taiwan_stock_data(stock_code, 730)
         if df.empty or len(df) < 100:
             return "❌ 資料不足，無法進行回測計算。"
 
@@ -260,10 +260,34 @@ def handle_message(event):
         items = [QuickReplyButton(action=MessageAction(label="全市場", text="選產業_全市場"))]
         for industry in industry_map.keys():
             items.append(QuickReplyButton(action=MessageAction(label=industry[:20], text=f"選產業_{industry}")))
+        
+        # 新增大盤預測按鈕
+        items.append(QuickReplyButton(action=MessageAction(label="📊 台股大盤預測", text="大盤預測")))
+
         line_bot_api.reply_message(
             event.reply_token,
             TextSendMessage(text="請選擇想分析的產業類別：👇", quick_reply=QuickReply(items=items))
         )
+
+    # 處理大盤專屬通道
+    elif msg == "大盤預測":
+        img_name, analysis_txt = analyze_and_predict_stock("TAIEX", "台股加權指數(大盤)")
+        if img_name and analysis_txt:
+            img_url = f"{request.host_url}static/tmp/{img_name}".replace("http://", "https://")
+            flex_content = {
+                "type": "bubble",
+                "hero": {
+                    "type": "image", "url": img_url, "size": "full", "aspectRatio": "10:6", "aspectMode": "cover",
+                    "action": {"type": "message", "label": "action", "text": "詳細策略_TAIEX"}
+                },
+                "body": {
+                    "type": "box", "layout": "vertical",
+                    "contents": [{"type": "text", "text": analysis_txt, "wrap": True, "size": "sm"}]
+                }
+            }
+            line_bot_api.reply_message(event.reply_token, FlexSendMessage(alt_text="台股大盤預測", contents=flex_content))
+        else: 
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="❌ 大盤資料獲取失敗，請稍後再試。"))
 
     elif msg.startswith("選產業_"):
         target_industry = msg.split("_")[1]
@@ -282,12 +306,12 @@ def handle_message(event):
         risk_type = parts[2] if len(parts) > 2 else "穩健"
         
         if target_industry == "全市場": codes = ['2330', '2317', '2454', '2308', '2881', '2603', '2002', '1301', '0050', '0056']
-        else: codes = industry_map.get(target_industry, industry_map['熱門ETF'][:10])
+        else: codes = industry_map.get(target_industry, [])
 
         stock_features = []
         for code in codes:
             try:
-                df_hist = get_taiwan_stock_data(code, 90) # 抓取 3 個月資料算特徵
+                df_hist = get_taiwan_stock_data(code, 90)
                 if not df_hist.empty and len(df_hist) > 10:
                     series = df_hist['Close']
                     start_p, end_p = float(series.iloc[0]), float(series.iloc[-1])
@@ -335,7 +359,7 @@ def handle_message(event):
 
     elif msg.startswith("詳細策略_"):
         stock_code = msg.split("_")[1]
-        stock_name = get_stock_name(stock_code)
+        stock_name = "台股加權指數(大盤)" if stock_code == "TAIEX" else get_stock_name(stock_code)
         backtest_report = calculate_backtest(stock_code, stock_name)
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=backtest_report))
 
