@@ -29,10 +29,11 @@ fm.fontManager.addfont(font_path)
 plt.rcParams['font.family'] = fm.FontProperties(fname=font_path).get_name()
 matplotlib.use('Agg')
 
-# 🛡️ 安全升級：從環境變數讀取金鑰，不寫死在程式碼中
+# 🛡️ 讀取您剛才在 Render 設定好的環境變數
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv('LINE_CHANNEL_ACCESS_TOKEN')
 LINE_CHANNEL_SECRET = os.getenv('LINE_CHANNEL_SECRET')
-FINMIND_TOKEN = os.getenv('FINMIND_TOKEN')
+FINMIND_USER = os.getenv('FINMIND_USER')
+FINMIND_PASSWORD = os.getenv('FINMIND_PASSWORD')
 
 industry_map = {
     "半導體業": ['2330', '2454', '2303', '3034', '3711', '3443', '2408', '3035', '3006', '3532'],
@@ -55,20 +56,34 @@ handler = WebhookHandler(LINE_CHANNEL_SECRET)
 static_tmp_path = 'static/tmp'
 os.makedirs(static_tmp_path, exist_ok=True)
 
-# 🧹 系統大掃除：防止圖片塞爆伺服器
 def cleanup_images():
     try:
         files = [os.path.join(static_tmp_path, f) for f in os.listdir(static_tmp_path) if f.endswith('.png')]
         if len(files) > 100:
             files.sort(key=os.path.getmtime)
-            for f in files[:50]:
-                os.remove(f)
+            for f in files[:50]: os.remove(f)
     except Exception as e:
         print(f"清理圖片失敗: {e}")
 
 # ==========================================
-# 2. 資料獲取與特徵工程 (OHLCV版)
+# 2. 資料獲取與特徵工程 (全自動登入修復版)
 # ==========================================
+finmind_auto_token = ""
+
+def auto_login_finmind():
+    """🤖 自動呼叫 API 取得全新的 Token"""
+    global finmind_auto_token
+    if not FINMIND_USER or not FINMIND_PASSWORD: return
+    try:
+        url = "https://api.finmindtrade.com/api/v4/login"
+        payload = {"user_id": FINMIND_USER, "password": FINMIND_PASSWORD}
+        res = requests.post(url, data=payload, timeout=10)
+        data = res.json()
+        if data.get("msg") == "success":
+            finmind_auto_token = data.get("token")
+            print("✅ FinMind 自動登入成功，已換發最新 Token")
+    except Exception as e: print(f"❌ 自動登入 FinMind 失敗: {e}")
+
 def get_stock_name(stock_code):
     try:
         if stock_code in twstock.codes: return twstock.codes[stock_code].name
@@ -86,14 +101,33 @@ def search_stock_code(keyword):
     return None, None
 
 def get_taiwan_stock_data(stock_code, period_days=730):
+    global finmind_auto_token
     try:
+        if FINMIND_USER and not finmind_auto_token:
+            auto_login_finmind()
+            
         start_date = (datetime.datetime.now() - datetime.timedelta(days=period_days)).strftime('%Y-%m-%d')
-        url = f"https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockPrice&data_id={stock_code}&start_date={start_date}&token={FINMIND_TOKEN}"
+        url = f"https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockPrice&data_id={stock_code}&start_date={start_date}"
+        if finmind_auto_token: url += f"&token={finmind_auto_token}"
+            
         res = requests.get(url, timeout=10)
         data = res.json()
+        
+        # 如果 Token 過期，立刻自動重新登入再抓一次
+        if data.get("status") != 200 or "expired" in str(data.get("msg", "")).lower():
+            auto_login_finmind()
+            url = f"https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockPrice&data_id={stock_code}&start_date={start_date}"
+            if finmind_auto_token: url += f"&token={finmind_auto_token}"
+            res = requests.get(url, timeout=10)
+            data = res.json()
+
         if data.get("msg") == "success" and len(data.get("data", [])) > 0:
             df = pd.DataFrame(data["data"])
-            df = df.rename(columns={'date': 'Date', 'open': 'Open', 'max': 'High', 'min': 'Low', 'close': 'Close', 'volume': 'Volume'})
+            # 🐛 修復點：加入 Trading_Volume 的映射，解決 Volume 找不到的問題
+            df = df.rename(columns={
+                'date': 'Date', 'open': 'Open', 'max': 'High', 'min': 'Low', 'close': 'Close', 
+                'volume': 'Volume', 'Trading_Volume': 'Volume'
+            })
             df['Date'] = pd.to_datetime(df['Date'])
             df.set_index('Date', inplace=True)
             for col in ['Open', 'High', 'Low', 'Close', 'Volume']: 
@@ -106,7 +140,6 @@ def get_taiwan_stock_data(stock_code, period_days=730):
 def add_advanced_features(df):
     if len(df) < 60: return df
     
-    # 均線與動能
     df['MA_5'] = df['Close'].rolling(5).mean()
     df['MA_10'] = df['Close'].rolling(10).mean()
     df['MA_20'] = df['Close'].rolling(20).mean()
@@ -115,25 +148,21 @@ def add_advanced_features(df):
     df['RET_5'] = df['Close'].pct_change(5)
     df['Volatility'] = df['RET_1'].rolling(20).std()
     
-    # RSI
     delta = df['Close'].diff()
     gain = delta.clip(lower=0).rolling(14).mean()
     loss = -delta.clip(upper=0).rolling(14).mean()
     rs = gain / (loss + 1e-9)
     df['RSI_14'] = 100 - (100 / (1 + rs))
     
-    # MACD
     exp1 = df['Close'].ewm(span=12, adjust=False).mean()
     exp2 = df['Close'].ewm(span=26, adjust=False).mean()
     df['MACD'] = exp1 - exp2
     df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
     
-    # 成交量與相對強度
     df['Volume_MA20'] = df['Volume'].rolling(20).mean()
     df['OBV'] = (np.sign(df['Close'].diff()) * df['Volume']).cumsum()
     df['RS_60'] = df['Close'] / df['Close'].rolling(60).mean()
     
-    # 真實 ATR (利用高低價)
     tr = np.maximum(df['High'] - df['Low'], 
          np.maximum(abs(df['High'] - df['Close'].shift()), 
                     abs(df['Low'] - df['Close'].shift())))
@@ -167,7 +196,6 @@ def analyze_and_predict_stock(stock_code, stock_name=None):
         X = train_df[FEATURES]
         y = train_df['Target']
         
-        # 👑 特徵縮放與 LightGBM 訓練
         scaler = StandardScaler()
         X_scaled = scaler.fit_transform(X)
         
@@ -177,7 +205,7 @@ def analyze_and_predict_stock(stock_code, stock_name=None):
         latest_scaled = scaler.transform(latest_features)
         up_prob = model.predict_proba(latest_scaled)[0][1] * 100
         
-        cleanup_images() # 存圖前先打掃
+        cleanup_images() 
         
         plt.figure(figsize=(10, 6))
         plt.plot(df.index[-60:], df['Close'].iloc[-60:], label='收盤價', color='black', linewidth=2)
@@ -233,7 +261,6 @@ def calculate_backtest(stock_code, stock_name=""):
         signals = []
         actual_returns = []
         
-        # 為了保持 LINE 回應速度，Backtest 迴圈模型參數調輕量
         model = LGBMClassifier(n_estimators=50, max_depth=4, random_state=42, verbose=-1)
         scaler = StandardScaler()
         
