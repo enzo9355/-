@@ -29,7 +29,6 @@ fm.fontManager.addfont(font_path)
 plt.rcParams['font.family'] = fm.FontProperties(fname=font_path).get_name()
 matplotlib.use('Agg')
 
-# 🛡️ 讀取您剛才在 Render 設定好的環境變數
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv('LINE_CHANNEL_ACCESS_TOKEN')
 LINE_CHANNEL_SECRET = os.getenv('LINE_CHANNEL_SECRET')
 FINMIND_USER = os.getenv('FINMIND_USER')
@@ -66,12 +65,11 @@ def cleanup_images():
         print(f"清理圖片失敗: {e}")
 
 # ==========================================
-# 2. 資料獲取與特徵工程 (全自動登入修復版)
+# 2. 資料獲取與特徵工程
 # ==========================================
 finmind_auto_token = ""
 
 def auto_login_finmind():
-    """🤖 自動呼叫 API 取得全新的 Token"""
     global finmind_auto_token
     if not FINMIND_USER or not FINMIND_PASSWORD: return
     try:
@@ -81,8 +79,7 @@ def auto_login_finmind():
         data = res.json()
         if data.get("msg") == "success":
             finmind_auto_token = data.get("token")
-            print("✅ FinMind 自動登入成功，已換發最新 Token")
-    except Exception as e: print(f"❌ 自動登入 FinMind 失敗: {e}")
+    except Exception as e: pass
 
 def get_stock_name(stock_code):
     try:
@@ -113,7 +110,6 @@ def get_taiwan_stock_data(stock_code, period_days=730):
         res = requests.get(url, timeout=10)
         data = res.json()
         
-        # 如果 Token 過期，立刻自動重新登入再抓一次
         if data.get("status") != 200 or "expired" in str(data.get("msg", "")).lower():
             auto_login_finmind()
             url = f"https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockPrice&data_id={stock_code}&start_date={start_date}"
@@ -123,7 +119,6 @@ def get_taiwan_stock_data(stock_code, period_days=730):
 
         if data.get("msg") == "success" and len(data.get("data", [])) > 0:
             df = pd.DataFrame(data["data"])
-            # 🐛 修復點：加入 Trading_Volume 的映射，解決 Volume 找不到的問題
             df = df.rename(columns={
                 'date': 'Date', 'open': 'Open', 'max': 'High', 'min': 'Low', 'close': 'Close', 
                 'volume': 'Volume', 'Trading_Volume': 'Volume'
@@ -133,8 +128,7 @@ def get_taiwan_stock_data(stock_code, period_days=730):
             for col in ['Open', 'High', 'Low', 'Close', 'Volume']: 
                 df[col] = pd.to_numeric(df[col], errors='coerce')
             return df[['Open', 'High', 'Low', 'Close', 'Volume']].dropna()
-    except Exception as e:
-        print(f"FinMind 抓取失敗 ({stock_code}): {e}")
+    except Exception as e: pass
     return pd.DataFrame()
 
 def add_advanced_features(df):
@@ -175,7 +169,7 @@ FEATURES = ['MA_5', 'MA_10', 'MA_20', 'MA_60', 'RET_1', 'RET_5', 'Volatility',
             'RSI_14', 'MACD', 'MACD_Signal', 'Volume_MA20', 'OBV', 'RS_60', 'ATR_14']
 
 # ==========================================
-# 3. 預測函數 (LGBM + StandardScaler)
+# 3. 預測函數
 # ==========================================
 def analyze_and_predict_stock(stock_code, stock_name=None):
     try:
@@ -199,7 +193,7 @@ def analyze_and_predict_stock(stock_code, stock_name=None):
         scaler = StandardScaler()
         X_scaled = scaler.fit_transform(X)
         
-        model = LGBMClassifier(n_estimators=150, learning_rate=0.05, max_depth=6, random_state=42, verbose=-1)
+        model = LGBMClassifier(n_estimators=100, learning_rate=0.05, max_depth=6, random_state=42, verbose=-1)
         model.fit(X_scaled, y)
         
         latest_scaled = scaler.transform(latest_features)
@@ -242,11 +236,10 @@ def analyze_and_predict_stock(stock_code, stock_name=None):
         return filename, analysis_text
         
     except Exception as e:
-        print(f"分析失敗 {stock_code}: {e}")
         return None, None
 
 # ==========================================
-# 4. 回測 (LGBM Walk-Forward)
+# 4. 回測 (高速切割版，防逾時)
 # ==========================================
 def calculate_backtest(stock_code, stock_name=""):
     try:
@@ -258,35 +251,37 @@ def calculate_backtest(stock_code, stock_name=""):
         df = df.dropna()
         if len(df) < 100: return "❌ 有效資料太少。"
         
-        signals = []
-        actual_returns = []
+        # 🚀 提速修改：改用 80/20 切割，秒速運算取代緩慢的每日迴圈
+        split_idx = int(len(df) * 0.8)
+        train_df = df.iloc[:split_idx]
+        test_df = df.iloc[split_idx:].copy()
         
-        model = LGBMClassifier(n_estimators=50, max_depth=4, random_state=42, verbose=-1)
         scaler = StandardScaler()
+        X_train_scaled = scaler.fit_transform(train_df[FEATURES])
+        model = LGBMClassifier(n_estimators=100, max_depth=4, random_state=42, verbose=-1)
+        model.fit(X_train_scaled, train_df['Target'])
         
-        for i in range(100, len(df)-1):
-            train = df.iloc[:i]
-            test = df.iloc[i:i+1]
-            
-            X_train_scaled = scaler.fit_transform(train[FEATURES])
-            model.fit(X_train_scaled, train['Target'])
-            
-            X_test_scaled = scaler.transform(test[FEATURES])
-            prob = model.predict_proba(X_test_scaled)[0][1]
-            
-            signal = 1 if prob > 0.60 else 0
-            next_return = df['Close'].iloc[i+1] / df['Close'].iloc[i] - 1
-            
-            signals.append(signal)
-            actual_returns.append(next_return if signal else 0)
+        X_test_scaled = scaler.transform(test_df[FEATURES])
+        test_df['Prob'] = model.predict_proba(X_test_scaled)[:, 1]
+        test_df['Signal'] = np.where(test_df['Prob'] > 0.60, 1, 0)
         
-        if not signals: return "❌ 回測期間無訊號。"
+        test_df['Next_Return'] = test_df['Close'].shift(-1) / test_df['Close'] - 1
+        test_df = test_df.dropna() # 去掉最後一筆算不出未來報酬的資料
         
-        strategy_ret = np.array(actual_returns)
-        bh_cum = (df['Close'].iloc[-1] / df['Close'].iloc[99]) - 1
+        test_df['Strategy_Return'] = test_df['Signal'] * test_df['Next_Return']
+        
+        signals = test_df['Signal'].values
+        strategy_ret = test_df['Strategy_Return'].values
+        bh_ret = test_df['Next_Return'].values
+        
+        if len(signals) == 0: return "❌ 回測期間無訊號。"
+        
         strat_cum = (1 + strategy_ret).cumprod()[-1] - 1
+        bh_cum = (1 + bh_ret).cumprod()[-1] - 1
         
-        win_rate = (strategy_ret > 0).mean() * 100 if len(strategy_ret[strategy_ret != 0]) > 0 else 0
+        trades = strategy_ret[signals == 1]
+        win_rate = (trades > 0).mean() * 100 if len(trades) > 0 else 0
+        
         roll_max = (1 + strategy_ret).cumprod().cummax()
         drawdown = (1 + strategy_ret).cumprod() / roll_max - 1
         mdd = drawdown.min() * 100
