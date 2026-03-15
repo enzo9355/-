@@ -137,7 +137,7 @@ def get_taiwan_stock_data(stock_code, period_days=730):
                 df[col] = pd.to_numeric(df[col], errors='coerce')
             return df[['Open', 'High', 'Low', 'Close', 'Volume']].dropna()
     except Exception as e: 
-        print(f"FinMind 抓取失敗 ({stock_code}): {e}")
+        pass
     return pd.DataFrame()
 
 def add_advanced_features(df):
@@ -257,7 +257,8 @@ def analyze_and_predict_stock(stock_code, stock_name=None):
 
 def fast_predict(stock_code):
     try:
-        df = get_taiwan_stock_data(stock_code, 365) 
+        # 🚀 提速優化：只要取 200 天就能算出 60 日均線等特徵，減少 API 與 Pandas 運算時間
+        df = get_taiwan_stock_data(stock_code, 200) 
         if df.empty or len(df) < 100: return None
         df = add_advanced_features(df)
         if len(df) < 60: return None
@@ -396,13 +397,18 @@ def handle_message(event):
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
         return
     elif msg == "預測":
-        items = [QuickReplyButton(action=MessageAction(label="全市場", text="選產業_全市場"))]
+        items = [
+            QuickReplyButton(action=MessageAction(label="🛡️ 穩健策略", text="穩健")),
+            QuickReplyButton(action=MessageAction(label="🔥 激進策略", text="激進")),
+            QuickReplyButton(action=MessageAction(label="🌐 全市場", text="選產業_全市場"))
+        ]
         for industry in industry_map.keys():
             items.append(QuickReplyButton(action=MessageAction(label=industry[:20], text=f"選產業_{industry}")))
         items.append(QuickReplyButton(action=MessageAction(label="📊 台股大盤預測", text="大盤預測")))
+        
         line_bot_api.reply_message(
             event.reply_token,
-            TextSendMessage(text="請選擇產業類別：👇", quick_reply=QuickReply(items=items))
+            TextSendMessage(text="請選擇預測策略或產業類別：👇", quick_reply=QuickReply(items=items))
         )
         return
     elif msg == "大盤預測":
@@ -422,7 +428,8 @@ def handle_message(event):
         return
     elif "穩健" in msg or "激進" in msg:
         strategy_key = "穩健" if "穩健" in msg else "激進"
-        stock_list = strategy_map[strategy_key]
+        # 🚀 提速優化：強制只取前 5 檔股票
+        stock_list = strategy_map[strategy_key][:5]
         
         now = datetime.datetime.now()
         start_date = now + datetime.timedelta(days=1)
@@ -439,7 +446,6 @@ def handle_message(event):
                 elif prob < 40: trend = "📉 偏向看跌"
                 else: trend = "⚖️ 中性震盪"
                 
-                # 優化排版：使用多行字串並加入縮排，視覺更寬敞
                 formatted_item = (
                     f"🔹 {code} {name}\n"
                     f"   💰 收盤：{price:.2f} 元\n"
@@ -450,7 +456,6 @@ def handle_message(event):
         if len(results_msg) == 1:
             reply_text = "❌ 掃描失敗或資料不足，請確認連線。"
         else:
-            # 優化排版：區塊之間加入兩個換行符號
             reply_text = "\n\n".join(results_msg)
             
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
@@ -459,10 +464,12 @@ def handle_message(event):
         target_industry = msg.split("_")[1]
         
         if target_industry == "全市場":
-            stock_list = ['2330', '2317', '2454', '2308', '2881', '2382', '2882', '2412', '2886', '2891']
+            # 🚀 提速優化：強制只取前 5 檔股票
+            stock_list = ['2330', '2317', '2454', '2308', '2881']
             target_industry = "全市場 (權值示範)"
         else:
-            stock_list = industry_map.get(target_industry, [])
+            # 🚀 提速優化：強制只取前 5 檔股票
+            stock_list = industry_map.get(target_industry, [])[:5]
             
         now = datetime.datetime.now()
         start_date = now + datetime.timedelta(days=1)
@@ -479,7 +486,6 @@ def handle_message(event):
                 elif prob < 40: trend = "📉 偏向看跌"
                 else: trend = "⚖️ 中性震盪"
                 
-                # 優化排版：使用多行字串並加入縮排，視覺更寬敞
                 formatted_item = (
                     f"🔹 {code} {name}\n"
                     f"   💰 收盤：{price:.2f} 元\n"
@@ -490,7 +496,6 @@ def handle_message(event):
         if len(results_msg) == 1:
             reply_text = "❌ 掃描失敗或資料不足，請確認連線。"
         else:
-            # 優化排版：區塊之間加入兩個換行符號
             reply_text = "\n\n".join(results_msg)
             
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
