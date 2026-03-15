@@ -46,6 +46,11 @@ industry_map = {
     "塑膠化學": ['1301', '1303', '6505', '1326', '1304', '1308', '1312', '1310', '1313', '4739']
 }
 
+strategy_map = {
+    "穩健": ['0050', '0056', '00878', '2881', '2412'],
+    "激進": ['2330', '2317', '3231', '2603', '3008']
+}
+
 all_watch_list = [stock for stocks in industry_map.values() for stock in stocks]
 
 app = Flask(__name__)
@@ -176,7 +181,6 @@ FEATURES = ['MA_5', 'MA_10', 'MA_20', 'MA_60', 'RET_1', 'RET_5', 'Volatility',
 # 3. 預測函數群
 # ==========================================
 def analyze_and_predict_stock(stock_code, stock_name=None):
-    """一般單獨查詢使用（帶精美圖表）"""
     try:
         if not stock_name: stock_name = get_stock_name(stock_code)
         df = get_taiwan_stock_data(stock_code, 730)
@@ -207,12 +211,17 @@ def analyze_and_predict_stock(stock_code, stock_name=None):
         
         cleanup_images() 
         
+        now = datetime.datetime.now()
+        start_date = now + datetime.timedelta(days=1)
+        end_date = now + datetime.timedelta(days=7)
+        date_range_str = f"{start_date.strftime('%Y/%m/%d')}-{end_date.strftime('%m/%d')}"
+        
         plt.figure(figsize=(10, 6))
         plt.plot(df.index[-60:], df['Close'].iloc[-60:], label='收盤價', color='black', linewidth=2)
         plt.plot(df.index[-60:], df['MA_10'].iloc[-60:], label='10日均線', color='blue', linestyle='--')
         plt.plot(df.index[-60:], df['MA_20'].iloc[-60:], label='20日均線', color='red', linestyle='-.')
         
-        plt.title(f'{stock_code} {stock_name} - 競賽指定預測 (2026/3/27-4/2)', fontsize=15, fontweight='bold')
+        plt.title(f'{stock_code} {stock_name} - 預測區間 ({date_range_str})', fontsize=15, fontweight='bold')
         plt.xlabel('日期', fontsize=12)
         plt.ylabel('價格', fontsize=12)
         plt.legend(prop={'size': 12})
@@ -237,7 +246,7 @@ def analyze_and_predict_stock(stock_code, stock_name=None):
             f"🌊 20日均線：{ma20:.2f}\n"
             f"🌡️ RSI(14)：{rsi:.1f}\n"
             f"趨勢：{'多頭' if current_price > ma20 else '空頭'}\n\n"
-            f"🎯 【競賽預測區間：2026/3/27 - 4/2】\n"
+            f"🎯 【預測區間：{date_range_str}】\n"
             f"🤖 AI 上漲機率：{pred_msg}\n\n"
             f"📌 點擊上方圖表查看詳細策略回測"
         )
@@ -247,9 +256,8 @@ def analyze_and_predict_stock(stock_code, stock_name=None):
         return None, None
 
 def fast_predict(stock_code):
-    """🚀 極速版預測引擎（不畫圖，專供產業掃描防超時）"""
     try:
-        df = get_taiwan_stock_data(stock_code, 365) # 減少抓取年份以提升速度
+        df = get_taiwan_stock_data(stock_code, 365) 
         if df.empty or len(df) < 100: return None
         df = add_advanced_features(df)
         if len(df) < 60: return None
@@ -264,7 +272,6 @@ def fast_predict(stock_code):
         scaler = StandardScaler()
         X_scaled = scaler.fit_transform(train_df[FEATURES])
         
-        # 使用更輕量的參數秒殺運算
         model = LGBMClassifier(n_estimators=50, max_depth=4, random_state=42, verbose=-1)
         model.fit(X_scaled, train_df['Target'])
         
@@ -277,7 +284,7 @@ def fast_predict(stock_code):
         return None
 
 # ==========================================
-# 4. 回測 (配合 5 天預測邏輯)
+# 4. 回測
 # ==========================================
 def calculate_backtest(stock_code, stock_name=""):
     try:
@@ -413,31 +420,78 @@ def handle_message(event):
         else:
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text="❌ 資料獲取失敗，請稍後再試。"))
         return
-    elif msg.startswith("選產業_"):
-        target_industry = msg.split("_")[1]
+    elif "穩健" in msg or "激進" in msg:
+        strategy_key = "穩健" if "穩健" in msg else "激進"
+        stock_list = strategy_map[strategy_key]
         
-        # 為了避免伺服器算力崩潰，全市場模式僅示範前十大權值股
-        if target_industry == "全市場":
-            stock_list = ['2330', '2317', '2454', '2308', '2881', '2382', '2882', '2412', '2886', '2891']
-            target_industry = "全市場 (前十大權值示範)"
-        else:
-            stock_list = industry_map.get(target_industry, [])
-            
-        results_msg = [f"🚀 【{target_industry}】AI 掃描清單\n(預測區間: 3/27-4/2)"]
+        now = datetime.datetime.now()
+        start_date = now + datetime.timedelta(days=1)
+        end_date = now + datetime.timedelta(days=7)
+        date_range_str = f"{start_date.strftime('%m/%d')}-{end_date.strftime('%m/%d')}"
+
+        results_msg = [f"🚀 【{strategy_key}策略】AI 掃描清單\n⏳ 預測區間: {date_range_str}\n" + "-"*20]
         
         for code in stock_list:
             res = fast_predict(code)
             if res:
                 name, price, prob = res
-                if prob > 60: trend = "📈 強勢"
-                elif prob < 40: trend = "📉 弱勢"
-                else: trend = "⚖️ 震盪"
-                results_msg.append(f"• {code}{name}: {price:.2f}元 | 上漲機率 {prob:.1f}% {trend}")
+                if prob > 60: trend = "📈 強勢看漲"
+                elif prob < 40: trend = "📉 偏向看跌"
+                else: trend = "⚖️ 中性震盪"
+                
+                # 優化排版：使用多行字串並加入縮排，視覺更寬敞
+                formatted_item = (
+                    f"🔹 {code} {name}\n"
+                    f"   💰 收盤：{price:.2f} 元\n"
+                    f"   🤖 機率：{prob:.1f}% ({trend})"
+                )
+                results_msg.append(formatted_item)
                 
         if len(results_msg) == 1:
             reply_text = "❌ 掃描失敗或資料不足，請確認連線。"
         else:
-            reply_text = "\n".join(results_msg)
+            # 優化排版：區塊之間加入兩個換行符號
+            reply_text = "\n\n".join(results_msg)
+            
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
+        return
+    elif msg.startswith("選產業_"):
+        target_industry = msg.split("_")[1]
+        
+        if target_industry == "全市場":
+            stock_list = ['2330', '2317', '2454', '2308', '2881', '2382', '2882', '2412', '2886', '2891']
+            target_industry = "全市場 (權值示範)"
+        else:
+            stock_list = industry_map.get(target_industry, [])
+            
+        now = datetime.datetime.now()
+        start_date = now + datetime.timedelta(days=1)
+        end_date = now + datetime.timedelta(days=7)
+        date_range_str = f"{start_date.strftime('%m/%d')}-{end_date.strftime('%m/%d')}"
+            
+        results_msg = [f"🚀 【{target_industry}】AI 掃描清單\n⏳ 預測區間: {date_range_str}\n" + "-"*20]
+        
+        for code in stock_list:
+            res = fast_predict(code)
+            if res:
+                name, price, prob = res
+                if prob > 60: trend = "📈 強勢看漲"
+                elif prob < 40: trend = "📉 偏向看跌"
+                else: trend = "⚖️ 中性震盪"
+                
+                # 優化排版：使用多行字串並加入縮排，視覺更寬敞
+                formatted_item = (
+                    f"🔹 {code} {name}\n"
+                    f"   💰 收盤：{price:.2f} 元\n"
+                    f"   🤖 機率：{prob:.1f}% ({trend})"
+                )
+                results_msg.append(formatted_item)
+                
+        if len(results_msg) == 1:
+            reply_text = "❌ 掃描失敗或資料不足，請確認連線。"
+        else:
+            # 優化排版：區塊之間加入兩個換行符號
+            reply_text = "\n\n".join(results_msg)
             
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
         return
