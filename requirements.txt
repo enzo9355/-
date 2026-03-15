@@ -1,6 +1,5 @@
 Flask
 line-bot-sdk
-yfinance
 twstock
 scikit-learn
 matplotlib
@@ -8,3 +7,5 @@ pandas
 gunicorn
 lxml
 lightgbm
+requests
+numpy
