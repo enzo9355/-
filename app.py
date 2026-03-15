@@ -61,7 +61,7 @@ def cleanup_images():
         if len(files) > 100:
             files.sort(key=os.path.getmtime)
             for f in files[:50]: os.remove(f)
-    except Exception as e:
+    except Exception:
         pass
 
 # ==========================================
@@ -79,7 +79,7 @@ def auto_login_finmind():
         data = res.json()
         if data.get("msg") == "success":
             finmind_auto_token = data.get("token")
-    except Exception as e: pass
+    except Exception: pass
 
 def get_stock_name(stock_code):
     try:
@@ -119,16 +119,21 @@ def get_taiwan_stock_data(stock_code, period_days=730):
 
         if data.get("msg") == "success" and len(data.get("data", [])) > 0:
             df = pd.DataFrame(data["data"])
+            
+            # 🛡️ 終極防呆機制：將所有欄位強制轉小寫，無視 FinMind 官方的大小寫變動
+            df.columns = [str(c).lower() for c in df.columns]
             df = df.rename(columns={
                 'date': 'Date', 'open': 'Open', 'max': 'High', 'min': 'Low', 'close': 'Close', 
-                'volume': 'Volume', 'Trading_Volume': 'Volume'
+                'volume': 'Volume', 'trading_volume': 'Volume'
             })
+            
             df['Date'] = pd.to_datetime(df['Date'])
             df.set_index('Date', inplace=True)
             for col in ['Open', 'High', 'Low', 'Close', 'Volume']: 
                 df[col] = pd.to_numeric(df[col], errors='coerce')
             return df[['Open', 'High', 'Low', 'Close', 'Volume']].dropna()
-    except Exception as e: pass
+    except Exception as e: 
+        print(f"FinMind 抓取失敗 ({stock_code}): {e}")
     return pd.DataFrame()
 
 def add_advanced_features(df):
@@ -169,25 +174,24 @@ FEATURES = ['MA_5', 'MA_10', 'MA_20', 'MA_60', 'RET_1', 'RET_5', 'Volatility',
             'RSI_14', 'MACD', 'MACD_Signal', 'Volume_MA20', 'OBV', 'RS_60', 'ATR_14']
 
 # ==========================================
-# 3. 預測函數 (競賽專用：預測未來5個交易日)
+# 3. 預測函數
 # ==========================================
 def analyze_and_predict_stock(stock_code, stock_name=None):
     try:
         if not stock_name: stock_name = get_stock_name(stock_code)
         df = get_taiwan_stock_data(stock_code, 730)
-        if df.empty or len(df) < 100: return None, None
+        if df.empty or len(df) < 100: 
+            print(f"[{stock_code}] 資料筆數不足或為空")
+            return None, None
         
         df = add_advanced_features(df)
         if len(df) < 60: return None, None
         
-        # 🎯 核心修改：改為 shift(-5)，預測未來 5 天 (即一週) 的漲跌
         df['Future_5d_Close'] = df['Close'].shift(-5)
         df['Target'] = (df['Future_5d_Close'] > df['Close']).astype(int)
         
-        # 將「今天」的特徵抽出來，因為今天還沒有未來 5 天的答案，只能用來「被預測」
         latest_features = df[FEATURES].iloc[-1:]
         
-        # 訓練資料必須把最後 5 天刪掉，避免沒有答案的資料干擾 AI 學習
         train_df = df.dropna(subset=['Future_5d_Close'])
         if len(train_df) < 50: return None, None
         
@@ -205,13 +209,17 @@ def analyze_and_predict_stock(stock_code, stock_name=None):
         
         cleanup_images() 
         
+        now = datetime.datetime.now()
+        start_date = now + datetime.timedelta(days=1)
+        end_date = now + datetime.timedelta(days=7)
+        date_range_str = f"{start_date.strftime('%Y/%m/%d')}-{end_date.strftime('%m/%d')}"
+        
         plt.figure(figsize=(10, 6))
         plt.plot(df.index[-60:], df['Close'].iloc[-60:], label='收盤價', color='black', linewidth=2)
         plt.plot(df.index[-60:], df['MA_10'].iloc[-60:], label='10日均線', color='blue', linestyle='--')
         plt.plot(df.index[-60:], df['MA_20'].iloc[-60:], label='20日均線', color='red', linestyle='-.')
         
-        # 🎯 競賽視覺化：將圖表標題直接壓上競賽日期
-        plt.title(f'{stock_code} {stock_name} - 競賽預測 (3/27-4/2)', fontsize=16)
+        plt.title(f'{stock_code} {stock_name} - 預測區間 ({date_range_str})', fontsize=15, fontweight='bold')
         plt.xlabel('日期', fontsize=12)
         plt.ylabel('價格', fontsize=12)
         plt.legend(prop={'size': 12})
@@ -230,24 +238,24 @@ def analyze_and_predict_stock(stock_code, stock_name=None):
         elif up_prob < 40: pred_msg = f"偏向看跌 📉 ({up_prob:.1f}%)"
         else: pred_msg = f"中性震盪 ⚖️ ({up_prob:.1f}%)"
         
-        # 🎯 競賽專屬：文字對話泡泡也加上競賽日期
         analysis_text = (
             f"📊 {stock_name} ({stock_code})\n\n"
             f"💰 最新收盤：{current_price:.2f}\n"
             f"🌊 20日均線：{ma20:.2f}\n"
             f"🌡️ RSI(14)：{rsi:.1f}\n"
             f"趨勢：{'多頭' if current_price > ma20 else '空頭'}\n\n"
-            f"🎯 【競賽預測區間：3/27 - 4/2】\n"
-            f"🤖 AI 看漲機率：{pred_msg}\n\n"
+            f"🎯 【預測區間：{date_range_str}】\n"
+            f"🤖 AI 上漲機率：{pred_msg}\n\n"
             f"📌 點擊上方圖表查看詳細策略回測"
         )
         return filename, analysis_text
         
     except Exception as e:
+        print(f"預測函數崩潰 ({stock_code}): {e}")
         return None, None
 
 # ==========================================
-# 4. 回測 (配合 5 天預測邏輯)
+# 4. 回測
 # ==========================================
 def calculate_backtest(stock_code, stock_name=""):
     try:
@@ -256,7 +264,6 @@ def calculate_backtest(stock_code, stock_name=""):
         
         df = add_advanced_features(df)
         
-        # 🎯 回測也同步改成 5 天預測邏輯
         df['Future_5d_Close'] = df['Close'].shift(-5)
         df['Target'] = (df['Future_5d_Close'] > df['Close']).astype(int)
         
@@ -308,7 +315,7 @@ def calculate_backtest(stock_code, stock_name=""):
             if sharpe > 1: conclusion = "✅ 策略優勢：LGBM 精準抓到波段，高報酬且風險控制優異。\n🛒 買入建議：屬於模型極度擅長的標的，若預測未來一週看漲可進場。\n💰 賣出建議：預測轉跌時果斷停利。"
             else: conclusion = "✅ 擊敗大盤：能創造超額報酬，但過程資金震盪幅度較大。\n🛒 買入建議：可進場，但務必分批佈局攤平波動。\n💰 賣出建議：見好就收，適時減碼。"
         else:
-            if mdd > -15: conclusion = "🛡️ 下檔保護：總獲利雖輸給死抱不放，但大跌時有發揮避險作用。\n🛒 買入建議：適合防禦型配置。\n💰 賣出建議：不想資金閒置可轉換至強勢股。"
+            if mdd > -15: conclusion = "🛡️ 下檔保護：總獲利雖輸給死抱不放，大跌時具備避險作用。\n🛒 買入建議：適合防禦型配置。\n💰 賣出建議：不想資金閒置可轉換至強勢股。"
             else: conclusion = "⚠️ 模型失真：模型在此標的容易追高殺低。\n🛒 買入建議：請避開，不符合模型邏輯。\n💰 賣出建議：回歸均線判斷，跌破請停損。"
         
         res_text = (
@@ -388,7 +395,7 @@ def handle_message(event):
         target_industry = msg.split("_")[1]
         line_bot_api.reply_message(
             event.reply_token,
-            TextSendMessage(text=f"已鎖定【{target_industry}】，因演算法升級需消耗大量算力，全產業群體掃描功能暫時維護中，請直接輸入「個股代碼」查詢！")
+            TextSendMessage(text=f"已鎖定【{target_industry}】，因演算法升級需消耗大量算力，全產業掃描維護中，請直接輸入代碼查詢！")
         )
         return
     elif msg.startswith("詳細策略_"):
