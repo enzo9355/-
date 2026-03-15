@@ -120,7 +120,6 @@ def get_taiwan_stock_data(stock_code, period_days=730):
         if data.get("msg") == "success" and len(data.get("data", [])) > 0:
             df = pd.DataFrame(data["data"])
             
-            # 🛡️ 終極防呆機制：將所有欄位強制轉小寫，無視 FinMind 官方的大小寫變動
             df.columns = [str(c).lower() for c in df.columns]
             df = df.rename(columns={
                 'date': 'Date', 'open': 'Open', 'max': 'High', 'min': 'Low', 'close': 'Close', 
@@ -174,15 +173,14 @@ FEATURES = ['MA_5', 'MA_10', 'MA_20', 'MA_60', 'RET_1', 'RET_5', 'Volatility',
             'RSI_14', 'MACD', 'MACD_Signal', 'Volume_MA20', 'OBV', 'RS_60', 'ATR_14']
 
 # ==========================================
-# 3. 預測函數
+# 3. 預測函數群
 # ==========================================
 def analyze_and_predict_stock(stock_code, stock_name=None):
+    """一般單獨查詢使用（帶精美圖表）"""
     try:
         if not stock_name: stock_name = get_stock_name(stock_code)
         df = get_taiwan_stock_data(stock_code, 730)
-        if df.empty or len(df) < 100: 
-            print(f"[{stock_code}] 資料筆數不足或為空")
-            return None, None
+        if df.empty or len(df) < 100: return None, None
         
         df = add_advanced_features(df)
         if len(df) < 60: return None, None
@@ -209,17 +207,12 @@ def analyze_and_predict_stock(stock_code, stock_name=None):
         
         cleanup_images() 
         
-        now = datetime.datetime.now()
-        start_date = now + datetime.timedelta(days=1)
-        end_date = now + datetime.timedelta(days=7)
-        date_range_str = f"{start_date.strftime('%Y/%m/%d')}-{end_date.strftime('%m/%d')}"
-        
         plt.figure(figsize=(10, 6))
         plt.plot(df.index[-60:], df['Close'].iloc[-60:], label='收盤價', color='black', linewidth=2)
         plt.plot(df.index[-60:], df['MA_10'].iloc[-60:], label='10日均線', color='blue', linestyle='--')
         plt.plot(df.index[-60:], df['MA_20'].iloc[-60:], label='20日均線', color='red', linestyle='-.')
         
-        plt.title(f'{stock_code} {stock_name} - 預測區間 ({date_range_str})', fontsize=15, fontweight='bold')
+        plt.title(f'{stock_code} {stock_name} - 競賽指定預測 (2026/3/27-4/2)', fontsize=15, fontweight='bold')
         plt.xlabel('日期', fontsize=12)
         plt.ylabel('價格', fontsize=12)
         plt.legend(prop={'size': 12})
@@ -244,18 +237,47 @@ def analyze_and_predict_stock(stock_code, stock_name=None):
             f"🌊 20日均線：{ma20:.2f}\n"
             f"🌡️ RSI(14)：{rsi:.1f}\n"
             f"趨勢：{'多頭' if current_price > ma20 else '空頭'}\n\n"
-            f"🎯 【預測區間：{date_range_str}】\n"
+            f"🎯 【競賽預測區間：2026/3/27 - 4/2】\n"
             f"🤖 AI 上漲機率：{pred_msg}\n\n"
             f"📌 點擊上方圖表查看詳細策略回測"
         )
         return filename, analysis_text
         
     except Exception as e:
-        print(f"預測函數崩潰 ({stock_code}): {e}")
         return None, None
 
+def fast_predict(stock_code):
+    """🚀 極速版預測引擎（不畫圖，專供產業掃描防超時）"""
+    try:
+        df = get_taiwan_stock_data(stock_code, 365) # 減少抓取年份以提升速度
+        if df.empty or len(df) < 100: return None
+        df = add_advanced_features(df)
+        if len(df) < 60: return None
+        
+        df['Future_5d_Close'] = df['Close'].shift(-5)
+        df['Target'] = (df['Future_5d_Close'] > df['Close']).astype(int)
+        
+        latest_features = df[FEATURES].iloc[-1:]
+        train_df = df.dropna(subset=['Future_5d_Close'])
+        if len(train_df) < 50: return None
+        
+        scaler = StandardScaler()
+        X_scaled = scaler.fit_transform(train_df[FEATURES])
+        
+        # 使用更輕量的參數秒殺運算
+        model = LGBMClassifier(n_estimators=50, max_depth=4, random_state=42, verbose=-1)
+        model.fit(X_scaled, train_df['Target'])
+        
+        latest_scaled = scaler.transform(latest_features)
+        up_prob = model.predict_proba(latest_scaled)[0][1] * 100
+        current_price = float(df['Close'].iloc[-1])
+        
+        return get_stock_name(stock_code), current_price, up_prob
+    except:
+        return None
+
 # ==========================================
-# 4. 回測
+# 4. 回測 (配合 5 天預測邏輯)
 # ==========================================
 def calculate_backtest(stock_code, stock_name=""):
     try:
@@ -393,10 +415,31 @@ def handle_message(event):
         return
     elif msg.startswith("選產業_"):
         target_industry = msg.split("_")[1]
-        line_bot_api.reply_message(
-            event.reply_token,
-            TextSendMessage(text=f"已鎖定【{target_industry}】，因演算法升級需消耗大量算力，全產業掃描維護中，請直接輸入代碼查詢！")
-        )
+        
+        # 為了避免伺服器算力崩潰，全市場模式僅示範前十大權值股
+        if target_industry == "全市場":
+            stock_list = ['2330', '2317', '2454', '2308', '2881', '2382', '2882', '2412', '2886', '2891']
+            target_industry = "全市場 (前十大權值示範)"
+        else:
+            stock_list = industry_map.get(target_industry, [])
+            
+        results_msg = [f"🚀 【{target_industry}】AI 掃描清單\n(預測區間: 3/27-4/2)"]
+        
+        for code in stock_list:
+            res = fast_predict(code)
+            if res:
+                name, price, prob = res
+                if prob > 60: trend = "📈 強勢"
+                elif prob < 40: trend = "📉 弱勢"
+                else: trend = "⚖️ 震盪"
+                results_msg.append(f"• {code}{name}: {price:.2f}元 | 上漲機率 {prob:.1f}% {trend}")
+                
+        if len(results_msg) == 1:
+            reply_text = "❌ 掃描失敗或資料不足，請確認連線。"
+        else:
+            reply_text = "\n".join(results_msg)
+            
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
         return
     elif msg.startswith("詳細策略_"):
         stock_code = msg.split("_")[1]
