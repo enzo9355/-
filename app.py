@@ -131,7 +131,12 @@ def get_taiwan_stock_data(stock_code, period_days=730):
             df.set_index('Date', inplace=True)
             for col in ['Open', 'High', 'Low', 'Close', 'Volume']: 
                 df[col] = pd.to_numeric(df[col], errors='coerce')
-            return df[['Open', 'High', 'Low', 'Close', 'Volume']].dropna()
+            
+            df = df[['Open', 'High', 'Low', 'Close', 'Volume']].dropna()
+            
+            # 🛡️ 防呆機制：剔除收盤價為 0 或負數的異常資料，避免除以 0 產生 inf
+            df = df[df['Close'] > 0]
+            return df
     except Exception as e: 
         pass
     return pd.DataFrame()
@@ -179,11 +184,14 @@ FEATURES = ['MA_5', 'MA_10', 'MA_20', 'MA_60', 'RET_1', 'RET_5', 'Volatility',
 def analyze_and_predict_stock(stock_code, stock_name=None):
     try:
         if not stock_name: stock_name = get_stock_name(stock_code)
-        df = get_taiwan_stock_data(stock_code, 730)
-        if df.empty or len(df) < 100: return None, None
+        df = get_taiwan_stock_data(stock_code, 365)
+        if df.empty or len(df) < 100: return None, "❌ 該檔股票近期缺乏有效交易數據，無法進行分析。"
         
         df = add_advanced_features(df)
-        if len(df) < 60: return None, None
+        if len(df) < 60: return None, "❌ 該檔股票近期缺乏有效交易數據，無法進行分析。"
+        
+        current_price = float(df['Close'].iloc[-1])
+        if current_price <= 0: return None, "❌ 該檔股票出現 0 元異常收盤價，無法進行分析。"
         
         df['Future_5d_Close'] = df['Close'].shift(-5)
         df['Target'] = (df['Future_5d_Close'] > df['Close']).astype(int)
@@ -191,7 +199,7 @@ def analyze_and_predict_stock(stock_code, stock_name=None):
         latest_features = df[FEATURES].iloc[-1:]
         
         train_df = df.dropna(subset=['Future_5d_Close'])
-        if len(train_df) < 50: return None, None
+        if len(train_df) < 50: return None, "❌ 有效訓練資料不足。"
         
         X = train_df[FEATURES]
         y = train_df['Target']
@@ -199,7 +207,7 @@ def analyze_and_predict_stock(stock_code, stock_name=None):
         scaler = StandardScaler()
         X_scaled = scaler.fit_transform(X)
         
-        model = LGBMClassifier(n_estimators=100, learning_rate=0.05, max_depth=6, random_state=42, verbose=-1)
+        model = LGBMClassifier(n_estimators=80, learning_rate=0.05, max_depth=4, random_state=42, verbose=-1)
         model.fit(X_scaled, y)
         
         latest_scaled = scaler.transform(latest_features)
@@ -228,7 +236,6 @@ def analyze_and_predict_stock(stock_code, stock_name=None):
         plt.savefig(filepath, dpi=100, bbox_inches='tight')
         plt.close()
         
-        current_price = float(df['Close'].iloc[-1])
         ma20 = float(df['MA_20'].iloc[-1])
         rsi = float(df['RSI_14'].iloc[-1])
         
@@ -249,14 +256,17 @@ def analyze_and_predict_stock(stock_code, stock_name=None):
         return filename, analysis_text
         
     except Exception as e:
-        return None, None
+        return None, "❌ 分析過程中發生預期外的錯誤。"
 
 def fast_predict(stock_code):
     try:
-        df = get_taiwan_stock_data(stock_code, 200) 
+        df = get_taiwan_stock_data(stock_code, 365) 
         if df.empty or len(df) < 100: return None
         df = add_advanced_features(df)
         if len(df) < 60: return None
+        
+        current_price = float(df['Close'].iloc[-1])
+        if current_price <= 0: return None
         
         df['Future_5d_Close'] = df['Close'].shift(-5)
         df['Target'] = (df['Future_5d_Close'] > df['Close']).astype(int)
@@ -268,12 +278,11 @@ def fast_predict(stock_code):
         scaler = StandardScaler()
         X_scaled = scaler.fit_transform(train_df[FEATURES])
         
-        model = LGBMClassifier(n_estimators=50, max_depth=4, random_state=42, verbose=-1)
+        model = LGBMClassifier(n_estimators=80, learning_rate=0.05, max_depth=4, random_state=42, verbose=-1)
         model.fit(X_scaled, train_df['Target'])
         
         latest_scaled = scaler.transform(latest_features)
         up_prob = model.predict_proba(latest_scaled)[0][1] * 100
-        current_price = float(df['Close'].iloc[-1])
         
         return get_stock_name(stock_code), current_price, up_prob
     except:
@@ -301,14 +310,17 @@ def calculate_backtest(stock_code, stock_name=""):
         
         scaler = StandardScaler()
         X_train_scaled = scaler.fit_transform(train_df[FEATURES])
-        model = LGBMClassifier(n_estimators=100, max_depth=4, random_state=42, verbose=-1)
+        
+        model = LGBMClassifier(n_estimators=80, learning_rate=0.05, max_depth=4, random_state=42, verbose=-1)
         model.fit(X_train_scaled, train_df['Target'])
         
         X_test_scaled = scaler.transform(test_df[FEATURES])
         test_df['Prob'] = model.predict_proba(X_test_scaled)[:, 1]
         test_df['Signal'] = np.where(test_df['Prob'] > 0.60, 1, 0)
         
+        # 🛡️ 防呆機制：過濾掉因為極端數值造成的 inf 與 nan
         test_df['Next_Return'] = test_df['Close'].shift(-1) / test_df['Close'] - 1
+        test_df.replace([np.inf, -np.inf], np.nan, inplace=True)
         test_df = test_df.dropna(subset=['Next_Return'])
         
         test_df['Strategy_Return'] = test_df['Signal'] * test_df['Next_Return']
@@ -333,6 +345,12 @@ def calculate_backtest(stock_code, stock_name=""):
         
         std_dev = strategy_ret.std()
         sharpe = (strategy_ret.mean() / std_dev) * np.sqrt(252) if std_dev != 0 else 0
+        
+        # 二次防護，若運算結果仍為 nan 則設為 0
+        if np.isnan(strat_cum) or np.isinf(strat_cum): strat_cum = 0
+        if np.isnan(bh_cum) or np.isinf(bh_cum): bh_cum = 0
+        if np.isnan(mdd) or np.isinf(mdd): mdd = 0
+        if np.isnan(sharpe) or np.isinf(sharpe): sharpe = 0
         
         if sum(signals) == 0:
             conclusion = "⏸️ 訊號空窗：模型未發現高勝率進場點，選擇空手觀望。\n🛒 買入建議：缺乏多頭動能，建議資金先停泊。\n💰 賣出建議：若已持有，請嚴守個人停損。"
@@ -392,7 +410,6 @@ def handle_message(event):
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
         return
         
-    # 第一階段：按下預測，彈出產業選單
     elif msg == "預測":
         items = [QuickReplyButton(action=MessageAction(label="🌐 全市場 (權值示範)", text="選產業_全市場"))]
         for industry in industry_map.keys():
@@ -418,10 +435,9 @@ def handle_message(event):
             }
             line_bot_api.reply_message(event.reply_token, FlexSendMessage(alt_text="大盤預測", contents=flex_content))
         else:
-            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="❌ 資料獲取失敗，請稍後再試。"))
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=analysis_txt if analysis_txt else "❌ 資料獲取失敗，請稍後再試。"))
         return
         
-    # 第二階段：點選產業後，詢問投資風格 (穩健或激進)
     elif msg.startswith("選產業_"):
         target_industry = msg.split("_")[1]
         
@@ -436,11 +452,10 @@ def handle_message(event):
         )
         return
         
-    # 第三階段：執行掃描 (前5檔為穩健，後5檔為激進)
     elif msg.startswith("執行掃描_"):
         parts = msg.split("_")
-        strategy_key = parts[1] # 穩健 或 激進
-        target_industry = parts[2] # 產業名稱
+        strategy_key = parts[1]
+        target_industry = parts[2]
         
         if target_industry == "全市場":
             base_list = ['2330', '2317', '2454', '2308', '2881', '2382', '2882', '2412', '2886', '2891']
@@ -449,11 +464,10 @@ def handle_message(event):
             base_list = industry_map.get(target_industry, [])
             display_name = target_industry
             
-        # 依照風格拆分名單 (各取 5 檔)
         if strategy_key == "穩健":
-            stock_list = base_list[:5] # 取前5檔 (大型權值)
+            stock_list = base_list[:5]
         else:
-            stock_list = base_list[5:10] if len(base_list) >= 10 else base_list[-5:] # 取後5檔 (中小型)
+            stock_list = base_list[5:10] if len(base_list) >= 10 else base_list[-5:]
             
         now = datetime.datetime.now()
         start_date = now + datetime.timedelta(days=1)
@@ -478,7 +492,7 @@ def handle_message(event):
                 results_msg.append(formatted_item)
                 
         if len(results_msg) == 1:
-            reply_text = "❌ 掃描失敗或資料不足，請確認連線。"
+            reply_text = "❌ 掃描失敗或該產業近期缺乏有效交易資料。"
         else:
             reply_text = "\n\n".join(results_msg)
             
@@ -509,10 +523,11 @@ def handle_message(event):
             }
             line_bot_api.reply_message(event.reply_token, FlexSendMessage(alt_text=f"{target_name} 分析", contents=flex_content))
         else:
-            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="❌ 資料不足，無法分析"))
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=analysis_txt if analysis_txt else "❌ 資料不足，無法分析"))
     else:
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"找不到「{msg}」，請輸入正確代碼或名稱"))
 
 if __name__ == "__main__":
     port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port)
     app.run(host='0.0.0.0', port=port)
