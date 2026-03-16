@@ -34,21 +34,17 @@ LINE_CHANNEL_SECRET = os.getenv('LINE_CHANNEL_SECRET')
 FINMIND_USER = os.getenv('FINMIND_USER')
 FINMIND_PASSWORD = os.getenv('FINMIND_PASSWORD')
 
+# 名單設計：前5檔為穩健(大型權值)，後5檔為激進(中小型活潑)
 industry_map = {
-    "半導體業": ['2330', '2454', '2303', '3034', '3711', '3443', '2408', '3035', '3006', '3532'],
-    "電腦周邊": ['2317', '2382', '3231', '2357', '2356', '2324', '6669', '2353', '2377', '2352'],
-    "通信網路": ['2412', '3045', '4904', '2345', '5388', '3062', '2455', '3702', '6285', '3596'],
-    "光電產業": ['3008', '2409', '3481', '6706', '4956', '6176', '3406', '2448', '3504', '3019'],
-    "電子零組件": ['2308', '2327', '3037', '2383', '2059', '3042', '3044', '2492', '2313', '2316'],
-    "金融保險": ['2881', '2882', '2886', '2891', '5880', '2892', '2884', '2885', '2880', '2890'],
+    "半導體業": ['2330', '2454', '2303', '3711', '2408', '3034', '3443', '3035', '3006', '3532'],
+    "電腦周邊": ['2317', '2382', '3231', '2324', '2353', '2357', '2356', '6669', '2377', '2352'],
+    "通信網路": ['2412', '3045', '4904', '2345', '3702', '5388', '3062', '2455', '6285', '3596'],
+    "光電產業": ['3008', '2409', '3481', '2448', '3019', '6706', '4956', '6176', '3406', '3504'],
+    "電子零組件": ['2308', '2327', '3037', '2383', '2313', '2059', '3042', '3044', '2492', '2316'],
+    "金融保險": ['2881', '2882', '2886', '2891', '2884', '5880', '2892', '2885', '2880', '2890'],
     "航運業": ['2603', '2609', '2615', '2618', '2610', '2606', '2637', '2633', '5608', '2605'],
-    "鋼鐵工業": ['2002', '2014', '2006', '2027', '2031', '2023', '2015', '2009', '2034'],
+    "鋼鐵工業": ['2002', '2014', '2006', '2015', '2027', '2031', '2023', '2009', '2034', '2038'],
     "塑膠化學": ['1301', '1303', '6505', '1326', '1304', '1308', '1312', '1310', '1313', '4739']
-}
-
-strategy_map = {
-    "穩健": ['0050', '0056', '00878', '2881', '2412'],
-    "激進": ['2330', '2317', '3231', '2603', '3008']
 }
 
 all_watch_list = [stock for stocks in industry_map.values() for stock in stocks]
@@ -257,7 +253,6 @@ def analyze_and_predict_stock(stock_code, stock_name=None):
 
 def fast_predict(stock_code):
     try:
-        # 🚀 提速優化：只要取 200 天就能算出 60 日均線等特徵，減少 API 與 Pandas 運算時間
         df = get_taiwan_stock_data(stock_code, 200) 
         if df.empty or len(df) < 100: return None
         df = add_advanced_features(df)
@@ -396,21 +391,20 @@ def handle_message(event):
         reply_text = "⚠️ 免責聲明\n\n數據僅供程式開發交流。歷史勝率不代表未來績效，不構成買賣建議。請自行評估風險。"
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
         return
+        
+    # 第一階段：按下預測，彈出產業選單
     elif msg == "預測":
-        items = [
-            QuickReplyButton(action=MessageAction(label="🛡️ 穩健策略", text="穩健")),
-            QuickReplyButton(action=MessageAction(label="🔥 激進策略", text="激進")),
-            QuickReplyButton(action=MessageAction(label="🌐 全市場", text="選產業_全市場"))
-        ]
+        items = [QuickReplyButton(action=MessageAction(label="🌐 全市場 (權值示範)", text="選產業_全市場"))]
         for industry in industry_map.keys():
             items.append(QuickReplyButton(action=MessageAction(label=industry[:20], text=f"選產業_{industry}")))
         items.append(QuickReplyButton(action=MessageAction(label="📊 台股大盤預測", text="大盤預測")))
         
         line_bot_api.reply_message(
             event.reply_token,
-            TextSendMessage(text="請選擇預測策略或產業類別：👇", quick_reply=QuickReply(items=items))
+            TextSendMessage(text="請選擇您想觀察的【產業類別】：👇", quick_reply=QuickReply(items=items))
         )
         return
+        
     elif msg == "大盤預測":
         img_name, analysis_txt = analyze_and_predict_stock("TAIEX", "台股加權指數(大盤)")
         if img_name and analysis_txt:
@@ -426,57 +420,47 @@ def handle_message(event):
         else:
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text="❌ 資料獲取失敗，請稍後再試。"))
         return
-    elif "穩健" in msg or "激進" in msg:
-        strategy_key = "穩健" if "穩健" in msg else "激進"
-        # 🚀 提速優化：強制只取前 5 檔股票
-        stock_list = strategy_map[strategy_key][:5]
         
-        now = datetime.datetime.now()
-        start_date = now + datetime.timedelta(days=1)
-        end_date = now + datetime.timedelta(days=7)
-        date_range_str = f"{start_date.strftime('%m/%d')}-{end_date.strftime('%m/%d')}"
-
-        results_msg = [f"🚀 【{strategy_key}策略】AI 掃描清單\n⏳ 預測區間: {date_range_str}\n" + "-"*20]
-        
-        for code in stock_list:
-            res = fast_predict(code)
-            if res:
-                name, price, prob = res
-                if prob > 60: trend = "📈 強勢看漲"
-                elif prob < 40: trend = "📉 偏向看跌"
-                else: trend = "⚖️ 中性震盪"
-                
-                formatted_item = (
-                    f"🔹 {code} {name}\n"
-                    f"   💰 收盤：{price:.2f} 元\n"
-                    f"   🤖 機率：{prob:.1f}% ({trend})"
-                )
-                results_msg.append(formatted_item)
-                
-        if len(results_msg) == 1:
-            reply_text = "❌ 掃描失敗或資料不足，請確認連線。"
-        else:
-            reply_text = "\n\n".join(results_msg)
-            
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
-        return
+    # 第二階段：點選產業後，詢問投資風格 (穩健或激進)
     elif msg.startswith("選產業_"):
         target_industry = msg.split("_")[1]
         
+        items = [
+            QuickReplyButton(action=MessageAction(label="🛡️ 穩健策略", text=f"執行掃描_穩健_{target_industry}")),
+            QuickReplyButton(action=MessageAction(label="🔥 激進策略", text=f"執行掃描_激進_{target_industry}"))
+        ]
+        
+        line_bot_api.reply_message(
+            event.reply_token,
+            TextSendMessage(text=f"已鎖定【{target_industry}】\n請選擇您的投資風格：👇", quick_reply=QuickReply(items=items))
+        )
+        return
+        
+    # 第三階段：執行掃描 (前5檔為穩健，後5檔為激進)
+    elif msg.startswith("執行掃描_"):
+        parts = msg.split("_")
+        strategy_key = parts[1] # 穩健 或 激進
+        target_industry = parts[2] # 產業名稱
+        
         if target_industry == "全市場":
-            # 🚀 提速優化：強制只取前 5 檔股票
-            stock_list = ['2330', '2317', '2454', '2308', '2881']
-            target_industry = "全市場 (權值示範)"
+            base_list = ['2330', '2317', '2454', '2308', '2881', '2382', '2882', '2412', '2886', '2891']
+            display_name = "全市場 (權值示範)"
         else:
-            # 🚀 提速優化：強制只取前 5 檔股票
-            stock_list = industry_map.get(target_industry, [])[:5]
+            base_list = industry_map.get(target_industry, [])
+            display_name = target_industry
+            
+        # 依照風格拆分名單 (各取 5 檔)
+        if strategy_key == "穩健":
+            stock_list = base_list[:5] # 取前5檔 (大型權值)
+        else:
+            stock_list = base_list[5:10] if len(base_list) >= 10 else base_list[-5:] # 取後5檔 (中小型)
             
         now = datetime.datetime.now()
         start_date = now + datetime.timedelta(days=1)
         end_date = now + datetime.timedelta(days=7)
         date_range_str = f"{start_date.strftime('%m/%d')}-{end_date.strftime('%m/%d')}"
             
-        results_msg = [f"🚀 【{target_industry}】AI 掃描清單\n⏳ 預測區間: {date_range_str}\n" + "-"*20]
+        results_msg = [f"🚀 【{display_name} - {strategy_key}】 AI 掃描\n⏳ 預測區間: {date_range_str}\n" + "-"*20]
         
         for code in stock_list:
             res = fast_predict(code)
@@ -500,6 +484,7 @@ def handle_message(event):
             
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
         return
+        
     elif msg.startswith("詳細策略_"):
         stock_code = msg.split("_")[1]
         stock_name = "台股加權指數(大盤)" if stock_code == "TAIEX" else get_stock_name(stock_code)
