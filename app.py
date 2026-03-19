@@ -34,7 +34,7 @@ LINE_CHANNEL_SECRET = os.getenv('LINE_CHANNEL_SECRET')
 FINMIND_USER = os.getenv('FINMIND_USER')
 FINMIND_PASSWORD = os.getenv('FINMIND_PASSWORD')
 
-# 💡【極簡優化】統一 AI 模型參數，以後調參數只要改這裡！
+# 優化
 LGBM_PARAMS = {
     'n_estimators': 80, 
     'learning_rate': 0.05, 
@@ -101,7 +101,7 @@ def get_taiwan_stock_data(stock_code, period_days=730):
     global finmind_auto_token
     start_date = (datetime.datetime.now() - datetime.timedelta(days=period_days)).strftime('%Y-%m-%d')
     
-    # 💡【極簡優化】把抓資料包成小動作，失敗就自動重試一次
+    # 優化
     def fetch_data(token):
         url = f"https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockPrice&data_id={stock_code}&start_date={start_date}"
         if token: url += f"&token={token}"
@@ -124,7 +124,7 @@ def get_taiwan_stock_data(stock_code, period_days=730):
             for col in ['Open', 'High', 'Low', 'Close', 'Volume']: df[col] = pd.to_numeric(df[col], errors='coerce')
             
             df = df[['Open', 'High', 'Low', 'Close', 'Volume']].dropna()
-            return df[df['Close'] > 0] # 防呆機制
+            return df[df['Close'] > 0] # 防呆
     except Exception: pass
     return pd.DataFrame()
 
@@ -181,7 +181,7 @@ def analyze_and_predict_stock(stock_code, stock_name=None):
         scaler = StandardScaler()
         X_scaled = scaler.fit_transform(train_df[FEATURES])
         
-        # 💡【極簡優化】直接呼叫上面的字典，程式碼瞬間變乾淨
+        # 優化
         model = LGBMClassifier(**LGBM_PARAMS).fit(X_scaled, train_df['Target'])
         
         latest_scaled = scaler.transform(df[FEATURES].iloc[-1:])
@@ -229,7 +229,7 @@ def fast_predict(stock_code):
         if len(train_df) < 50: return None
         
         scaler = StandardScaler()
-        # 💡【極簡優化】一行搞定訓練與預測
+        # 優化
         model = LGBMClassifier(**LGBM_PARAMS).fit(scaler.fit_transform(train_df[FEATURES]), train_df['Target'])
         up_prob = model.predict_proba(scaler.transform(df[FEATURES].iloc[-1:]))[0][1] * 100
         
@@ -255,7 +255,7 @@ def calculate_backtest(stock_code, stock_name=""):
         train_df, test_df = valid_df.iloc[:split_idx], valid_df.iloc[split_idx:].copy()
         
         scaler = StandardScaler()
-        # 💡【極簡優化】再次套用字典
+        # 優化
         model = LGBMClassifier(**LGBM_PARAMS).fit(scaler.fit_transform(train_df[FEATURES]), train_df['Target'])
         
         test_df['Prob'] = model.predict_proba(scaler.transform(test_df[FEATURES]))[:, 1]
