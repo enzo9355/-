@@ -34,10 +34,6 @@ LINE_CHANNEL_SECRET = os.getenv('LINE_CHANNEL_SECRET')
 FINMIND_USER = os.getenv('FINMIND_USER')
 FINMIND_PASSWORD = os.getenv('FINMIND_PASSWORD')
 
-# --- 競賽專用日期常數設定 ---
-COMPETITION_DATE_RANGE = "2026/03/27 - 2026/04/02"
-COMPETITION_SHORT_DATE = "03/27-04/02"
-
 # 優化
 LGBM_PARAMS = {
     'n_estimators': 80, 
@@ -192,9 +188,8 @@ def analyze_and_predict_stock(stock_code, stock_name=None):
         up_prob = model.predict_proba(latest_scaled)[0][1] * 100
         
         cleanup_images() 
-        
-        # 強制使用競賽常數取代動態時間推算
-        date_range_str = COMPETITION_DATE_RANGE
+        now = datetime.datetime.now()
+        date_range_str = f"{(now + datetime.timedelta(days=1)).strftime('%Y/%m/%d')}-{(now + datetime.timedelta(days=7)).strftime('%m/%d')}"
         
         plt.figure(figsize=(10, 6))
         plt.plot(df.index[-60:], df['Close'].iloc[-60:], label='收盤價', color='black', linewidth=2)
@@ -350,8 +345,8 @@ def handle_message(event):
         base_list = ['2330', '2317', '2454', '2308', '2881', '2382', '2882', '2412', '2886', '2891'] if ind == "全市場" else industry_map.get(ind, [])
         stock_list = base_list[:5] if strategy == "穩健" else (base_list[5:10] if len(base_list) >= 10 else base_list[-5:])
         
-        # 強制使用競賽短版常數取代動態時間推算
-        date_range_str = COMPETITION_SHORT_DATE
+        now = datetime.datetime.now()
+        date_range_str = f"{(now + datetime.timedelta(days=1)).strftime('%m/%d')}-{(now + datetime.timedelta(days=7)).strftime('%m/%d')}"
         results_msg = [f"🚀 【{ind if ind != '全市場' else '全市場 (權值示範)'} - {strategy}】 AI 掃描\n⏳ 預測區間: {date_range_str}\n" + "-"*20]
         
         for code in stock_list:
