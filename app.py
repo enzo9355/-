@@ -21,13 +21,12 @@ import requests
 import datetime
 
 # ==================================================
-# v2.0 正式版（動態分類系統）
+# v2.1 正式版（雙風格10檔）
 # 更新內容：
-# 1. 不再手寫 industry_map
-# 2. 自動分類 ETF / 半導體 / 金融 / 航運 / AI伺服器...
-# 3. 全市場 = 全部股票 + ETF
-# 4. LINE 類別顯示數量
-# 5. 保留完整分析頁
+# 1. 預測可正常使用（Quick Reply 類別精簡）
+# 2. 每類輸出 10 檔 = 激進5 + 保守5
+# 3. 動態分類（不手寫股票池）
+# 4. 保留個股分析 + 完整分析網站
 # ==================================================
 
 # ==================================================
@@ -109,7 +108,7 @@ def search_stock_code(keyword):
 
 
 # ==================================================
-# 動態分類系統
+# 動態分類（精簡 8 類，避免 LINE 超限）
 # ==================================================
 def build_market_map():
 
@@ -120,113 +119,43 @@ def build_market_map():
         "AI伺服器": [],
         "金融保險": [],
         "航運": [],
-        "電子零組件": [],
-        "通信網路": [],
-        "光電": [],
-        "傳產": [],
-        "食品民生": [],
-        "生技醫療": [],
-        "綠能電力": [],
-        "營建資產": [],
-        "觀光百貨": []
+        "傳產民生": [],
+        "生技醫療": []
     }
 
     for code, info in twstock.codes.items():
 
         name = info.name
 
-        # 只收常見台股代碼
         if len(code) not in [4,5]:
             continue
 
         market["全市場"].append(code)
 
-        # ETF
         if code.startswith("00"):
             market["ETF專區"].append(code)
 
-        # 半導體
-        if any(k in name for k in [
-            "積體電","半導體","晶圓","矽","封測","IC"
-        ]):
+        if any(k in name for k in ["半導體","晶圓","IC","矽","積體電"]):
             market["半導體"].append(code)
 
-        # AI伺服器
-        if any(k in name for k in [
-            "廣達","鴻海","緯創","英業達","仁寶","技嘉","微星","伺服器"
-        ]):
+        if any(k in name for k in ["廣達","鴻海","緯創","仁寶","技嘉","微星"]):
             market["AI伺服器"].append(code)
 
-        # 金融
-        if any(k in name for k in [
-            "金","銀行","保險","證券"
-        ]):
+        if any(k in name for k in ["金","銀行","保險","證券"]):
             market["金融保險"].append(code)
 
-        # 航運
-        if any(k in name for k in [
-            "航","運","海運","航空"
-        ]):
+        if any(k in name for k in ["航","運","海運","航空"]):
             market["航運"].append(code)
 
-        # 電子零組件
-        if any(k in name for k in [
-            "電","科技","電子","精密"
-        ]):
-            market["電子零組件"].append(code)
+        if any(k in name for k in ["食品","塑膠","水泥","鋼","汽車","紡織"]):
+            market["傳產民生"].append(code)
 
-        # 通信
-        if any(k in name for k in [
-            "電信","網路","通訊","寬頻"
-        ]):
-            market["通信網路"].append(code)
-
-        # 光電
-        if any(k in name for k in [
-            "光","鏡頭","面板","LED"
-        ]):
-            market["光電"].append(code)
-
-        # 傳產
-        if any(k in name for k in [
-            "鋼","塑膠","水泥","汽車","橡膠","紡織"
-        ]):
-            market["傳產"].append(code)
-
-        # 食品
-        if any(k in name for k in [
-            "食品","超商","餐飲","飲料"
-        ]):
-            market["食品民生"].append(code)
-
-        # 生技
-        if any(k in name for k in [
-            "生技","醫","藥"
-        ]):
+        if any(k in name for k in ["醫","藥","生技"]):
             market["生技醫療"].append(code)
-
-        # 綠能
-        if any(k in name for k in [
-            "電力","能源","綠能","太陽能","風電"
-        ]):
-            market["綠能電力"].append(code)
-
-        # 營建
-        if any(k in name for k in [
-            "建設","營造","開發","資產"
-        ]):
-            market["營建資產"].append(code)
-
-        # 觀光
-        if any(k in name for k in [
-            "飯店","觀光","百貨","旅行"
-        ]):
-            market["觀光百貨"].append(code)
 
     return market
 
 
-# 啟動時建構一次
 industry_map = build_market_map()
 
 # ==================================================
@@ -260,7 +189,7 @@ def auto_login_finmind():
 
 
 # ==================================================
-# 抓資料
+# 股價資料
 # ==================================================
 def get_taiwan_stock_data(stock_code, period_days=365):
 
@@ -316,14 +245,11 @@ def get_taiwan_stock_data(stock_code, period_days=365):
 
 
 # ==================================================
-# 特徵工程
+# 特徵
 # ==================================================
 def add_features(df):
 
-    df["MA5"] = df["Close"].rolling(5).mean()
-    df["MA10"] = df["Close"].rolling(10).mean()
     df["MA20"] = df["Close"].rolling(20).mean()
-
     df["RET1"] = df["Close"].pct_change()
 
     delta = df["Close"].diff()
@@ -337,10 +263,10 @@ def add_features(df):
     return df
 
 
-FEATURES = ["MA5","MA10","MA20","RET1","RSI"]
+FEATURES = ["MA20","RET1","RSI"]
 
 # ==================================================
-# AI 分析
+# AI 個股分析
 # ==================================================
 def analyze_and_predict_stock(stock_code, stock_name=None):
 
@@ -360,6 +286,7 @@ def analyze_and_predict_stock(stock_code, stock_name=None):
         train_df = df.dropna()
 
         scaler = StandardScaler()
+
         X = scaler.fit_transform(train_df[FEATURES])
         y = train_df["Target"]
 
@@ -377,9 +304,9 @@ def analyze_and_predict_stock(stock_code, stock_name=None):
         plt.figure(figsize=(10,6))
         plt.plot(df.index[-60:], df["Close"].iloc[-60:], label="收盤價")
         plt.plot(df.index[-60:], df["MA20"].iloc[-60:], label="MA20")
-        plt.title(f"{stock_name} ({stock_code})")
-        plt.grid(True)
         plt.legend()
+        plt.grid(True)
+        plt.title(f"{stock_name} ({stock_code})")
         plt.savefig(filepath, dpi=100, bbox_inches="tight")
         plt.close()
 
@@ -388,20 +315,12 @@ def analyze_and_predict_stock(stock_code, stock_name=None):
 
         trend = "多頭" if current_price > float(df["MA20"].iloc[-1]) else "空頭"
 
-        pred = (
-            f"強勢看漲 📈 ({up_prob:.1f}%)"
-            if up_prob > 60 else
-            f"偏向看跌 📉 ({up_prob:.1f}%)"
-            if up_prob < 40 else
-            f"中性震盪 ⚖️ ({up_prob:.1f}%)"
-        )
-
         text = (
             f"📊 {stock_name} ({stock_code})\n\n"
-            f"💰 最新價格：{current_price:.2f}\n"
+            f"💰 價格：{current_price:.2f}\n"
             f"🌡 RSI：{rsi:.1f}\n"
-            f"📈 趨勢：{trend}\n\n"
-            f"🤖 AI預測：{pred}"
+            f"📈 趨勢：{trend}\n"
+            f"🤖 上漲機率：{up_prob:.1f}%"
         )
 
         return filename, text
@@ -411,16 +330,70 @@ def analyze_and_predict_stock(stock_code, stock_name=None):
 
 
 # ==================================================
-# 網站首頁
+# 風格排名（激進5 + 保守5）
+# ==================================================
+def build_style_result(category):
+
+    stock_list = industry_map.get(category, [])[:30]
+
+    aggr = []
+    safe = []
+
+    for code in stock_list:
+
+        try:
+            df = get_taiwan_stock_data(code, 120)
+
+            if df.empty or len(df) < 40:
+                continue
+
+            df = add_features(df)
+
+            close = float(df["Close"].iloc[-1])
+            ma20 = float(df["MA20"].iloc[-1])
+            rsi = float(df["RSI"].iloc[-1])
+
+            volatility = df["RET1"].std()
+
+            score_aggr = volatility * 100 + (close / ma20)
+            score_safe = (close / ma20) - volatility * 30 - abs(rsi - 55) / 100
+
+            aggr.append((score_aggr, code))
+            safe.append((score_safe, code))
+
+        except:
+            continue
+
+    aggr = sorted(aggr, reverse=True)[:5]
+    safe = sorted(safe, reverse=True)[:5]
+
+    lines = [f"📈 {category} Top10\n"]
+
+    lines.append("🔥 激進型 5 檔")
+    rank = 1
+    for _, code in aggr:
+        lines.append(f"{rank}. {code} {get_stock_name(code)}")
+        rank += 1
+
+    lines.append("")
+    lines.append("🛡 保守型 5 檔")
+
+    rank = 1
+    for _, code in safe:
+        lines.append(f"{rank}. {code} {get_stock_name(code)}")
+        rank += 1
+
+    return "\n".join(lines)
+
+
+# ==================================================
+# 網站
 # ==================================================
 @app.route("/")
 def home():
-    return "<h1>AI 台股系統 v2.0 動態分類運作中</h1>"
+    return "<h1>AI 台股系統 v2.1 雙風格版運行中</h1>"
 
 
-# ==================================================
-# 個股頁
-# ==================================================
 @app.route("/stock/<stock_code>")
 def stock_page(stock_code):
 
@@ -430,9 +403,6 @@ def stock_page(stock_code):
     return f"<pre>{analysis}</pre>"
 
 
-# ==================================================
-# 圖片
-# ==================================================
 @app.route("/static/tmp/<path:filename>")
 def serve_static(filename):
     return send_from_directory(static_tmp_path, filename)
@@ -463,18 +433,17 @@ def handle_message(event):
 
     msg = event.message.text.strip()
 
+    # 預測
     if msg == "預測":
 
         items = []
 
         for ind in industry_map.keys():
 
-            count = len(industry_map[ind])
-
             items.append(
                 QuickReplyButton(
                     action=MessageAction(
-                        label=f"{ind}({count})"[:20],
+                        label=ind[:20],
                         text=f"選產業_{ind}"
                     )
                 )
@@ -489,23 +458,20 @@ def handle_message(event):
         )
         return
 
+    # 類別 Top10
     if msg.startswith("選產業_"):
 
-        ind = msg.replace("選產業_", "")
+        category = msg.replace("選產業_", "")
 
-        stock_list = industry_map.get(ind, [])[:10]
-
-        result = [f"📈 {ind}（{len(industry_map.get(ind, []))}檔）"]
-
-        for code in stock_list:
-            result.append(f"{code} {get_stock_name(code)}")
+        result = build_style_result(category)
 
         line_bot_api.reply_message(
             event.reply_token,
-            TextSendMessage(text="\n".join(result))
+            TextSendMessage(text=result)
         )
         return
 
+    # 個股分析
     target_code, target_name = (
         (msg, None)
         if msg.isdigit()
@@ -518,12 +484,64 @@ def handle_message(event):
 
         web_url = f"{request.host_url}stock/{target_code}".replace("http://","https://")
 
-        line_bot_api.reply_message(
-            event.reply_token,
-            TextSendMessage(
-                text=f"{analysis}\n\n完整分析：{web_url}"
+        if img_name:
+
+            hero_url = f"{request.host_url}static/tmp/{img_name}".replace("http://","https://")
+
+            flex = {
+                "type":"bubble",
+
+                "hero":{
+                    "type":"image",
+                    "url":hero_url,
+                    "size":"full",
+                    "aspectRatio":"10:6",
+                    "aspectMode":"cover"
+                },
+
+                "body":{
+                    "type":"box",
+                    "layout":"vertical",
+                    "contents":[
+                        {
+                            "type":"text",
+                            "text":analysis,
+                            "wrap":True,
+                            "size":"sm"
+                        }
+                    ]
+                },
+
+                "footer":{
+                    "type":"box",
+                    "layout":"vertical",
+                    "contents":[
+                        {
+                            "type":"button",
+                            "style":"primary",
+                            "action":{
+                                "type":"uri",
+                                "label":"查看完整分析",
+                                "uri":web_url
+                            }
+                        }
+                    ]
+                }
+            }
+
+            line_bot_api.reply_message(
+                event.reply_token,
+                FlexSendMessage(
+                    alt_text="股票分析",
+                    contents=flex
+                )
             )
-        )
+
+        else:
+            line_bot_api.reply_message(
+                event.reply_token,
+                TextSendMessage(text=analysis)
+            )
 
     else:
         line_bot_api.reply_message(
