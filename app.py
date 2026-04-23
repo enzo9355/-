@@ -21,7 +21,15 @@ import requests
 import datetime
 
 # ==================================================
-# 1. 基本設定
+# v1.1 正式版
+# 更新內容：
+# 1. LINE 卡片新增可點擊按鈕（完整分析）
+# 2. 網站個股頁保留
+# 3. LINE + Website 雙平台優化
+# ==================================================
+
+# ==================================================
+# 基本設定
 # ==================================================
 font_path = "taipei_sans.ttf"
 
@@ -49,7 +57,7 @@ static_tmp_path = "static/tmp"
 os.makedirs(static_tmp_path, exist_ok=True)
 
 # ==================================================
-# 2. 模型參數
+# 模型參數
 # ==================================================
 LGBM_PARAMS = {
     "n_estimators": 80,
@@ -60,18 +68,17 @@ LGBM_PARAMS = {
 }
 
 # ==================================================
-# 3. 產業分類（保留）
+# 產業分類
 # ==================================================
 industry_map = {
-    "半導體業": ['2330','2454','2303','3711','2408','3034','3443','3035','3006','3532'],
-    "電腦周邊": ['2317','2382','3231','2324','2353','2357','2356','6669','2377','2352'],
-    "通信網路": ['2412','3045','4904','2345','3702','5388','3062','2455','6285','3596'],
-    "金融保險": ['2881','2882','2886','2891','2884','5880','2892','2885','2880','2890'],
-    "航運業": ['2603','2609','2615','2618','2610','2606','2637','2633','5608','2605']
+    "半導體業": ['2330','2454','2303','3711','2408'],
+    "電腦周邊": ['2317','2382','3231','2324','2353'],
+    "金融保險": ['2881','2882','2886','2891','2884'],
+    "航運業": ['2603','2609','2615','2618','2610']
 }
 
 # ==================================================
-# 4. 工具函數
+# 工具函數
 # ==================================================
 def cleanup_images():
     try:
@@ -96,6 +103,7 @@ def get_stock_name(code):
 
 
 def search_stock_code(keyword):
+
     keyword = keyword.upper()
 
     if keyword.isdigit():
@@ -109,12 +117,13 @@ def search_stock_code(keyword):
 
 
 # ==================================================
-# 5. FinMind 登入
+# FinMind
 # ==================================================
 finmind_auto_token = ""
 
 
 def auto_login_finmind():
+
     global finmind_auto_token
 
     if not FINMIND_USER or not FINMIND_PASSWORD:
@@ -138,7 +147,7 @@ def auto_login_finmind():
 
 
 # ==================================================
-# 6. 抓股票資料
+# 抓股價資料
 # ==================================================
 def get_taiwan_stock_data(stock_code, period_days=365):
 
@@ -159,6 +168,7 @@ def get_taiwan_stock_data(stock_code, period_days=365):
         return requests.get(url, timeout=10).json()
 
     try:
+
         if FINMIND_USER and not finmind_auto_token:
             auto_login_finmind()
 
@@ -195,7 +205,7 @@ def get_taiwan_stock_data(stock_code, period_days=365):
 
 
 # ==================================================
-# 7. 特徵工程
+# 特徵工程
 # ==================================================
 def add_features(df):
 
@@ -206,7 +216,6 @@ def add_features(df):
     df["RET1"] = df["Close"].pct_change()
 
     delta = df["Close"].diff()
-
     gain = delta.clip(lower=0).rolling(14).mean()
     loss = -delta.clip(upper=0).rolling(14).mean()
 
@@ -220,7 +229,7 @@ def add_features(df):
 FEATURES = ["MA5","MA10","MA20","RET1","RSI"]
 
 # ==================================================
-# 8. AI 分析
+# AI 分析
 # ==================================================
 def analyze_and_predict_stock(stock_code, stock_name=None):
 
@@ -259,9 +268,9 @@ def analyze_and_predict_stock(stock_code, stock_name=None):
         plt.figure(figsize=(10,6))
         plt.plot(df.index[-60:], df["Close"].iloc[-60:], label="收盤價")
         plt.plot(df.index[-60:], df["MA20"].iloc[-60:], label="MA20")
-        plt.legend()
         plt.title(f"{stock_name} ({stock_code})")
         plt.grid(True)
+        plt.legend()
         plt.savefig(filepath, dpi=100, bbox_inches="tight")
         plt.close()
 
@@ -293,7 +302,7 @@ def analyze_and_predict_stock(stock_code, stock_name=None):
 
 
 # ==================================================
-# 9. 網站首頁
+# 網站首頁
 # ==================================================
 @app.route("/")
 def home():
@@ -305,19 +314,19 @@ def home():
             body{
                 background:#111;
                 color:white;
-                font-family:Arial;
                 text-align:center;
                 padding:60px;
+                font-family:Arial;
             }
             a{
                 color:#00d4ff;
-                font-size:22px;
                 text-decoration:none;
+                font-size:22px;
             }
         </style>
     </head>
     <body>
-        <h1>📈 AI 台股系統</h1>
+        <h1>📈 AI 台股系統 v1.1</h1>
         <p>LINE Bot 正常運作中</p>
         <p><a href="/stock/2330">查看台積電示範頁</a></p>
     </body>
@@ -326,24 +335,20 @@ def home():
 
 
 # ==================================================
-# 10. 個股網站頁
+# 個股頁
 # ==================================================
 @app.route("/stock/<stock_code>")
 def stock_page(stock_code):
 
     stock_name = get_stock_name(stock_code)
 
-    img_name, analysis = analyze_and_predict_stock(
-        stock_code,
-        stock_name
-    )
+    img_name, analysis = analyze_and_predict_stock(stock_code, stock_name)
 
     image_html = ""
 
     if img_name:
         image_html = f"""
-        <img src="/static/tmp/{img_name}"
-             style="width:100%;border-radius:15px;">
+        <img src="/static/tmp/{img_name}" style="width:100%;border-radius:15px;">
         """
 
     return f"""
@@ -360,23 +365,16 @@ def stock_page(stock_code):
                 margin:auto;
                 padding:30px;
             }}
-
             .card {{
                 background:#222;
                 padding:25px;
                 border-radius:20px;
             }}
-
             pre {{
                 white-space:pre-wrap;
                 color:white;
                 font-size:17px;
                 line-height:1.7;
-            }}
-
-            a {{
-                color:#00d4ff;
-                text-decoration:none;
             }}
         </style>
     </head>
@@ -393,17 +391,13 @@ def stock_page(stock_code):
 
         {image_html}
 
-        <br><br>
-
-        <a href="/">← 回首頁</a>
-
     </body>
     </html>
     """
 
 
 # ==================================================
-# 11. 靜態圖片
+# 圖片
 # ==================================================
 @app.route("/static/tmp/<path:filename>")
 def serve_static(filename):
@@ -411,13 +405,12 @@ def serve_static(filename):
 
 
 # ==================================================
-# 12. LINE Callback
+# LINE webhook
 # ==================================================
 @app.route("/callback", methods=["POST"])
 def callback():
 
     signature = request.headers["X-Line-Signature"]
-
     body = request.get_data(as_text=True)
 
     try:
@@ -429,7 +422,7 @@ def callback():
 
 
 # ==================================================
-# 13. LINE 收訊息
+# LINE 收訊息
 # ==================================================
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
@@ -440,9 +433,7 @@ def handle_message(event):
 
         line_bot_api.reply_message(
             event.reply_token,
-            TextSendMessage(
-                text="輸入股票代碼或名稱，例如：2330 / 台積電"
-            )
+            TextSendMessage(text="輸入股票代碼或名稱，例如：2330 / 台積電")
         )
         return
 
@@ -477,8 +468,7 @@ def handle_message(event):
 
         result = [f"📈 {ind}"]
 
-        for code in stock_list[:5]:
-            res = analyze_and_predict_stock(code, get_stock_name(code))
+        for code in stock_list:
             result.append(f"{code} {get_stock_name(code)}")
 
         line_bot_api.reply_message(
@@ -495,25 +485,17 @@ def handle_message(event):
 
     if target_code:
 
-        img_name, analysis = analyze_and_predict_stock(
-            target_code,
-            target_name
-        )
+        img_name, analysis = analyze_and_predict_stock(target_code, target_name)
 
-        web_url = f"{request.host_url}stock/{target_code}".replace(
-            "http://", "https://"
-        )
+        web_url = f"{request.host_url}stock/{target_code}".replace("http://", "https://")
 
         if img_name:
 
-            analysis += f"\n\n🌐 完整分析：{web_url}"
-
-            hero_url = f"{request.host_url}static/tmp/{img_name}".replace(
-                "http://", "https://"
-            )
+            hero_url = f"{request.host_url}static/tmp/{img_name}".replace("http://", "https://")
 
             flex = {
                 "type": "bubble",
+
                 "hero": {
                     "type": "image",
                     "url": hero_url,
@@ -521,6 +503,7 @@ def handle_message(event):
                     "aspectRatio": "10:6",
                     "aspectMode": "cover"
                 },
+
                 "body": {
                     "type": "box",
                     "layout": "vertical",
@@ -530,6 +513,24 @@ def handle_message(event):
                             "text": analysis,
                             "wrap": True,
                             "size": "sm"
+                        }
+                    ]
+                },
+
+                "footer": {
+                    "type": "box",
+                    "layout": "vertical",
+                    "spacing": "sm",
+                    "contents": [
+                        {
+                            "type": "button",
+                            "style": "primary",
+                            "height": "sm",
+                            "action": {
+                                "type": "uri",
+                                "label": "查看完整分析",
+                                "uri": web_url
+                            }
                         }
                     ]
                 }
@@ -552,14 +553,12 @@ def handle_message(event):
     else:
         line_bot_api.reply_message(
             event.reply_token,
-            TextSendMessage(
-                text="找不到股票，請輸入代碼或名稱"
-            )
+            TextSendMessage(text="找不到股票，請輸入代碼或名稱")
         )
 
 
 # ==================================================
-# 14. 啟動
+# 啟動
 # ==================================================
 if __name__ == "__main__":
     app.run(
