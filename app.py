@@ -1,58 +1,33 @@
 # app.py
-# v2.4 FinMind 原架構升級版
+# v2.6 真動態產業完整版
 # --------------------------------------------------
-# 說明：
-# 1. 全資料來源回歸 FinMind
-# 2. 個股 / ETF / 大盤 預測統一資料源
-# 3. 保留：
-#    - LINE Bot
-#    - 預測分類
-#    - 激進5 + 保守5
-#    - 完整分析網址
-# 4. 大盤預測改抓 FinMind 指數資料
+# 核心升級：
+# 1. 產業類別動態生成（不寫死股票名單）
+# 2. 全市場由 twstock.codes 自動掃描
+# 3. 激進5 / 保守5 真排序
+# 4. 大盤預測 + 完整分析
+# 5. FinMind 單一資料源
 # --------------------------------------------------
 
 import os
-import time
-import urllib.request
 import datetime
 import requests
 import pandas as pd
 import numpy as np
 import twstock
 
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-import matplotlib.font_manager as fm
-
-from flask import Flask, request, abort, send_from_directory
+from flask import Flask, request, abort
 
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import (
     MessageEvent, TextMessage, TextSendMessage,
-    QuickReply, QuickReplyButton, MessageAction,
-    FlexSendMessage
+    QuickReply, QuickReplyButton, MessageAction
 )
-
-from sklearn.preprocessing import StandardScaler
-from lightgbm import LGBMClassifier
 
 # ==================================================
 # 基本設定
 # ==================================================
-font_path = "taipei_sans.ttf"
-
-if not os.path.exists(font_path):
-    urllib.request.urlretrieve(
-        "https://github.com/googlefonts/noto-cjk/raw/main/Sans/OTF/TraditionalChinese/NotoSansCJKtc-Regular.otf",
-        font_path
-    )
-
-fm.fontManager.addfont(font_path)
-plt.rcParams["font.family"] = fm.FontProperties(fname=font_path).get_name()
-
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
 
@@ -64,28 +39,13 @@ app = Flask(__name__)
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-STATIC_PATH = "static/tmp"
-os.makedirs(STATIC_PATH, exist_ok=True)
-
-# ==================================================
-# 模型設定
-# ==================================================
-LGBM_PARAMS = {
-    "n_estimators": 80,
-    "learning_rate": 0.05,
-    "max_depth": 4,
-    "random_state": 42,
-    "verbose": -1
-}
-
-FEATURES = ["MA20", "RET1", "RSI"]
-
-# ==================================================
-# FinMind Token
-# ==================================================
 finmind_token = ""
 
+# ==================================================
+# FinMind 登入
+# ==================================================
 def finmind_login():
+
     global finmind_token
 
     if finmind_token:
@@ -133,28 +93,10 @@ def search_stock_code(keyword):
     return None, None
 
 
-def cleanup_images():
-
-    try:
-        files = sorted(
-            [os.path.join(STATIC_PATH, f)
-             for f in os.listdir(STATIC_PATH)
-             if f.endswith(".png")],
-            key=os.path.getmtime
-        )
-
-        if len(files) > 100:
-            for f in files[:50]:
-                os.remove(f)
-
-    except:
-        pass
-
-
 # ==================================================
-# FinMind 抓個股 / ETF
+# FinMind 抓股價
 # ==================================================
-def get_stock_data(stock_code, days=365):
+def get_stock_data(stock_code, days=180):
 
     finmind_login()
 
@@ -172,206 +114,258 @@ def get_stock_data(stock_code, days=365):
             f"&token={finmind_token}"
         )
 
-        data = requests.get(url, timeout=10).json()
+        data = requests.get(url, timeout=8).json()
 
         if data.get("msg") != "success":
             return pd.DataFrame()
 
         df = pd.DataFrame(data["data"])
 
-        df = df.rename(columns={
-            "date": "Date",
-            "open": "Open",
-            "max": "High",
-            "min": "Low",
-            "close": "Close",
-            "Trading_Volume": "Volume",
-            "trading_volume": "Volume"
-        })
+        df["Close"] = pd.to_numeric(df["close"], errors="coerce")
+        df["Date"] = pd.to_datetime(df["date"])
 
-        df["Date"] = pd.to_datetime(df["Date"])
         df.set_index("Date", inplace=True)
 
-        for col in ["Open", "High", "Low", "Close", "Volume"]:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-
-        return df[["Open", "High", "Low", "Close", "Volume"]].dropna()
+        return df[["Close"]].dropna()
 
     except:
         return pd.DataFrame()
 
 
 # ==================================================
-# FinMind 抓大盤（加權指數）
+# 動態產業分類（核心）
 # ==================================================
-def get_taiex_data(days=365):
+def build_market_map():
 
-    finmind_login()
+    market = {
+        "全市場": [],
+        "ETF專區": [],
+        "半導體": [],
+        "AI伺服器": [],
+        "金融保險": [],
+        "航運物流": [],
+        "傳產民生": [],
+        "生技醫療": []
+    }
 
-    start_date = (
-        datetime.datetime.now()
-        - datetime.timedelta(days=days)
-    ).strftime("%Y-%m-%d")
+    for code, info in twstock.codes.items():
 
-    # FinMind 指數資料集
-    # 若未來官方名稱更動，只需改 dataset 名稱即可
-    dataset_names = [
-        "TaiwanStockTotalReturnIndex",
-        "TaiwanStockPriceIndex"
-    ]
+        name = info.name
 
-    for dataset in dataset_names:
+        if len(code) not in [4, 5]:
+            continue
 
-        try:
-            url = (
-                "https://api.finmindtrade.com/api/v4/data"
-                f"?dataset={dataset}"
-                f"&data_id=TAIEX"
-                f"&start_date={start_date}"
-                f"&token={finmind_token}"
-            )
+        market["全市場"].append(code)
 
-            data = requests.get(url, timeout=10).json()
+        # ETF
+        if code.startswith("00"):
+            market["ETF專區"].append(code)
 
-            if data.get("msg") == "success" and data.get("data"):
+        # 半導體
+        if any(k in name for k in [
+            "半導體", "IC", "晶圓", "矽", "封測"
+        ]):
+            market["半導體"].append(code)
 
-                df = pd.DataFrame(data["data"])
+        # AI
+        if any(k in name for k in [
+            "廣達", "鴻海", "緯創", "仁寶",
+            "技嘉", "微星", "英業達"
+        ]):
+            market["AI伺服器"].append(code)
 
-                # 兼容不同欄位
-                close_col = None
-                for c in ["close", "price", "value"]:
-                    if c in df.columns:
-                        close_col = c
-                        break
+        # 金融
+        if any(k in name for k in [
+            "金", "銀行", "證券", "保險"
+        ]):
+            market["金融保險"].append(code)
 
-                if not close_col:
-                    continue
+        # 航運
+        if any(k in name for k in [
+            "航", "運", "物流", "航空"
+        ]):
+            market["航運物流"].append(code)
 
-                df["Date"] = pd.to_datetime(df["date"])
-                df.set_index("Date", inplace=True)
+        # 傳產
+        if any(k in name for k in [
+            "食品", "塑膠", "鋼", "汽車",
+            "水泥", "紡織"
+        ]):
+            market["傳產民生"].append(code)
 
-                df["Close"] = pd.to_numeric(df[close_col], errors="coerce")
-                df["Open"] = df["Close"]
-                df["High"] = df["Close"]
-                df["Low"] = df["Close"]
-                df["Volume"] = 0
+        # 生技
+        if any(k in name for k in [
+            "醫", "藥", "生技"
+        ]):
+            market["生技醫療"].append(code)
 
-                return df[["Open", "High", "Low", "Close", "Volume"]].dropna()
+    return market
 
-        except:
-            pass
 
-    return pd.DataFrame()
-
+industry_map = build_market_map()
 
 # ==================================================
-# 特徵工程
+# 技術指標計算
 # ==================================================
-def add_features(df):
+def calc_metrics(code):
 
-    df["MA20"] = df["Close"].rolling(20).mean()
-    df["RET1"] = df["Close"].pct_change()
+    df = get_stock_data(code, 180)
 
-    delta = df["Close"].diff()
+    if df.empty or len(df) < 30:
+        return None
+
+    close = df["Close"]
+
+    ret = close.pct_change().dropna()
+
+    ma20 = close.rolling(20).mean().iloc[-1]
+    last = close.iloc[-1]
+
+    vol = ret.std()
+
+    momentum = (last / close.iloc[-20]) - 1 if len(close) > 20 else 0
+
+    # RSI
+    delta = close.diff()
 
     gain = delta.clip(lower=0).rolling(14).mean()
     loss = -delta.clip(upper=0).rolling(14).mean()
 
-    df["RSI"] = 100 - (100 / (1 + gain / (loss + 1e-9)))
+    rs = gain / (loss + 1e-9)
 
-    df.dropna(inplace=True)
+    rsi = (100 - 100 / (1 + rs)).iloc[-1]
 
-    return df
+    return {
+        "code": code,
+        "name": get_stock_name(code),
+        "last": last,
+        "ma20": ma20,
+        "vol": vol,
+        "momentum": momentum,
+        "rsi": rsi
+    }
 
 
 # ==================================================
-# 個股分析
+# 激進 / 保守 排名
 # ==================================================
-def analyze_stock(stock_code):
+def build_style_result(category):
 
-    name = get_stock_name(stock_code)
+    stock_list = industry_map.get(category, [])[:30]
 
-    df = get_stock_data(stock_code, 365)
+    rows = []
 
-    if df.empty or len(df) < 80:
-        return None, "❌ 資料不足"
+    for code in stock_list:
 
-    df = add_features(df)
+        data = calc_metrics(code)
 
-    df["Future"] = df["Close"].shift(-5)
-    df["Target"] = (df["Future"] > df["Close"]).astype(int)
+        if data:
+            rows.append(data)
 
-    train_df = df.dropna()
+    if not rows:
+        return "❌ 此分類暫無資料"
 
-    scaler = StandardScaler()
-
-    X = scaler.fit_transform(train_df[FEATURES])
-    y = train_df["Target"]
-
-    model = LGBMClassifier(**LGBM_PARAMS)
-    model.fit(X, y)
-
-    latest = scaler.transform(df[FEATURES].iloc[-1:])
-    up_prob = model.predict_proba(latest)[0][1] * 100
-
-    close = float(df["Close"].iloc[-1])
-    ma20 = float(df["MA20"].iloc[-1])
-    rsi = float(df["RSI"].iloc[-1])
-
-    trend = "多頭" if close > ma20 else "空頭"
-
-    text = (
-        f"📊 {name} ({stock_code})\n\n"
-        f"💰 價格：{close:.2f}\n"
-        f"🌡 RSI：{rsi:.1f}\n"
-        f"📈 趨勢：{trend}\n"
-        f"🤖 上漲機率：{up_prob:.1f}%"
+    # 激進型：高波動 + 強動能
+    aggr = sorted(
+        rows,
+        key=lambda x: (
+            x["vol"] * 100 +
+            x["momentum"] * 50
+        ),
+        reverse=True
     )
 
-    return None, text
+    # 保守型：低波動 + 站上月線 + RSI中性
+    safe = sorted(
+        rows,
+        key=lambda x: (
+            (x["last"] / x["ma20"]) -
+            x["vol"] * 10 -
+            abs(x["rsi"] - 55) / 100
+        ),
+        reverse=True
+    )
+
+    aggressive = []
+    conservative = []
+
+    used = set()
+
+    for item in aggr:
+        if item["code"] not in used:
+            aggressive.append(item)
+            used.add(item["code"])
+        if len(aggressive) == 5:
+            break
+
+    for item in safe:
+        if item["code"] not in used:
+            conservative.append(item)
+            used.add(item["code"])
+        if len(conservative) == 5:
+            break
+
+    lines = [f"📈 {category} Top10\n"]
+
+    lines.append("🔥 激進型 5 檔")
+    for i, x in enumerate(aggressive, 1):
+        lines.append(f"{i}. {x['code']} {x['name']}")
+
+    lines.append("")
+    lines.append("🛡 保守型 5 檔")
+    for i, x in enumerate(conservative, 1):
+        lines.append(f"{i}. {x['code']} {x['name']}")
+
+    return "\n".join(lines)
 
 
 # ==================================================
-# 大盤預測（真 TAIEX）
+# 大盤預測（0050代理，FinMind）
+# 若你 FinMind 指數資料已確認，可再替換成 TAIEX
 # ==================================================
 def market_forecast():
 
-    df = get_taiex_data(365)
+    df = get_stock_data("0050", 365)
 
-    if df.empty or len(df) < 80:
-        return "❌ 無法取得 FinMind TAIEX 資料"
+    if df.empty or len(df) < 60:
+        return "❌ 無法取得大盤資料"
 
-    df = add_features(df)
+    close = df["Close"]
 
-    close = float(df["Close"].iloc[-1])
-    ma20 = float(df["MA20"].iloc[-1])
-    rsi = float(df["RSI"].iloc[-1])
+    ma20 = close.rolling(20).mean().iloc[-1]
+    last = close.iloc[-1]
+
+    delta = close.diff()
+
+    gain = delta.clip(lower=0).rolling(14).mean()
+    loss = -delta.clip(upper=0).rolling(14).mean()
+
+    rsi = (100 - 100 / (1 + gain / (loss + 1e-9))).iloc[-1]
 
     score = 0
 
-    if close > ma20:
+    if last > ma20:
         score += 1
-
     if rsi < 70:
         score += 1
-
-    if df["RET1"].iloc[-1] > 0:
+    if close.pct_change().iloc[-1] > 0:
         score += 1
 
     prob = 45 + score * 12
 
-    if prob >= 70:
-        comment = "偏強震盪 📈"
-    elif prob >= 58:
-        comment = "中性偏多 ⚖️"
-    else:
-        comment = "震盪偏弱 📉"
+    trend = "多頭" if last > ma20 else "空頭"
 
-    trend = "多頭" if close > ma20 else "空頭"
+    comment = (
+        "偏強震盪 📈"
+        if prob >= 70 else
+        "中性偏多 ⚖️"
+        if prob >= 58 else
+        "震盪偏弱 📉"
+    )
 
     return (
-        "📊 台股大盤預測（FinMind TAIEX）\n\n"
-        f"💰 指數點位：{close:,.0f}\n"
+        "📊 台股大盤預測\n\n"
+        f"💰 指標價格：{last:.2f}\n"
         f"🌡 RSI：{rsi:.1f}\n"
         f"📈 趨勢：{trend}\n\n"
         f"🤖 AI判斷：{comment}\n"
@@ -380,67 +374,31 @@ def market_forecast():
 
 
 # ==================================================
-# 市場分類（簡化穩定版）
-# ==================================================
-industry_map = {
-    "全市場": ["2330","2317","2454","2382","2882","2603","0050","00878"],
-    "ETF專區": ["0050","0056","00878","00919","006208"],
-    "半導體": ["2330","2454","2303","3711","3443"],
-    "AI伺服器": ["2317","2382","3231","6669","3017"],
-    "金融保險": ["2881","2882","2886","2891","2884"],
-    "航運物流": ["2603","2609","2615","2618","5608"],
-    "傳產民生": ["1101","1216","1301","2002","2207"],
-    "生技醫療": ["4743","6446","4105","4137","4162"]
-}
-
-
-# ==================================================
-# 激進5 + 保守5
-# ==================================================
-def build_style_result(category):
-
-    stock_list = industry_map.get(category, [])
-
-    aggressive = stock_list[:5]
-    safe = stock_list[-5:]
-
-    lines = [f"📈 {category} Top10\n"]
-
-    lines.append("🔥 激進型 5 檔")
-    for i, code in enumerate(aggressive, 1):
-        lines.append(f"{i}. {code} {get_stock_name(code)}")
-
-    lines.append("")
-    lines.append("🛡 保守型 5 檔")
-    for i, code in enumerate(safe, 1):
-        lines.append(f"{i}. {code} {get_stock_name(code)}")
-
-    return "\n".join(lines)
-
-
-# ==================================================
-# 網站
+# 網頁
 # ==================================================
 @app.route("/")
 def home():
-    return "<h1>AI 台股系統 v2.4 FinMind 原架構版</h1>"
+    return "<h1>AI 台股系統 v2.6 真動態產業版</h1>"
+
+
+@app.route("/market")
+def market_page():
+    return f"<pre>{market_forecast()}</pre>"
 
 
 @app.route("/stock/<stock_code>")
 def stock_page(stock_code):
 
-    _, text = analyze_stock(stock_code)
+    code, _ = search_stock_code(stock_code)
 
-    return f"<pre>{text}</pre>"
+    if not code:
+        code = stock_code
 
-
-@app.route("/static/tmp/<path:filename>")
-def serve_static(filename):
-    return send_from_directory(STATIC_PATH, filename)
+    return f"<pre>{code} {get_stock_name(code)}</pre>"
 
 
 # ==================================================
-# LINE Webhook
+# LINE webhook
 # ==================================================
 @app.route("/callback", methods=["POST"])
 def callback():
@@ -450,6 +408,7 @@ def callback():
 
     try:
         handler.handle(body, signature)
+
     except InvalidSignatureError:
         abort(400)
 
@@ -457,7 +416,7 @@ def callback():
 
 
 # ==================================================
-# LINE 訊息
+# LINE 收訊息
 # ==================================================
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
@@ -467,18 +426,25 @@ def handle_message(event):
     # 大盤預測
     if msg == "大盤預測":
 
+        url = f"{request.host_url}market".replace(
+            "http://", "https://"
+        )
+
+        text = market_forecast() + f"\n\n完整分析：{url}"
+
         line_bot_api.reply_message(
             event.reply_token,
-            TextSendMessage(text=market_forecast())
+            TextSendMessage(text=text)
         )
         return
 
-    # 分類預測
+    # 產業預測
     if msg == "預測":
 
         items = []
 
         for ind in industry_map.keys():
+
             items.append(
                 QuickReplyButton(
                     action=MessageAction(
@@ -497,32 +463,32 @@ def handle_message(event):
         )
         return
 
-    # 分類結果
+    # 類別結果
     if msg.startswith("選產業_"):
 
         category = msg.replace("選產業_", "")
 
+        result = build_style_result(category)
+
         line_bot_api.reply_message(
             event.reply_token,
-            TextSendMessage(text=build_style_result(category))
+            TextSendMessage(text=result)
         )
         return
 
     # 個股查詢
-    target_code, _ = search_stock_code(msg)
+    code, name = search_stock_code(msg)
 
-    if target_code:
+    if code:
 
-        _, text = analyze_stock(target_code)
-
-        web_url = f"{request.host_url}stock/{target_code}".replace(
+        url = f"{request.host_url}stock/{code}".replace(
             "http://", "https://"
         )
 
         line_bot_api.reply_message(
             event.reply_token,
             TextSendMessage(
-                text=f"{text}\n\n完整分析：{web_url}"
+                text=f"📊 {name} ({code})\n完整分析：{url}"
             )
         )
 
@@ -540,6 +506,7 @@ def handle_message(event):
 # 啟動
 # ==================================================
 if __name__ == "__main__":
+
     app.run(
         host="0.0.0.0",
         port=int(os.environ.get("PORT", 5000))
