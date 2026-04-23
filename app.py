@@ -1,6 +1,7 @@
 # app.py
-# v2.8 完整可覆蓋版
-# LINE摘要回歸 + 分類補齊 + UI網站版
+# v2.9 完整修正版
+# 大盤改用真實加權指數（FinMind Y9999 + TWSE OpenAPI 備援）
+# 產業分類改用 twstock 官方 group 欄位，擴充至 30+ 類
 # --------------------------------------------------
 
 import os
@@ -28,14 +29,14 @@ from linebot.models import (
 # 基本設定
 # ==================================================
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
-LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
-FINMIND_USER = os.getenv("FINMIND_USER")
-FINMIND_PASSWORD = os.getenv("FINMIND_PASSWORD")
+LINE_CHANNEL_SECRET       = os.getenv("LINE_CHANNEL_SECRET")
+FINMIND_USER              = os.getenv("FINMIND_USER")
+FINMIND_PASSWORD          = os.getenv("FINMIND_PASSWORD")
 
 app = Flask(__name__)
 
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
-handler = WebhookHandler(LINE_CHANNEL_SECRET)
+handler      = WebhookHandler(LINE_CHANNEL_SECRET)
 
 finmind_token = ""
 
@@ -52,7 +53,7 @@ def finmind_login():
         r = requests.post(
             "https://api.finmindtrade.com/api/v4/login",
             data={
-                "user_id": FINMIND_USER,
+                "user_id":  FINMIND_USER,
                 "password": FINMIND_PASSWORD
             },
             timeout=10
@@ -89,16 +90,100 @@ def search_stock_code(keyword):
 
 
 # ==================================================
-# FinMind 抓股價
+# FinMind 抓加權指數（TAIEX）
+# 方法 A：FinMind TaiwanStockPrice，data_id=Y9999
+# 方法 B：TWSE OpenAPI MI_INDEX（備援，僅含近期資料）
+# 方法 C：yfinance ^TWII（最終備援）
+# ==================================================
+def _get_taiex_data(start_date):
+    """抓台灣加權指數歷史收盤資料，三層備援確保可用性。"""
+
+    # ── 方法 A：FinMind Y9999 ──
+    try:
+        url = (
+            "https://api.finmindtrade.com/api/v4/data"
+            f"?dataset=TaiwanStockPrice"
+            f"&data_id=Y9999"
+            f"&start_date={start_date}"
+            f"&token={finmind_token}"
+        )
+        data = requests.get(url, timeout=10).json()
+        if data.get("msg") == "success" and data.get("data"):
+            df = pd.DataFrame(data["data"])
+            df["Date"]  = pd.to_datetime(df["date"])
+            df["Close"] = pd.to_numeric(df["close"], errors="coerce")
+            df.set_index("Date", inplace=True)
+            result = df[["Close"]].dropna()
+            if len(result) >= 30:
+                return result
+    except:
+        pass
+
+    # ── 方法 B：TWSE OpenAPI MI_INDEX ──
+    try:
+        rows = []
+        # 取最近 6 個月的每月報表（TWSE 按月提供）
+        today = datetime.datetime.now()
+        for offset in range(6):
+            target = today - datetime.timedelta(days=30 * offset)
+            yyyymm = target.strftime("%Y%m")
+            url = (
+                f"https://www.twse.com.tw/rwd/zh/TAIEX/MI_5MINS_HIST"
+                f"?date={yyyymm}01&response=json"
+            )
+            r = requests.get(url, timeout=10).json()
+            if r.get("stat") == "OK":
+                for row in r.get("data", []):
+                    try:
+                        date_str = row[0].replace("/", "-")
+                        # 民國轉西元
+                        parts = date_str.split("-")
+                        year  = int(parts[0]) + 1911
+                        date_str = f"{year}-{parts[1]}-{parts[2]}"
+                        close = float(row[6].replace(",", ""))
+                        rows.append({"Date": pd.Timestamp(date_str), "Close": close})
+                    except:
+                        continue
+
+        if rows:
+            df = pd.DataFrame(rows).set_index("Date").sort_index()
+            df = df[df.index >= pd.Timestamp(start_date)]
+            if len(df) >= 30:
+                return df[["Close"]]
+    except:
+        pass
+
+    # ── 方法 C：yfinance ^TWII ──
+    try:
+        import yfinance as yf
+        ticker = yf.Ticker("^TWII")
+        hist   = ticker.history(start=start_date)
+        if not hist.empty:
+            df = hist[["Close"]].copy()
+            df.index = pd.to_datetime(df.index).tz_localize(None)
+            return df.dropna()
+    except:
+        pass
+
+    return pd.DataFrame()
+
+
+# ==================================================
+# FinMind 抓個股股價
 # ==================================================
 def get_stock_data(stock_code, days=180):
-
+    """
+    傳入 stock_code="TAIEX" 時抓加權指數，否則抓個股。
+    """
     finmind_login()
 
     start_date = (
         datetime.datetime.now()
         - datetime.timedelta(days=days)
     ).strftime("%Y-%m-%d")
+
+    if stock_code == "TAIEX":
+        return _get_taiex_data(start_date)
 
     try:
         url = (
@@ -108,17 +193,14 @@ def get_stock_data(stock_code, days=180):
             f"&start_date={start_date}"
             f"&token={finmind_token}"
         )
-
         data = requests.get(url, timeout=10).json()
 
         if data.get("msg") != "success":
             return pd.DataFrame()
 
         df = pd.DataFrame(data["data"])
-
-        df["Date"] = pd.to_datetime(df["date"])
+        df["Date"]  = pd.to_datetime(df["date"])
         df["Close"] = pd.to_numeric(df["close"], errors="coerce")
-
         df.set_index("Date", inplace=True)
 
         return df[["Close"]].dropna()
@@ -137,10 +219,10 @@ def calc_indicators(df):
     df["MA20"] = close.rolling(20).mean()
 
     delta = close.diff()
-    gain = delta.clip(lower=0).rolling(14).mean()
-    loss = -delta.clip(upper=0).rolling(14).mean()
+    gain  = delta.clip(lower=0).rolling(14).mean()
+    loss  = -delta.clip(upper=0).rolling(14).mean()
 
-    rs = gain / (loss + 1e-9)
+    rs        = gain / (loss + 1e-9)
     df["RSI"] = 100 - (100 / (1 + rs))
 
     return df.dropna()
@@ -153,7 +235,7 @@ def create_chart(df, title):
 
     plt.figure(figsize=(10, 5))
     plt.plot(df.index, df["Close"], label="收盤價")
-    plt.plot(df.index, df["MA20"], label="MA20")
+    plt.plot(df.index, df["MA20"],  label="MA20")
 
     plt.title(title)
     plt.grid(alpha=0.3)
@@ -181,92 +263,129 @@ def analyze_stock(code):
 
     df = calc_indicators(df)
 
-    last = float(df["Close"].iloc[-1])
-    ma20 = float(df["MA20"].iloc[-1])
-    rsi = float(df["RSI"].iloc[-1])
-
+    last  = float(df["Close"].iloc[-1])
+    ma20  = float(df["MA20"].iloc[-1])
+    rsi   = float(df["RSI"].iloc[-1])
     trend = "多頭" if last > ma20 else "空頭"
-
-    prob = 68 if trend == "多頭" else 38
+    prob  = 68 if trend == "多頭" else 38
 
     chart = create_chart(df.tail(60), f"{get_stock_name(code)} ({code})")
 
     return {
-        "code": code,
-        "name": get_stock_name(code),
+        "code":  code,
+        "name":  get_stock_name(code),
         "price": last,
-        "ma20": ma20,
-        "rsi": rsi,
+        "ma20":  ma20,
+        "rsi":   rsi,
         "trend": trend,
-        "prob": prob,
+        "prob":  prob,
         "chart": chart
     }
 
 
 # ==================================================
-# 大盤（0050代理）
+# 大盤（加權指數真實數據）
 # ==================================================
 def market_forecast():
+    """
+    改用 TAIEX 加權指數真實數據，取代原本的 0050 代理。
+    Y9999 是 FinMind 對加權指數的官方 data_id。
+    """
+    df = get_stock_data("TAIEX", 180)
 
-    data = analyze_stock("0050")
-
-    if not data:
+    if df.empty or len(df) < 30:
         return None
 
-    data["name"] = "台股大盤預測"
-    data["code"] = "0050代理"
+    df = calc_indicators(df)
 
-    return data
+    last  = float(df["Close"].iloc[-1])
+    ma20  = float(df["MA20"].iloc[-1])
+    rsi   = float(df["RSI"].iloc[-1])
+    trend = "多頭" if last > ma20 else "空頭"
+    prob  = 68 if trend == "多頭" else 38
 
+    chart = create_chart(df.tail(60), "台灣加權指數 (TAIEX)")
 
-# ==================================================
-# 動態分類（補齊版）
-# ==================================================
-def build_market_map():
-
-    market = {
-        "全市場": [],
-        "ETF專區": [],
-        "半導體": [],
-        "金融保險": [],
-        "航運物流": [],
-        "AI伺服器": []
+    return {
+        "code":  "TAIEX",
+        "name":  "台股大盤（加權指數）",
+        "price": last,
+        "ma20":  ma20,
+        "rsi":   rsi,
+        "trend": trend,
+        "prob":  prob,
+        "chart": chart
     }
 
-    ai_keywords = [
-        "鴻海","廣達","緯創","英業達","仁寶",
-        "和碩","華碩","微星","技嘉","神達",
-        "緯穎","勤誠","雙鴻","奇鋐","宏碁"
-    ]
 
+# ==================================================
+# 動態分類（改用 twstock 官方 group 欄位）
+# ==================================================
+def build_market_map():
+    """
+    twstock.codes 的每筆 StockCodeInfo 含有 .group 欄位，
+    即 TWSE 官方產業分類字串（如「半導體業」「金融保險業」）。
+    直接用此欄位歸類，準確且完整，涵蓋 30+ 官方產業類別。
+
+    額外保留「全市場」「ETF專區」兩個手動分組，
+    以及「AI伺服器」作為新興主題補充分組。
+    """
+
+    # ── AI 伺服器主題：以公司名稱比對（官方分類無此類別） ──
+    AI_NAMES = {
+        "鴻海", "廣達", "緯創", "英業達", "仁寶",
+        "和碩", "華碩", "微星", "技嘉", "神達",
+        "緯穎", "勤誠", "雙鴻", "奇鋐", "宏碁"
+    }
+
+    # ── 第一遍：收集所有官方 group 值 ──
+    official_groups: set[str] = set()
     for code, info in twstock.codes.items():
-
-        name = info.name
-
         if len(code) not in [4, 5]:
             continue
+        # 相容不同版本的 twstock：group 欄位可能叫 group 或 type
+        g = getattr(info, "group", None) or getattr(info, "type", None)
+        if g and isinstance(g, str) and g.strip():
+            official_groups.add(g.strip())
+
+    # ── 建立 market dict：固定分組在前，官方產業依名稱排序在後 ──
+    market: dict[str, list] = {
+        "全市場":  [],
+        "ETF專區": [],
+        "AI伺服器": []
+    }
+    for g in sorted(official_groups):
+        market[g] = []
+
+    # ── 第二遍：填入各代碼 ──
+    for code, info in twstock.codes.items():
+        if len(code) not in [4, 5]:
+            continue
+
+        name = info.name
+        g    = getattr(info, "group", None) or getattr(info, "type", None)
+        if g:
+            g = g.strip()
 
         market["全市場"].append(code)
 
         if code.startswith("00"):
             market["ETF專區"].append(code)
 
-        if any(x in name for x in ["半導體","IC","晶圓","矽","電子"]):
-            market["半導體"].append(code)
-
-        if any(x in name for x in ["金","銀行","保險","證券"]):
-            market["金融保險"].append(code)
-
-        if any(x in name for x in ["航","運","物流","海運","航空"]):
-            market["航運物流"].append(code)
-
-        if any(x in name for x in ai_keywords):
+        if name in AI_NAMES:
             market["AI伺服器"].append(code)
+
+        if g and g in market:
+            market[g].append(code)
+
+    # ── 移除空分組，避免 Quick Reply 顯示無效選項 ──
+    market = {k: v for k, v in market.items() if v}
 
     return market
 
 
 industry_map = build_market_map()
+
 
 # ==================================================
 # 推薦
@@ -274,13 +393,12 @@ industry_map = build_market_map()
 def build_style_result(category):
 
     arr = industry_map.get(category, [])
-
     arr = arr[:10]
 
     if not arr:
         return "❌ 無資料"
 
-    aggressive = arr[:5]
+    aggressive   = arr[:5]
     conservative = arr[5:10]
 
     lines = [f"📈 {category} Top10\n"]
@@ -412,11 +530,11 @@ line-height:1.8;
 
 
 # ==================================================
-# 網頁
+# 網頁路由
 # ==================================================
 @app.route("/")
 def home():
-    return "<h1>AI 台股系統 v2.8</h1>"
+    return "<h1>AI 台股系統 v2.9</h1>"
 
 
 @app.route("/stock/<stock_code>")
@@ -447,13 +565,13 @@ def market_page():
 
 
 # ==================================================
-# LINE webhook
+# LINE Webhook
 # ==================================================
 @app.route("/callback", methods=["POST"])
 def callback():
 
     signature = request.headers["X-Line-Signature"]
-    body = request.get_data(as_text=True)
+    body      = request.get_data(as_text=True)
 
     try:
         handler.handle(body, signature)
@@ -465,23 +583,30 @@ def callback():
 
 
 # ==================================================
-# LINE
+# LINE 訊息處理
 # ==================================================
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
 
     msg = event.message.text.strip()
 
-    # 大盤預測
+    # ── 大盤預測 ──
     if msg == "大盤預測":
 
         data = market_forecast()
 
+        if not data:
+            line_bot_api.reply_message(
+                event.reply_token,
+                TextSendMessage(text="大盤資料暫時無法取得，請稍後再試。")
+            )
+            return
+
         url = f"{request.host_url}market".replace("http://", "https://")
 
         text = (
-            f"📊 台股大盤預測\n\n"
-            f"💰 指標價格：{data['price']:.2f}\n"
+            f"📊 台股大盤（加權指數）\n\n"
+            f"💰 指數點位：{data['price']:.2f}\n"
             f"🌊 MA20：{data['ma20']:.2f}\n"
             f"🌡 RSI：{data['rsi']:.1f}\n"
             f"📈 趨勢：{data['trend']}\n"
@@ -495,20 +620,21 @@ def handle_message(event):
         )
         return
 
-    # 預測分類
+    # ── 產業預測分類選單 ──
     if msg == "預測":
 
-        items = []
+        # LINE Quick Reply 最多 13 個按鈕，取前 13 個分組
+        categories = list(industry_map.keys())[:13]
 
-        for ind in industry_map.keys():
-            items.append(
-                QuickReplyButton(
-                    action=MessageAction(
-                        label=ind,
-                        text=f"選產業_{ind}"
-                    )
+        items = [
+            QuickReplyButton(
+                action=MessageAction(
+                    label=ind[:20],          # label 上限 20 字元
+                    text=f"選產業_{ind}"
                 )
             )
+            for ind in categories
+        ]
 
         line_bot_api.reply_message(
             event.reply_token,
@@ -519,7 +645,7 @@ def handle_message(event):
         )
         return
 
-    # 分類結果
+    # ── 分類結果 ──
     if msg.startswith("選產業_"):
 
         cat = msg.replace("選產業_", "")
@@ -530,7 +656,7 @@ def handle_message(event):
         )
         return
 
-    # 免責聲明
+    # ── 免責聲明 ──
     if msg == "免責聲明":
 
         line_bot_api.reply_message(
@@ -541,7 +667,7 @@ def handle_message(event):
         )
         return
 
-    # 股票查詢
+    # ── 股票查詢 ──
     code, name = search_stock_code(msg)
 
     if code:
@@ -555,8 +681,7 @@ def handle_message(event):
             )
             return
 
-        url = f"{request.host_url}stock/{code}".replace("http://", "https://")
-
+        url       = f"{request.host_url}stock/{code}".replace("http://", "https://")
         direction = "偏向看漲 📈" if data["prob"] >= 50 else "偏向看跌 📉"
 
         text = (
