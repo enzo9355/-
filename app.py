@@ -1,6 +1,13 @@
+# ==================================================
 # app.py
-# v2.2 正式版（產業擴充 + 大盤預測）
-# 可直接整份覆蓋
+# v2.3 正式版（TAIEX 真大盤版）
+# 直接整份覆蓋即可
+#
+# 更新內容：
+# 1. 大盤預測改為直接分析 TAIEX（台股加權指數）
+# 2. 不再使用 0050 代理大盤
+# 3. 保留個股分析 / 預測分類 / 雙風格 Top10
+# ==================================================
 
 import os
 import time
@@ -8,12 +15,16 @@ import urllib.request
 import pandas as pd
 import numpy as np
 import twstock
+import requests
+import datetime
+
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.font_manager as fm
 
 from flask import Flask, request, abort, send_from_directory
+
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import (
@@ -22,8 +33,6 @@ from linebot.models import (
     FlexSendMessage
 )
 
-import requests
-import datetime
 from sklearn.preprocessing import StandardScaler
 from lightgbm import LGBMClassifier
 
@@ -107,7 +116,7 @@ def search_stock_code(keyword):
 
 
 # ==================================================
-# 動態分類（v2.2 擴充版）
+# 市場分類（精簡穩定版）
 # ==================================================
 def build_market_map():
 
@@ -118,16 +127,8 @@ def build_market_map():
         "AI伺服器": [],
         "金融保險": [],
         "航運物流": [],
-        "電子零組件": [],
-        "通信網路": [],
-        "光電面板": [],
-        "電機機械": [],
-        "鋼鐵塑化": [],
-        "食品民生": [],
-        "生技醫療": [],
-        "營建資產": [],
-        "觀光百貨": [],
-        "綠能電力": []
+        "傳產民生": [],
+        "生技醫療": []
     }
 
     for code, info in twstock.codes.items():
@@ -139,51 +140,26 @@ def build_market_map():
 
         market["全市場"].append(code)
 
-        # ETF
         if code.startswith("00"):
             market["ETF專區"].append(code)
 
-        if any(k in name for k in ["半導體", "晶圓", "IC", "矽", "積體電"]):
+        if any(k in name for k in ["半導體", "晶圓", "IC", "矽"]):
             market["半導體"].append(code)
 
-        if any(k in name for k in ["廣達", "鴻海", "緯創", "仁寶", "技嘉", "微星", "伺服器"]):
+        if any(k in name for k in ["廣達", "鴻海", "緯創", "仁寶", "技嘉"]):
             market["AI伺服器"].append(code)
 
         if any(k in name for k in ["金", "銀行", "保險", "證券"]):
             market["金融保險"].append(code)
 
-        if any(k in name for k in ["航", "運", "海運", "航空", "物流"]):
+        if any(k in name for k in ["航", "運", "物流", "航空"]):
             market["航運物流"].append(code)
 
-        if any(k in name for k in ["電子", "科技", "精密", "零組件"]):
-            market["電子零組件"].append(code)
-
-        if any(k in name for k in ["電信", "通訊", "網路", "寬頻"]):
-            market["通信網路"].append(code)
-
-        if any(k in name for k in ["光", "面板", "鏡頭", "LED"]):
-            market["光電面板"].append(code)
-
-        if any(k in name for k in ["電機", "機械", "工業"]):
-            market["電機機械"].append(code)
-
-        if any(k in name for k in ["鋼", "塑膠", "化學", "水泥"]):
-            market["鋼鐵塑化"].append(code)
-
-        if any(k in name for k in ["食品", "餐飲", "飲料", "超商"]):
-            market["食品民生"].append(code)
+        if any(k in name for k in ["食品", "塑膠", "鋼", "汽車", "紡織"]):
+            market["傳產民生"].append(code)
 
         if any(k in name for k in ["醫", "藥", "生技"]):
             market["生技醫療"].append(code)
-
-        if any(k in name for k in ["建設", "營造", "開發", "資產"]):
-            market["營建資產"].append(code)
-
-        if any(k in name for k in ["觀光", "百貨", "飯店", "旅行"]):
-            market["觀光百貨"].append(code)
-
-        if any(k in name for k in ["電力", "能源", "綠能", "太陽能", "風電"]):
-            market["綠能電力"].append(code)
 
     return market
 
@@ -221,7 +197,7 @@ def auto_login_finmind():
 
 
 # ==================================================
-# 抓資料
+# 抓個股資料
 # ==================================================
 def get_taiwan_stock_data(stock_code, period_days=365):
 
@@ -277,6 +253,52 @@ def get_taiwan_stock_data(stock_code, period_days=365):
 
 
 # ==================================================
+# 抓 TAIEX 資料（真大盤）
+# 使用 Yahoo Finance CSV API
+# ==================================================
+def get_taiex_data(period_days=365):
+
+    try:
+        end_ts = int(time.time())
+        start_ts = end_ts - (period_days * 86400)
+
+        url = (
+            "https://query1.finance.yahoo.com/v7/finance/download/%5ETWII"
+            f"?period1={start_ts}"
+            f"&period2={end_ts}"
+            "&interval=1d"
+            "&events=history"
+            "&includeAdjustedClose=true"
+        )
+
+        df = pd.read_csv(url)
+
+        if df.empty:
+            return pd.DataFrame()
+
+        df["Date"] = pd.to_datetime(df["Date"])
+        df.set_index("Date", inplace=True)
+
+        df = df.rename(columns={
+            "Open": "Open",
+            "High": "High",
+            "Low": "Low",
+            "Close": "Close",
+            "Volume": "Volume"
+        })
+
+        for col in ["Open", "High", "Low", "Close", "Volume"]:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+        df = df[["Open", "High", "Low", "Close", "Volume"]].dropna()
+
+        return df
+
+    except:
+        return pd.DataFrame()
+
+
+# ==================================================
 # 特徵工程
 # ==================================================
 def add_features(df):
@@ -285,6 +307,7 @@ def add_features(df):
     df["RET1"] = df["Close"].pct_change()
 
     delta = df["Close"].diff()
+
     gain = delta.clip(lower=0).rolling(14).mean()
     loss = -delta.clip(upper=0).rolling(14).mean()
 
@@ -296,7 +319,7 @@ def add_features(df):
 
 
 # ==================================================
-# AI 分析（個股）
+# 個股 AI 分析
 # ==================================================
 def analyze_and_predict_stock(stock_code, stock_name=None):
 
@@ -325,23 +348,9 @@ def analyze_and_predict_stock(stock_code, stock_name=None):
         latest = scaler.transform(df[FEATURES].iloc[-1:])
         up_prob = model.predict_proba(latest)[0][1] * 100
 
-        cleanup_images()
-
-        file_name = f"{stock_code}_{int(time.time())}.png"
-        file_path = os.path.join(STATIC_PATH, file_name)
-
-        plt.figure(figsize=(10, 6))
-        plt.plot(df.index[-60:], df["Close"].iloc[-60:], label="收盤價")
-        plt.plot(df.index[-60:], df["MA20"].iloc[-60:], label="MA20")
-        plt.legend()
-        plt.grid(True)
-        plt.title(f"{stock_name} ({stock_code})")
-        plt.savefig(file_path, dpi=100, bbox_inches="tight")
-        plt.close()
-
         close = float(df["Close"].iloc[-1])
-        rsi = float(df["RSI"].iloc[-1])
         ma20 = float(df["MA20"].iloc[-1])
+        rsi = float(df["RSI"].iloc[-1])
 
         trend = "多頭" if close > ma20 else "空頭"
 
@@ -353,30 +362,29 @@ def analyze_and_predict_stock(stock_code, stock_name=None):
             f"🤖 上漲機率：{up_prob:.1f}%"
         )
 
-        return file_name, text
+        return None, text
 
     except:
         return None, "❌ 分析失敗"
 
 
 # ==================================================
-# 大盤預測（用0050代理）
+# 真大盤預測（TAIEX）
 # ==================================================
 def market_forecast():
 
     try:
-        df = get_taiwan_stock_data("0050", 365)
+        df = get_taiex_data(365)
 
         if df.empty or len(df) < 80:
-            return "❌ 大盤資料不足"
+            return "❌ 無法取得 TAIEX 資料"
 
         df = add_features(df)
 
         close = float(df["Close"].iloc[-1])
         ma20 = float(df["MA20"].iloc[-1])
         rsi = float(df["RSI"].iloc[-1])
-
-        trend = "多頭" if close > ma20 else "空頭"
+        ret1 = float(df["RET1"].iloc[-1])
 
         score = 0
 
@@ -386,7 +394,7 @@ def market_forecast():
         if rsi < 70:
             score += 1
 
-        if df["RET1"].iloc[-1] > 0:
+        if ret1 > 0:
             score += 1
 
         prob = 45 + score * 12
@@ -398,9 +406,11 @@ def market_forecast():
         else:
             comment = "震盪偏弱 📉"
 
+        trend = "多頭" if close > ma20 else "空頭"
+
         return (
-            "📊 台股大盤預測（0050代理）\n\n"
-            f"💰 指標價格：{close:.2f}\n"
+            "📊 台股大盤預測（TAIEX）\n\n"
+            f"💰 指數點位：{close:,.0f}\n"
             f"🌡 RSI：{rsi:.1f}\n"
             f"📈 趨勢：{trend}\n\n"
             f"🤖 AI判斷：{comment}\n"
@@ -412,7 +422,7 @@ def market_forecast():
 
 
 # ==================================================
-# 分類推薦（激進5 + 保守5）
+# 分類 Top10（激進5 + 保守5）
 # ==================================================
 def build_style_result(category):
 
@@ -451,17 +461,13 @@ def build_style_result(category):
     lines = [f"📈 {category} Top10\n"]
 
     lines.append("🔥 激進型 5 檔")
-    rank = 1
-    for _, code in aggr:
-        lines.append(f"{rank}. {code} {get_stock_name(code)}")
-        rank += 1
+    for i, (_, code) in enumerate(aggr, 1):
+        lines.append(f"{i}. {code} {get_stock_name(code)}")
 
     lines.append("")
     lines.append("🛡 保守型 5 檔")
-    rank = 1
-    for _, code in safe:
-        lines.append(f"{rank}. {code} {get_stock_name(code)}")
-        rank += 1
+    for i, (_, code) in enumerate(safe, 1):
+        lines.append(f"{i}. {code} {get_stock_name(code)}")
 
     return "\n".join(lines)
 
@@ -471,14 +477,13 @@ def build_style_result(category):
 # ==================================================
 @app.route("/")
 def home():
-    return "<h1>AI 台股系統 v2.2 運行中</h1>"
+    return "<h1>AI 台股系統 v2.3（TAIEX 真大盤版）運行中</h1>"
 
 
 @app.route("/stock/<stock_code>")
 def stock_page(stock_code):
 
-    stock_name = get_stock_name(stock_code)
-    _, text = analyze_and_predict_stock(stock_code, stock_name)
+    _, text = analyze_and_predict_stock(stock_code)
 
     return f"<pre>{text}</pre>"
 
@@ -489,7 +494,7 @@ def serve_static(filename):
 
 
 # ==================================================
-# LINE webhook
+# LINE Webhook
 # ==================================================
 @app.route("/callback", methods=["POST"])
 def callback():
@@ -513,9 +518,9 @@ def handle_message(event):
 
     msg = event.message.text.strip()
 
-    # ------------------------------
+    # --------------------------
     # 大盤預測
-    # ------------------------------
+    # --------------------------
     if msg == "大盤預測":
 
         result = market_forecast()
@@ -526,20 +531,18 @@ def handle_message(event):
         )
         return
 
-    # ------------------------------
+    # --------------------------
     # 預測分類
-    # ------------------------------
+    # --------------------------
     if msg == "預測":
 
         items = []
 
-        keys = list(industry_map.keys())[:13]
-
-        for ind in keys:
+        for ind in list(industry_map.keys())[:8]:
             items.append(
                 QuickReplyButton(
                     action=MessageAction(
-                        label=ind[:20],
+                        label=ind,
                         text=f"選產業_{ind}"
                     )
                 )
@@ -554,9 +557,9 @@ def handle_message(event):
         )
         return
 
-    # ------------------------------
-    # 分類結果
-    # ------------------------------
+    # --------------------------
+    # 類別推薦
+    # --------------------------
     if msg.startswith("選產業_"):
 
         category = msg.replace("選產業_", "")
@@ -569,9 +572,9 @@ def handle_message(event):
         )
         return
 
-    # ------------------------------
+    # --------------------------
     # 個股查詢
-    # ------------------------------
+    # --------------------------
     target_code, target_name = (
         (msg, None)
         if msg.isdigit()
@@ -580,74 +583,23 @@ def handle_message(event):
 
     if target_code:
 
-        img_name, analysis = analyze_and_predict_stock(
+        _, analysis = analyze_and_predict_stock(
             target_code,
             target_name
         )
 
-        web_url = f"{request.host_url}stock/{target_code}".replace("http://", "https://")
+        web_url = f"{request.host_url}stock/{target_code}".replace(
+            "http://", "https://"
+        )
 
-        if img_name:
-
-            hero_url = f"{request.host_url}static/tmp/{img_name}".replace("http://", "https://")
-
-            flex = {
-                "type": "bubble",
-
-                "hero": {
-                    "type": "image",
-                    "url": hero_url,
-                    "size": "full",
-                    "aspectRatio": "10:6",
-                    "aspectMode": "cover"
-                },
-
-                "body": {
-                    "type": "box",
-                    "layout": "vertical",
-                    "contents": [
-                        {
-                            "type": "text",
-                            "text": analysis,
-                            "wrap": True,
-                            "size": "sm"
-                        }
-                    ]
-                },
-
-                "footer": {
-                    "type": "box",
-                    "layout": "vertical",
-                    "contents": [
-                        {
-                            "type": "button",
-                            "style": "primary",
-                            "action": {
-                                "type": "uri",
-                                "label": "查看完整分析",
-                                "uri": web_url
-                            }
-                        }
-                    ]
-                }
-            }
-
-            line_bot_api.reply_message(
-                event.reply_token,
-                FlexSendMessage(
-                    alt_text="股票分析",
-                    contents=flex
-                )
+        line_bot_api.reply_message(
+            event.reply_token,
+            TextSendMessage(
+                text=f"{analysis}\n\n完整分析：{web_url}"
             )
-
-        else:
-            line_bot_api.reply_message(
-                event.reply_token,
-                TextSendMessage(text=analysis)
-            )
+        )
 
     else:
-
         line_bot_api.reply_message(
             event.reply_token,
             TextSendMessage(
