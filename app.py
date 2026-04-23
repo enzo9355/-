@@ -7,7 +7,7 @@ import twstock
 import matplotlib
 import matplotlib.pyplot as plt
 import matplotlib.font_manager as fm
-from flask import Flask, request, abort, send_from_directory
+from flask import Flask, request, abort, send_from_directory, render_template
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import (
