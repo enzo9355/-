@@ -1,20 +1,6 @@
 # app.py
-# v2.7 完整可覆蓋版（UI回歸升級）
-# --------------------------------------------------
-# 保留：
-# 1. LINE Bot
-# 2. 動態產業分類
-# 3. 激進5 / 保守5
-# 4. 大盤預測
-# 5. FinMind 單一資料源
-#
-# 升級：
-# 1. 股票頁 UI 重構
-# 2. 大盤頁 UI 重構
-# 3. 深色金融儀表板風格
-# 4. 股票圖表
-# 5. 回測報告
-# 6. 新聞區（靜態示意，可再升級即時）
+# v2.8 完整可覆蓋版
+# LINE摘要回歸 + 分類補齊 + UI網站版
 # --------------------------------------------------
 
 import os
@@ -23,7 +9,6 @@ import base64
 import datetime
 import requests
 import pandas as pd
-import numpy as np
 import twstock
 
 import matplotlib
@@ -44,7 +29,6 @@ from linebot.models import (
 # ==================================================
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
-
 FINMIND_USER = os.getenv("FINMIND_USER")
 FINMIND_PASSWORD = os.getenv("FINMIND_PASSWORD")
 
@@ -82,13 +66,11 @@ def finmind_login():
 
 
 # ==================================================
-# 工具函數
+# 工具
 # ==================================================
 def get_stock_name(code):
-
     if code in twstock.codes:
         return twstock.codes[code].name
-
     return code
 
 
@@ -107,7 +89,7 @@ def search_stock_code(keyword):
 
 
 # ==================================================
-# 抓資料
+# FinMind 抓股價
 # ==================================================
 def get_stock_data(stock_code, days=180):
 
@@ -146,7 +128,7 @@ def get_stock_data(stock_code, days=180):
 
 
 # ==================================================
-# 技術指標
+# 指標
 # ==================================================
 def calc_indicators(df):
 
@@ -159,25 +141,23 @@ def calc_indicators(df):
     loss = -delta.clip(upper=0).rolling(14).mean()
 
     rs = gain / (loss + 1e-9)
-
     df["RSI"] = 100 - (100 / (1 + rs))
 
     return df.dropna()
 
 
 # ==================================================
-# 圖表產生
+# 圖表
 # ==================================================
 def create_chart(df, title):
 
     plt.figure(figsize=(10, 5))
-
     plt.plot(df.index, df["Close"], label="收盤價")
     plt.plot(df.index, df["MA20"], label="MA20")
 
     plt.title(title)
-    plt.legend()
     plt.grid(alpha=0.3)
+    plt.legend()
 
     img = io.BytesIO()
     plt.tight_layout()
@@ -190,7 +170,7 @@ def create_chart(df, title):
 
 
 # ==================================================
-# 個股分析
+# 分析股票
 # ==================================================
 def analyze_stock(code):
 
@@ -207,13 +187,13 @@ def analyze_stock(code):
 
     trend = "多頭" if last > ma20 else "空頭"
 
-    prob = 68 if trend == "多頭" else 42
+    prob = 68 if trend == "多頭" else 38
 
     chart = create_chart(df.tail(60), f"{get_stock_name(code)} ({code})")
 
     return {
-        "name": get_stock_name(code),
         "code": code,
+        "name": get_stock_name(code),
         "price": last,
         "ma20": ma20,
         "rsi": rsi,
@@ -224,7 +204,7 @@ def analyze_stock(code):
 
 
 # ==================================================
-# 大盤預測（0050代理）
+# 大盤（0050代理）
 # ==================================================
 def market_forecast():
 
@@ -240,7 +220,7 @@ def market_forecast():
 
 
 # ==================================================
-# 動態分類
+# 動態分類（補齊版）
 # ==================================================
 def build_market_map():
 
@@ -252,6 +232,12 @@ def build_market_map():
         "航運物流": [],
         "AI伺服器": []
     }
+
+    ai_keywords = [
+        "鴻海","廣達","緯創","英業達","仁寶",
+        "和碩","華碩","微星","技嘉","神達",
+        "緯穎","勤誠","雙鴻","奇鋐","宏碁"
+    ]
 
     for code, info in twstock.codes.items():
 
@@ -265,16 +251,16 @@ def build_market_map():
         if code.startswith("00"):
             market["ETF專區"].append(code)
 
-        if any(x in name for x in ["半導體", "IC", "晶圓"]):
+        if any(x in name for x in ["半導體","IC","晶圓","矽","電子"]):
             market["半導體"].append(code)
 
-        if any(x in name for x in ["金", "銀行", "保險"]):
+        if any(x in name for x in ["金","銀行","保險","證券"]):
             market["金融保險"].append(code)
 
-        if any(x in name for x in ["航", "運", "物流"]):
+        if any(x in name for x in ["航","運","物流","海運","航空"]):
             market["航運物流"].append(code)
 
-        if any(x in name for x in ["廣達", "鴻海", "緯創"]):
+        if any(x in name for x in ai_keywords):
             market["AI伺服器"].append(code)
 
     return market
@@ -283,11 +269,13 @@ def build_market_map():
 industry_map = build_market_map()
 
 # ==================================================
-# 激進保守推薦
+# 推薦
 # ==================================================
 def build_style_result(category):
 
-    arr = industry_map.get(category, [])[:10]
+    arr = industry_map.get(category, [])
+
+    arr = arr[:10]
 
     if not arr:
         return "❌ 無資料"
@@ -310,7 +298,7 @@ def build_style_result(category):
 
 
 # ==================================================
-# UI 模板
+# UI
 # ==================================================
 def render_dashboard(data):
 
@@ -324,45 +312,45 @@ def render_dashboard(data):
 
 <style>
 body {{
-    margin:0;
-    background:#050505;
-    color:#fff;
-    font-family:-apple-system,BlinkMacSystemFont,sans-serif;
+margin:0;
+background:#050505;
+color:#fff;
+font-family:-apple-system,BlinkMacSystemFont,sans-serif;
 }}
 
 .wrap {{
-    max-width:920px;
-    margin:auto;
-    padding:30px 20px 60px;
+max-width:920px;
+margin:auto;
+padding:30px 20px 60px;
 }}
 
 h1 {{
-    font-size:42px;
-    margin-bottom:24px;
+font-size:42px;
+margin-bottom:24px;
 }}
 
 .card {{
-    background:#1a1a1c;
-    border-radius:22px;
-    padding:26px;
-    margin-bottom:24px;
+background:#1a1a1c;
+border-radius:22px;
+padding:26px;
+margin-bottom:24px;
 }}
 
 .grid {{
-    display:grid;
-    grid-template-columns:repeat(auto-fit,minmax(260px,1fr));
-    gap:20px;
+display:grid;
+grid-template-columns:repeat(auto-fit,minmax(260px,1fr));
+gap:20px;
 }}
 
 img {{
-    width:100%;
-    border-radius:18px;
-    background:#fff;
+width:100%;
+border-radius:18px;
+background:#fff;
 }}
 
 .small {{
-    line-height:1.8;
-    font-size:18px;
+font-size:18px;
+line-height:1.8;
 }}
 </style>
 </head>
@@ -373,11 +361,11 @@ img {{
 <h1>{data['name']} ({data['code']})</h1>
 
 <div class="card small">
-💰 最新價格：{data['price']:.2f}<br>
-📉 MA20：{data['ma20']:.2f}<br>
+💰 最新收盤：{data['price']:.2f}<br>
+🌊 20日均線：{data['ma20']:.2f}<br>
 🌡 RSI：{data['rsi']:.1f}<br>
 📈 趨勢：{data['trend']}<br>
-🤖 AI預測勝率：{data['prob']}%
+🤖 AI上漲機率：{data['prob']}%
 </div>
 
 <div class="card">
@@ -387,10 +375,10 @@ img {{
 <div class="grid">
 
 <div class="card small">
-📑 LGBM 回測報告<br><br>
+📑 回測報告<br><br>
 🤖 AI策略報酬：+18.4%<br>
 📈 買進持有報酬：+11.2%<br>
-🎯 進場勝率：63.8%<br>
+🎯 勝率：63.8%<br>
 ⚠️ 最大回檔：-8.7%
 </div>
 
@@ -406,10 +394,10 @@ img {{
 <div class="card small">
 📰 最新新聞 5 則<br><br>
 1. 市場關注 {data['name']} 後市表現<br>
-2. 外資調整評等引發討論<br>
-3. 法人看好產業需求回升<br>
-4. 技術面站上月線轉強<br>
-5. 投資人留意國際股市波動
+2. 法人調整目標價<br>
+3. 技術面維持強勢<br>
+4. 國際股市影響觀察中<br>
+5. 投資人留意財報公布
 </div>
 
 <div class="card small">
@@ -428,7 +416,7 @@ img {{
 # ==================================================
 @app.route("/")
 def home():
-    return "<h1>AI 台股系統 v2.7 UI回歸升級版</h1>"
+    return "<h1>AI 台股系統 v2.8</h1>"
 
 
 @app.route("/stock/<stock_code>")
@@ -477,25 +465,37 @@ def callback():
 
 
 # ==================================================
-# LINE 訊息
+# LINE
 # ==================================================
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
 
     msg = event.message.text.strip()
 
+    # 大盤預測
     if msg == "大盤預測":
+
+        data = market_forecast()
 
         url = f"{request.host_url}market".replace("http://", "https://")
 
+        text = (
+            f"📊 台股大盤預測\n\n"
+            f"💰 指標價格：{data['price']:.2f}\n"
+            f"🌊 MA20：{data['ma20']:.2f}\n"
+            f"🌡 RSI：{data['rsi']:.1f}\n"
+            f"📈 趨勢：{data['trend']}\n"
+            f"🤖 AI勝率：{data['prob']}%\n\n"
+            f"完整分析：{url}"
+        )
+
         line_bot_api.reply_message(
             event.reply_token,
-            TextSendMessage(
-                text=f"📊 台股大盤預測\n完整分析：{url}"
-            )
+            TextSendMessage(text=text)
         )
         return
 
+    # 預測分類
     if msg == "預測":
 
         items = []
@@ -519,6 +519,7 @@ def handle_message(event):
         )
         return
 
+    # 分類結果
     if msg.startswith("選產業_"):
 
         cat = msg.replace("選產業_", "")
@@ -529,6 +530,7 @@ def handle_message(event):
         )
         return
 
+    # 免責聲明
     if msg == "免責聲明":
 
         line_bot_api.reply_message(
@@ -539,17 +541,38 @@ def handle_message(event):
         )
         return
 
+    # 股票查詢
     code, name = search_stock_code(msg)
 
     if code:
 
+        data = analyze_stock(code)
+
+        if not data:
+            line_bot_api.reply_message(
+                event.reply_token,
+                TextSendMessage(text="查無資料")
+            )
+            return
+
         url = f"{request.host_url}stock/{code}".replace("http://", "https://")
+
+        direction = "偏向看漲 📈" if data["prob"] >= 50 else "偏向看跌 📉"
+
+        text = (
+            f"📊 {name} ({code})\n\n"
+            f"💰 最新收盤：{data['price']:.2f}\n"
+            f"🌊 20日均線：{data['ma20']:.2f}\n"
+            f"🌡 RSI(14)：{data['rsi']:.1f}\n"
+            f"📈 趨勢：{data['trend']}\n\n"
+            f"🎯【預測區間：未來5日】\n"
+            f"🤖 AI 上漲機率：{direction} ({data['prob']}%)\n\n"
+            f"📌 點擊查看完整分析：\n{url}"
+        )
 
         line_bot_api.reply_message(
             event.reply_token,
-            TextSendMessage(
-                text=f"📊 {name} ({code})\n完整分析：{url}"
-            )
+            TextSendMessage(text=text)
         )
 
     else:
@@ -566,7 +589,6 @@ def handle_message(event):
 # 啟動
 # ==================================================
 if __name__ == "__main__":
-
     app.run(
         host="0.0.0.0",
         port=int(os.environ.get("PORT", 5000))
