@@ -1,5 +1,5 @@
 # app.py
-# v3.2 升級版：液態玻璃 UI、圖表中文方塊修復、Google 新聞 RSS 串接
+# v3.3 升級版：LightGBM 回測報告歸隊、新增專業量化指標、液態玻璃 UI
 # --------------------------------------------------
 
 import os
@@ -11,6 +11,10 @@ import pandas as pd
 import twstock
 import xml.etree.ElementTree as ET
 import urllib.parse
+import numpy as np
+
+from sklearn.preprocessing import StandardScaler
+from lightgbm import LGBMClassifier
 
 import matplotlib
 matplotlib.use("Agg")
@@ -34,7 +38,6 @@ LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
 FINMIND_USER = os.getenv("FINMIND_USER")
 FINMIND_PASSWORD = os.getenv("FINMIND_PASSWORD")
 
-# 下載開源中文字體以防 Matplotlib 亂碼
 font_path = 'taipei_sans.ttf'
 if not os.path.exists(font_path):
     urllib.request.urlretrieve(
@@ -130,7 +133,6 @@ def get_stock_data(stock_code, days=180):
 # 3. 新聞與特徵工程
 # ==================================================
 def get_stock_news(keyword, limit=5):
-    """利用 Google News RSS 抓取相關新聞"""
     try:
         query = urllib.parse.quote(f"{keyword} 股票")
         url = f"https://news.google.com/rss/search?q={query}&hl=zh-TW&gl=TW&ceid=TW:zh-Hant"
@@ -143,8 +145,7 @@ def get_stock_news(keyword, limit=5):
                 "link": item.find('link').text
             })
         return news_list
-    except Exception as e:
-        print(f"新聞抓取失敗: {e}")
+    except:
         return []
 
 def calc_indicators(df):
@@ -173,31 +174,116 @@ def calc_win_probability(df):
     return int(max(5, min(95, round(score))))
 
 # ==================================================
-# 4. 圖表生成 (Matplotlib 修復與去背處理)
+# 4. 回測系統 (LGBM 回歸)
+# ==================================================
+def calculate_backtest(stock_code, stock_name=""):
+    try:
+        df = get_stock_data(stock_code, 730)
+        if df.empty or len(df) < 200: return "❌ 資料不足，無法回測。"
+
+        # 輕量化回測特徵工程
+        df['MA_5'] = df['Close'].rolling(5).mean()
+        df['MA_20'] = df['Close'].rolling(20).mean()
+        df['RET_1'] = df['Close'].pct_change()
+        delta = df['Close'].diff()
+        gain = delta.clip(lower=0).rolling(14).mean()
+        loss = -delta.clip(upper=0).rolling(14).mean()
+        df['RSI_14'] = 100 - (100 / (1 + gain / (loss + 1e-9)))
+        df['Volatility'] = df['RET_1'].rolling(20).std()
+        df = df.replace([np.inf, -np.inf], np.nan).dropna()
+
+        features = ['MA_5', 'MA_20', 'RET_1', 'RSI_14', 'Volatility']
+        df['Future_5d_Close'] = df['Close'].shift(-5)
+        df['Target'] = (df['Future_5d_Close'] > df['Close']).astype(int)
+
+        valid_df = df.dropna(subset=['Future_5d_Close']).copy()
+        if len(valid_df) < 100: return "❌ 有效資料太少。"
+
+        split_idx = int(len(valid_df) * 0.8)
+        train_df = valid_df.iloc[:split_idx]
+        test_df = valid_df.iloc[split_idx:].copy()
+
+        scaler = StandardScaler()
+        X_train = scaler.fit_transform(train_df[features])
+        X_test = scaler.transform(test_df[features])
+
+        model = LGBMClassifier(n_estimators=80, learning_rate=0.05, max_depth=4, random_state=42, verbose=-1)
+        model.fit(X_train, train_df['Target'])
+
+        test_df['Prob'] = model.predict_proba(X_test)[:, 1]
+        test_df['Signal'] = np.where(test_df['Prob'] > 0.60, 1, 0)
+        test_df['Next_Return'] = test_df['Close'].shift(-1) / test_df['Close'] - 1
+        test_df = test_df.replace([np.inf, -np.inf], np.nan).dropna(subset=['Next_Return'])
+
+        strategy_ret = (test_df['Signal'] * test_df['Next_Return']).values
+        bh_ret = test_df['Next_Return'].values
+        signals = test_df['Signal'].values
+
+        if len(signals) == 0: return "❌ 回測期間無有效資料。"
+
+        strat_cum = np.cumprod(1 + strategy_ret)[-1] - 1
+        bh_cum = np.cumprod(1 + bh_ret)[-1] - 1
+
+        trades = strategy_ret[signals == 1]
+        total_trades = len(trades)
+        win_rate = (trades > 0).mean() * 100 if total_trades > 0 else 0
+
+        gross_profit = trades[trades > 0].sum()
+        gross_loss = abs(trades[trades < 0].sum())
+        profit_factor = (gross_profit / gross_loss) if gross_loss != 0 else (99.99 if gross_profit > 0 else 0)
+
+        days_in_test = len(test_df)
+        annualized_ret = ((1 + strat_cum) ** (252 / days_in_test) - 1) * 100 if days_in_test > 0 else 0
+
+        cum_ret_arr = np.cumprod(1 + strategy_ret)
+        mdd = (cum_ret_arr / np.maximum.accumulate(cum_ret_arr) - 1).min() * 100
+        std_dev = strategy_ret.std()
+        sharpe = (strategy_ret.mean() / std_dev) * np.sqrt(252) if std_dev != 0 else 0
+
+        if total_trades == 0:
+            conclusion = "⏸️ 訊號空窗：模型未發現高勝率進場點，選擇空手觀望。\n🛒 買入建議：缺乏多頭動能，建議資金先停泊。\n💰 賣出建議：若已持有，請嚴守個人停損。"
+        elif strat_cum > bh_cum:
+            conclusion = "✅ 策略優勢：高報酬且風險控制優異。\n🛒 買入建議：預測看漲可進場。\n💰 賣出建議：預測轉跌時果斷停利。" if sharpe > 1 else "✅ 擊敗大盤：能創造超額報酬。\n🛒 買入建議：可進場分批佈局。\n💰 賣出建議：見好就收。"
+        else:
+            conclusion = "🛡️ 下檔保護：大跌時具備避險作用。\n🛒 買入建議：適合防禦型配置。\n💰 賣出建議：不想資金閒置可轉換至強勢股。" if mdd > -15 else "⚠️ 模型失真：容易追高殺低。\n🛒 買入建議：請避開。\n💰 賣出建議：回歸均線判斷停損。"
+
+        return (
+            f"📑 {stock_name} ({stock_code}) LGBM 回測報告\n"
+            f"⏳ 測試區間：近 {days_in_test} 個交易日\n\n"
+            f"📊 歷史績效\n"
+            f"🤖 AI 策略報酬：{strat_cum*100:.2f}%\n"
+            f"📈 買進持有報酬：{bh_cum*100:.2f}%\n"
+            f"🗓️ 年化報酬率：{annualized_ret:.2f}%\n\n"
+            f"🛡️ 風險與穩定度\n"
+            f"🎯 進場勝率：{win_rate:.1f}%\n"
+            f"🔄 交易次數：{total_trades} 次\n"
+            f"💵 利潤因子：{profit_factor:.2f}\n"
+            f"⚠️ 最大回檔：{mdd:.2f}%\n"
+            f"⚖️ 夏普值：{sharpe:.2f}\n\n"
+            f"💡 資產管理評估：\n{conclusion}"
+        )
+    except Exception as e:
+        return f"❌ 回測錯誤：{str(e)}"
+
+# ==================================================
+# 5. 圖表生成
 # ==================================================
 def create_chart(df, title):
-    # 強制實例化字體屬性，解決方塊問題
     my_font = fm.FontProperties(fname=font_path)
-    
-    # 將圖表背景設為透明以融入玻璃介面
     fig, ax = plt.subplots(figsize=(10, 5))
     fig.patch.set_alpha(0.0)
     ax.patch.set_alpha(0.0)
 
-    # 繪製線條並調整顏色
     ax.plot(df.index, df["Close"], label="收盤價", color="#00f2fe", linewidth=2)
     ax.plot(df.index, df["MA20"], label="月線(MA20)", color="#ff0844", linestyle="--", linewidth=1.5)
 
-    # 套用字體並更改文字顏色為白色
     ax.set_title(title, fontproperties=my_font, color="white", fontsize=18)
     ax.tick_params(axis='x', colors='white')
     ax.tick_params(axis='y', colors='white')
     ax.grid(alpha=0.15, color="white")
     
-    # 圖例也必須套用字體
     legend = ax.legend(prop=my_font)
-    for text in legend.get_texts():
-        text.set_color("white")
+    for text in legend.get_texts(): text.set_color("white")
     legend.get_frame().set_facecolor('none')
     legend.get_frame().set_edgecolor('none')
 
@@ -209,7 +295,7 @@ def create_chart(df, title):
     return base64.b64encode(img.read()).decode()
 
 # ==================================================
-# 5. 分析總控
+# 6. 分析總控
 # ==================================================
 def analyze_stock(code):
     df = get_stock_data(code, 180)
@@ -236,7 +322,7 @@ def market_forecast():
     return analyze_stock("TAIEX")
 
 # ==================================================
-# 6. 動態產業分類
+# 7. 動態產業分類
 # ==================================================
 def build_market_map():
     market = {"全市場": [], "ETF專區": [], "AI伺服器": []}
@@ -299,10 +385,9 @@ def build_style_result(category):
     return "\n".join(lines)
 
 # ==================================================
-# 7. UI 網頁渲染 (Glassmorphism 升級版)
+# 8. UI 網頁渲染
 # ==================================================
 def render_dashboard(data):
-    # 產生新聞列表 HTML
     news_html = ""
     if data.get('news'):
         for n in data['news']:
@@ -319,63 +404,25 @@ def render_dashboard(data):
 <title>{data['name']} 分析報告</title>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@300;400;700&display=swap" rel="stylesheet">
 <style>
-    body {{
-        margin:0;
-        /* 深色液態玻璃背景漸層 */
-        background: linear-gradient(135deg, #0f2027, #203a43, #2c5364);
-        background-attachment: fixed;
-        color: #f1f1f1;
-        font-family: 'Noto Sans TC', sans-serif;
-    }}
+    body {{ margin:0; background: linear-gradient(135deg, #0f2027, #203a43, #2c5364); background-attachment: fixed; color: #f1f1f1; font-family: 'Noto Sans TC', sans-serif; }}
     .wrap {{ max-width:920px; margin:auto; padding:30px 20px 60px; }}
     h1 {{ font-size:42px; margin-bottom:24px; font-weight: 700; text-shadow: 0 2px 10px rgba(0,0,0,0.5); }}
-    
-    /* 毛玻璃 (Glassmorphism) 卡片設計 */
-    .card {{
-        background: rgba(255, 255, 255, 0.05);
-        backdrop-filter: blur(16px);
-        -webkit-backdrop-filter: blur(16px);
-        border: 1px solid rgba(255, 255, 255, 0.15);
-        box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.3);
-        border-radius: 20px;
-        padding: 26px;
-        margin-bottom: 24px;
-        transition: transform 0.3s ease;
-    }}
+    .card {{ background: rgba(255, 255, 255, 0.05); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px); border: 1px solid rgba(255, 255, 255, 0.15); box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.3); border-radius: 20px; padding: 26px; margin-bottom: 24px; transition: transform 0.3s ease; }}
     .card:hover {{ transform: translateY(-5px); }}
-    
     .grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:20px; }}
     img {{ width:100%; border-radius:18px; }}
     .small {{ font-size:17px; line-height:1.8; }}
-    
-    /* 數字與亮點顏色 */
     .highlight {{ color: #00f2fe; font-weight: bold; font-size: 1.1em; }}
-    
-    /* 新聞連結樣式 */
     h2 {{ font-size: 22px; margin-top: 0; margin-bottom: 15px; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom: 10px; }}
-    .news-link {{
-        display: block;
-        color: #e0e0e0;
-        text-decoration: none;
-        margin-bottom: 14px;
-        line-height: 1.5;
-        transition: color 0.2s;
-    }}
+    .news-link {{ display: block; color: #e0e0e0; text-decoration: none; margin-bottom: 14px; line-height: 1.5; transition: color 0.2s; }}
     .news-link:hover {{ color: #00f2fe; }}
     .news-link:last-child {{ margin-bottom: 0; }}
-
-    @media (max-width: 640px) {{
-        h1 {{ font-size:30px; }}
-        .small {{ font-size:15px; }}
-        .card {{ padding:20px; border-radius:18px; }}
-    }}
+    @media (max-width: 640px) {{ h1 {{ font-size:30px; }} .small {{ font-size:15px; }} .card {{ padding:20px; border-radius:18px; }} }}
 </style>
 </head>
-
 <body>
 <div class="wrap">
 <h1>{data['name']} ({data['code']})</h1>
-
 <div class="card small">
     💰 最新收盤：<span class="highlight">{data['price']:.2f}</span><br>
     🌊 20日均線：{data['ma20']:.2f}<br>
@@ -383,11 +430,9 @@ def render_dashboard(data):
     📈 當前趨勢：{data['trend']}<br>
     📊 AI 綜合勝率：<span class="highlight">{data['prob']}%</span>
 </div>
-
 <div class="card">
     <img src="data:image/png;base64,{data['chart']}">
 </div>
-
 <div class="grid">
     <div class="card small">
         <h2>📑 指標摘要</h2>
@@ -396,7 +441,6 @@ def render_dashboard(data):
         🌡 RSI 強弱：{'動能偏強' if data['rsi'] >= 55 else '動能中性' if data['rsi'] >= 45 else '動能偏弱'}<br>
         🎯 評估勝率：<span class="highlight">{data['prob']}%</span>
     </div>
-
     <div class="card small">
         <h2>💡 觀察建議</h2>
         🛒 若趨勢轉強：可觀察分批布局<br>
@@ -404,16 +448,13 @@ def render_dashboard(data):
         💰 接近前高壓力：可評估分段調節獲利
     </div>
 </div>
-
 <div class="card small">
     <h2>📰 相關即時新聞</h2>
     {news_html}
 </div>
-
 <div class="card small" style="font-size: 14px; color: #aaa;">
     免責聲明：本系統資訊與勝率為程式規則輔助估算，新聞內容取自外部 RSS，均僅供研究參考，不構成任何真實投資與買賣建議。
 </div>
-
 </div>
 </body>
 </html>
@@ -421,10 +462,10 @@ def render_dashboard(data):
     return render_template_string(html)
 
 # ==================================================
-# 8. 網頁路由與 LINE 處理
+# 9. 網頁路由與 LINE 處理
 # ==================================================
 @app.route("/")
-def home(): return "<h1>AI 台股系統 v3.2 正常運作中</h1>"
+def home(): return "<h1>AI 台股系統 v3.3 正常運作中</h1>"
 
 @app.route("/stock/<stock_code>")
 def stock_page(stock_code):
@@ -458,7 +499,16 @@ def handle_message(event):
         url = f"{request.host_url}market".replace("http://", "https://")
         text = (f"📊 台股大盤（加權指數）\n\n💰 指數點位：{data['price']:.2f}\n🌊 MA20：{data['ma20']:.2f}\n"
                 f"🌡 RSI：{data['rsi']:.1f}\n📈 趨勢：{data['trend']}\n📊 上漲機率分數：{data['prob']}%\n\n完整分析：{url}")
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=text))
+        
+        line_bot_api.reply_message(
+            event.reply_token, 
+            TextSendMessage(
+                text=text,
+                quick_reply=QuickReply(items=[
+                    QuickReplyButton(action=MessageAction(label="📊 執行歷史回測", text="詳細策略_TAIEX"))
+                ])
+            )
+        )
         return
 
     if msg == "預測":
@@ -486,6 +536,12 @@ def handle_message(event):
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text="本系統資訊僅供研究參考，不構成投資建議，投資盈虧請自負。"))
         return
 
+    if msg.startswith("詳細策略_"):
+        code = msg.replace("詳細策略_", "")
+        name = "台股加權指數(大盤)" if code == "TAIEX" else get_stock_name(code)
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=calculate_backtest(code, name)))
+        return
+
     code, name = search_stock_code(msg)
     if code:
         if code == "TAIEX":
@@ -497,7 +553,16 @@ def handle_message(event):
             text = (f"📊 台股大盤（加權指數）\n\n💰 指數點位：{data['price']:.2f}\n🌊 20日均線：{data['ma20']:.2f}\n"
                     f"🌡 RSI(14)：{data['rsi']:.1f}\n📈 趨勢：{data['trend']}\n\n🎯【預測區間：未來5日】\n"
                     f"📊 上漲機率分數：{data['prob']}%\n\n📌 點擊查看完整分析：\n{url}")
-            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=text))
+            
+            line_bot_api.reply_message(
+                event.reply_token, 
+                TextSendMessage(
+                    text=text,
+                    quick_reply=QuickReply(items=[
+                        QuickReplyButton(action=MessageAction(label="📊 執行歷史回測", text="詳細策略_TAIEX"))
+                    ])
+                )
+            )
             return
 
         data = analyze_stock(code)
@@ -510,7 +575,16 @@ def handle_message(event):
         text = (f"📊 {name} ({code})\n\n💰 最新收盤：{data['price']:.2f}\n🌊 20日均線：{data['ma20']:.2f}\n"
                 f"🌡 RSI(14)：{data['rsi']:.1f}\n📈 趨勢：{data['trend']}\n\n🎯【預測區間：未來5日】\n"
                 f"📊 上漲機率分數：{direction} ({data['prob']}%)\n\n📌 點擊查看完整分析：\n{url}")
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=text))
+        
+        line_bot_api.reply_message(
+            event.reply_token, 
+            TextSendMessage(
+                text=text,
+                quick_reply=QuickReply(items=[
+                    QuickReplyButton(action=MessageAction(label="📊 執行歷史回測", text=f"詳細策略_{code}"))
+                ])
+            )
+        )
     else:
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text="請輸入股票代碼，或輸入：預測 / 大盤預測 / 產業列表"))
 
