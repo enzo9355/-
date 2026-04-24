@@ -1,6 +1,5 @@
 # app.py
-# v3.0 完整可覆蓋版
-# 真實大盤資料 + 動態勝率 + 擴充產業分類 + LINE/UI 網站版
+# v3.1 修正版：修復 API 參數錯誤、統一 V4 版本、優化大盤抓取效能
 # --------------------------------------------------
 
 import os
@@ -40,7 +39,6 @@ handler = WebhookHandler(LINE_CHANNEL_SECRET)
 finmind_token = ""
 CATEGORY_PAGE_SIZE = 12
 
-
 # ==================================================
 # FinMind 登入
 # ==================================================
@@ -65,9 +63,8 @@ def finmind_login():
 
         if r.get("msg") == "success":
             finmind_token = r["token"]
-    except:
-        pass
-
+    except Exception as e:
+        print(f"FinMind 登入失敗: {e}")
 
 # ==================================================
 # 工具
@@ -80,7 +77,6 @@ def get_stock_name(code):
         return twstock.codes[code].name
 
     return code
-
 
 def search_stock_code(keyword):
     keyword = keyword.upper().strip()
@@ -97,34 +93,28 @@ def search_stock_code(keyword):
 
     return None, None
 
-
 def _safe_float(x, default=0.0):
     try:
         return float(x)
     except:
         return default
 
-
 # ==================================================
 # 抓加權指數（真實大盤）
-# 優先：FinMind TaiwanVariousIndicators5Seconds
-# 備援：yfinance ^TWII
 # ==================================================
 def _get_taiex_data(days=180):
     finmind_login()
 
-    start_date = (
-        datetime.datetime.now() - datetime.timedelta(days=days)
-    ).strftime("%Y-%m-%d")
-
+    start_date = (datetime.datetime.now() - datetime.timedelta(days=days)).strftime("%Y-%m-%d")
     end_date = datetime.datetime.now().strftime("%Y-%m-%d")
 
-    # 方法 A：FinMind 加權指數
+    # 方法 A：FinMind 加權指數 (改用日線資料，避免 5 秒資料過載)
     try:
-        url = "https://api.finmindtrade.com/api/v3/data"
+        url = "https://api.finmindtrade.com/api/v4/data"
         params = {
-            "dataset": "TaiwanVariousIndicators5Seconds",
-            "date": start_date,
+            "dataset": "TaiwanStockPrice",
+            "data_id": "TAIEX",
+            "start_date": start_date,
             "end_date": end_date
         }
         if finmind_token:
@@ -132,34 +122,29 @@ def _get_taiex_data(days=180):
 
         r = requests.get(url, params=params, timeout=15).json()
 
-        if r.get("data"):
+        if r.get("msg") == "success" and r.get("data"):
             df = pd.DataFrame(r["data"])
-            if "date" in df.columns and "TAIEX" in df.columns:
-                df["DateTime"] = pd.to_datetime(df["date"], errors="coerce")
-                df["Close"] = pd.to_numeric(df["TAIEX"], errors="coerce")
-                df = df[["DateTime", "Close"]].dropna()
-                df.set_index("DateTime", inplace=True)
-                daily = df.resample("D").last().dropna()
+            df["Date"] = pd.to_datetime(df["date"], errors="coerce")
+            df["Close"] = pd.to_numeric(df["close"], errors="coerce")
+            df = df[["Date", "Close"]].dropna()
+            df.set_index("Date", inplace=True)
+            if not df.empty:
+                return df[["Close"]]
+    except Exception as e:
+        print(f"FinMind 大盤獲取失敗: {e}")
 
-                if len(daily) >= 30:
-                    return daily[["Close"]]
-    except:
-        pass
-
-    # 方法 B：Yahoo Finance 備援
+    # 方法 B：Yahoo Finance 備援 (十分穩定的備案)
     try:
         import yfinance as yf
-
         hist = yf.download("^TWII", start=start_date, progress=False, auto_adjust=False)
         if not hist.empty and "Close" in hist.columns:
             df = hist[["Close"]].copy()
             df.index = pd.to_datetime(df.index).tz_localize(None)
             return df.dropna()
-    except:
-        pass
+    except Exception as e:
+        print(f"yfinance 大盤獲取失敗: {e}")
 
     return pd.DataFrame()
-
 
 # ==================================================
 # 抓個股股價
@@ -170,18 +155,16 @@ def get_stock_data(stock_code, days=180):
     if stock_code == "TAIEX":
         return _get_taiex_data(days)
 
-    start_date = (
-        datetime.datetime.now() - datetime.timedelta(days=days)
-    ).strftime("%Y-%m-%d")
-
+    start_date = (datetime.datetime.now() - datetime.timedelta(days=days)).strftime("%Y-%m-%d")
     end_date = datetime.datetime.now().strftime("%Y-%m-%d")
 
     try:
-        url = "https://api.finmindtrade.com/api/v3/data"
+        # 教練修正：統一使用 V4，並修正參數名稱為 data_id 與 start_date
+        url = "https://api.finmindtrade.com/api/v4/data"
         params = {
             "dataset": "TaiwanStockPrice",
-            "stock_id": stock_code,
-            "date": start_date,
+            "data_id": stock_code,
+            "start_date": start_date,
             "end_date": end_date
         }
         if finmind_token:
@@ -200,16 +183,15 @@ def get_stock_data(stock_code, days=180):
 
         return df[["Close"]].dropna()
 
-    except:
+    except Exception as e:
+        print(f"個股資料獲取失敗 ({stock_code}): {e}")
         return pd.DataFrame()
-
 
 # ==================================================
 # 指標
 # ==================================================
 def calc_indicators(df):
     df = df.copy()
-
     close = df["Close"]
 
     df["MA20"] = close.rolling(20).mean()
@@ -223,12 +205,8 @@ def calc_indicators(df):
 
     return df.dropna()
 
-
 # ==================================================
 # 動態勝率
-# 說明：
-# 不是機器學習模型，而是規則式技術面分數轉換
-# 避免所有標的只輸出固定 68 / 38
 # ==================================================
 def calc_win_probability(df):
     close = df["Close"]
@@ -258,14 +236,13 @@ def calc_win_probability(df):
 
     return int(prob)
 
-
 # ==================================================
 # 圖表
 # ==================================================
 def create_chart(df, title):
     plt.figure(figsize=(10, 5))
-    plt.plot(df.index, df["Close"], label="收盤價")
-    plt.plot(df.index, df["MA20"], label="MA20")
+    plt.plot(df.index, df["Close"], label="收盤價", color="black")
+    plt.plot(df.index, df["MA20"], label="MA20", color="red", linestyle="--")
 
     plt.title(title)
     plt.grid(alpha=0.3)
@@ -278,7 +255,6 @@ def create_chart(df, title):
 
     img.seek(0)
     return base64.b64encode(img.read()).decode()
-
 
 # ==================================================
 # 分析股票
@@ -314,9 +290,8 @@ def analyze_stock(code):
         "chart": chart
     }
 
-
 # ==================================================
-# 大盤預測（改為真實加權指數）
+# 大盤預測
 # ==================================================
 def market_forecast():
     df = get_stock_data("TAIEX", 180)
@@ -349,9 +324,8 @@ def market_forecast():
         "chart": chart
     }
 
-
 # ==================================================
-# 動態分類（使用 twstock 官方 group 欄位）
+# 動態分類
 # ==================================================
 def build_market_map():
     market = {
@@ -401,24 +375,19 @@ def build_market_map():
     market = {k: v for k, v in market.items() if v}
     return market
 
-
 industry_map = build_market_map()
-
 
 # ==================================================
 # 產業分類分頁
-# LINE Quick Reply 最多 13 個，故做分頁
 # ==================================================
 def get_all_categories():
     return list(industry_map.keys())
-
 
 def get_category_total_pages():
     cats = get_all_categories()
     if not cats:
         return 1
     return (len(cats) + CATEGORY_PAGE_SIZE - 1) // CATEGORY_PAGE_SIZE
-
 
 def get_category_page(page=1):
     cats = get_all_categories()
@@ -434,7 +403,6 @@ def get_category_page(page=1):
 
     return cats[start:end], page, total
 
-
 def build_category_quick_reply(page=1):
     categories, page, total = get_category_page(page)
     items = []
@@ -449,7 +417,6 @@ def build_category_quick_reply(page=1):
             )
         )
 
-    # Quick Reply 上限 13 個按鈕，保留最多 1 個導頁按鈕
     if page < total and len(items) < 13:
         items.append(
             QuickReplyButton(
@@ -462,14 +429,12 @@ def build_category_quick_reply(page=1):
 
     return QuickReply(items=items), f"請選擇市場類別（第 {page}/{total} 頁）👇"
 
-
 def build_category_list_text():
     cats = get_all_categories()
     lines = ["📚 產業分類總表\n"]
     for i, c in enumerate(cats, 1):
         lines.append(f"{i}. {c}")
     return "\n".join(lines[:120])
-
 
 # ==================================================
 # 推薦
@@ -497,7 +462,6 @@ def build_style_result(category):
 
     return "\n".join(lines)
 
-
 # ==================================================
 # UI
 # ==================================================
@@ -509,70 +473,20 @@ def render_dashboard(data):
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{data['name']}</title>
-
 <style>
-body {{
-margin:0;
-background:#050505;
-color:#fff;
-font-family:-apple-system,BlinkMacSystemFont,sans-serif;
-}}
-
-.wrap {{
-max-width:920px;
-margin:auto;
-padding:30px 20px 60px;
-}}
-
-h1 {{
-font-size:42px;
-margin-bottom:24px;
-}}
-
-.card {{
-background:#1a1a1c;
-border-radius:22px;
-padding:26px;
-margin-bottom:24px;
-}}
-
-.grid {{
-display:grid;
-grid-template-columns:repeat(auto-fit,minmax(260px,1fr));
-gap:20px;
-}}
-
-img {{
-width:100%;
-border-radius:18px;
-background:#fff;
-}}
-
-.small {{
-font-size:18px;
-line-height:1.8;
-}}
-
-@media (max-width: 640px) {{
-h1 {{
-font-size:30px;
-}}
-.small {{
-font-size:16px;
-}}
-.card {{
-padding:20px;
-border-radius:18px;
-}}
-}}
+body {{ margin:0; background:#050505; color:#fff; font-family:-apple-system,BlinkMacSystemFont,sans-serif; }}
+.wrap {{ max-width:920px; margin:auto; padding:30px 20px 60px; }}
+h1 {{ font-size:42px; margin-bottom:24px; }}
+.card {{ background:#1a1a1c; border-radius:22px; padding:26px; margin-bottom:24px; }}
+.grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:20px; }}
+img {{ width:100%; border-radius:18px; background:#fff; }}
+.small {{ font-size:18px; line-height:1.8; }}
+@media (max-width: 640px) {{ h1 {{ font-size:30px; }} .small {{ font-size:16px; }} .card {{ padding:20px; border-radius:18px; }} }}
 </style>
 </head>
-
 <body>
 <div class="wrap">
-
 <h1>{data['name']} ({data['code']})</h1>
-
 <div class="card small">
 💰 最新收盤：{data['price']:.2f}<br>
 🌊 20日均線：{data['ma20']:.2f}<br>
@@ -580,13 +494,10 @@ border-radius:18px;
 📈 趨勢：{data['trend']}<br>
 📊 上漲機率分數：{data['prob']}%
 </div>
-
 <div class="card">
 <img src="data:image/png;base64,{data['chart']}">
 </div>
-
 <div class="grid">
-
 <div class="card small">
 📑 指標摘要<br><br>
 📈 趨勢判讀：{data['trend']}<br>
@@ -594,39 +505,29 @@ border-radius:18px;
 🌡 RSI 強弱：{'偏強' if data['rsi'] >= 55 else '中性' if data['rsi'] >= 45 else '偏弱'}<br>
 🎯 分數評估：{data['prob']}%
 </div>
-
 <div class="card small">
 💡 觀察建議<br><br>
 🛒 若趨勢轉強：可觀察分批布局<br>
 🛡 若跌破均線：留意風險控管<br>
 💰 接近前高壓力：可評估分段調節
 </div>
-
 </div>
-
 <div class="card small">
 📰 提醒<br><br>
 本頁勝率為規則式技術分數，依均線、RSI、短期動能與波動度估算，僅供研究參考，不構成投資建議。
 </div>
-
-<div class="card small">
-免責聲明：本系統資訊僅供研究參考，不構成投資建議。
-</div>
-
 </div>
 </body>
 </html>
 """
     return render_template_string(html)
 
-
 # ==================================================
-# 網頁
+# 網頁路由
 # ==================================================
 @app.route("/")
 def home():
-    return "<h1>AI 台股系統 v3.0</h1>"
-
+    return "<h1>AI 台股系統 v3.1 正常運作中</h1>"
 
 @app.route("/stock/<stock_code>")
 def stock_page(stock_code):
@@ -642,7 +543,6 @@ def stock_page(stock_code):
 
     return render_dashboard(data)
 
-
 @app.route("/market")
 def market_page():
     data = market_forecast()
@@ -651,7 +551,6 @@ def market_page():
         return "查無資料"
 
     return render_dashboard(data)
-
 
 # ==================================================
 # LINE webhook
@@ -668,9 +567,8 @@ def callback():
 
     return "OK"
 
-
 # ==================================================
-# LINE
+# LINE 訊息處理
 # ==================================================
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
@@ -760,7 +658,6 @@ def handle_message(event):
     code, name = search_stock_code(msg)
 
     if code:
-        # 若直接輸入大盤，也走大盤分析
         if code == "TAIEX":
             data = market_forecast()
 
@@ -824,7 +721,6 @@ def handle_message(event):
                 text="請輸入股票代碼，或輸入：預測 / 大盤預測 / 產業列表"
             )
         )
-
 
 # ==================================================
 # 啟動
