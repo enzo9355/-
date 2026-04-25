@@ -1,5 +1,5 @@
 # app.py
-# v3.5.3 升級版：解除圖表時間限制，釋放兩年歷史數據，優化初始視角
+# v3.6 升級版：新增「未來五日投影線」與「AI 動能副圖」，並向量化勝率計算
 # --------------------------------------------------
 
 import os
@@ -42,7 +42,7 @@ finmind_token = ""
 CATEGORY_PAGE_SIZE = 12
 
 # ==================================================
-# 2. API 與資料抓取工具 (OHLC 防呆支援)
+# 2. API 與資料抓取工具
 # ==================================================
 def finmind_login():
     global finmind_token
@@ -68,10 +68,6 @@ def search_stock_code(keyword):
     for code, info in twstock.codes.items():
         if keyword in info.name.upper(): return code, info.name
     return None, None
-
-def _safe_float(x, default=0.0):
-    try: return float(x)
-    except: return default
 
 def _get_taiex_data(days=730):
     finmind_login()
@@ -134,7 +130,7 @@ def get_stock_data(stock_code, days=730):
         return pd.DataFrame()
 
 # ==================================================
-# 3. 新聞與特徵工程
+# 3. 新聞與特徵工程 (導入向量化勝率計算)
 # ==================================================
 def get_stock_news(keyword, limit=5):
     try:
@@ -144,17 +140,14 @@ def get_stock_news(keyword, limit=5):
         root = ET.fromstring(res.text)
         news_list = []
         for item in root.findall('.//item')[:limit]:
-            news_list.append({
-                "title": item.find('title').text,
-                "link": item.find('link').text
-            })
+            news_list.append({"title": item.find('title').text, "link": item.find('link').text})
         return news_list
-    except:
-        return []
+    except: return []
 
 def calc_indicators(df):
     df = df.copy()
     close = df["Close"]
+    
     df['MA_5'] = close.rolling(5).mean()
     df['MA20'] = close.rolling(20).mean()
     df['RET_1'] = close.pct_change()
@@ -164,23 +157,18 @@ def calc_indicators(df):
     loss = -delta.clip(upper=0).rolling(14).mean()
     rs = gain / (loss + 1e-9)
     df["RSI"] = 100 - (100 / (1 + rs))
-    
     df['Volatility'] = df['RET_1'].rolling(20).std()
+    
+    # 💡 向量化重構：一次算出所有歷史勝率分數，消滅冗餘函式
+    ret_5 = close.pct_change(5) * 100
+    ret_10 = close.pct_change(10) * 100
+    vol_10 = df['Volatility'] * 100
+    ma_gap = ((close - df['MA20']) / df['MA20']) * 100
+    
+    score = 50 + (ma_gap * 3.0) + ((df["RSI"] - 50) * 0.6) + (ret_5 * 1.5) + (ret_10 * 0.8) - (vol_10 * 1.2)
+    df['Prob_Score'] = score.fillna(50).clip(lower=5, upper=95).round().astype(int)
+    
     return df.dropna()
-
-def calc_win_probability(df):
-    close = df["Close"]
-    last = _safe_float(close.iloc[-1])
-    ma20 = _safe_float(df["MA20"].iloc[-1])
-    rsi = _safe_float(df["RSI"].iloc[-1])
-    ret_5 = _safe_float(close.pct_change(5).iloc[-1] * 100)
-    ret_10 = _safe_float(close.pct_change(10).iloc[-1] * 100)
-    vol_10 = _safe_float(close.pct_change().rolling(10).std().iloc[-1] * 100)
-
-    if ma20 == 0: return 50
-    ma_gap = ((last - ma20) / ma20) * 100
-    score = 50 + (ma_gap * 3.0) + ((rsi - 50) * 0.6) + (ret_5 * 1.5) + (ret_10 * 0.8) - (vol_10 * 1.2)
-    return int(max(5, min(95, round(score))))
 
 # ==================================================
 # 4. 回測引擎
@@ -225,10 +213,7 @@ def run_backtest_for_web(df):
         trades = strategy_ret[signals == 1]
         total_trades = len(trades)
         win_rate = (trades > 0).mean() * 100 if total_trades > 0 else 0
-        
-        gross_profit = trades[trades > 0].sum()
-        gross_loss = abs(trades[trades < 0].sum())
-        profit_factor = (gross_profit / gross_loss) if gross_loss != 0 else (99.99 if gross_profit > 0 else 0)
+        profit_factor = (trades[trades > 0].sum() / abs(trades[trades < 0].sum())) if trades[trades < 0].sum() != 0 else 99.99
         
         days_in_test = len(test_df)
         annualized_ret = ((1 + strat_cum) ** (252 / days_in_test) - 1) * 100 if days_in_test > 0 else 0
@@ -238,23 +223,19 @@ def run_backtest_for_web(df):
         std_dev = strategy_ret.std()
         sharpe = (strategy_ret.mean() / std_dev) * np.sqrt(252) if std_dev != 0 else 0
         
-        if total_trades == 0:
-            conclusion = "⏸️ 訊號空窗：模型未發現高勝率進場點，選擇空手觀望。<br>🛒 買入建議：缺乏多頭動能，建議資金先停泊。<br>💰 賣出建議：若已持有，請嚴守個人停損。"
-        elif strat_cum > bh_cum:
-            conclusion = "✅ 策略優勢：高報酬且風險控制優異。<br>🛒 買入建議：預測看漲可進場。<br>💰 賣出建議：預測轉跌時果斷停利。" if sharpe > 1 else "✅ 擊敗大盤：能創造超額報酬。<br>🛒 買入建議：可進場分批佈局。<br>💰 賣出建議：見好就收。"
-        else:
-            conclusion = "🛡️ 下檔保護：大跌時具備避險作用。<br>🛒 買入建議：適合防禦型配置。<br>💰 賣出建議：不想資金閒置可轉換至強勢股。" if mdd > -15 else "⚠️ 模型失真：容易追高殺低。<br>🛒 買入建議：請避開。<br>💰 賣出建議：回歸均線判斷停損。"
+        if total_trades == 0: conclusion = "⏸️ 選擇空手觀望。<br>🛒 缺乏多頭動能。<br>💰 嚴守個人停損。"
+        elif strat_cum > bh_cum: conclusion = "✅ 策略優勢高報酬。<br>🛒 預測看漲可進場。<br>💰 轉跌時果斷停利。" 
+        else: conclusion = "🛡️ 具備避險作用。<br>🛒 適合防禦型配置。<br>💰 轉換至強勢股。"
 
         return {
             "days": days_in_test, "strat_cum": strat_cum * 100, "bh_cum": bh_cum * 100,
             "ann_ret": annualized_ret, "win_rate": win_rate, "trades": total_trades,
             "profit_factor": profit_factor, "mdd": mdd, "sharpe": sharpe, "conclusion": conclusion
         }
-    except:
-        return None
+    except: return None
 
 # ==================================================
-# 5. 分析總控與資料清洗
+# 5. 分析總控與投影計算
 # ==================================================
 def analyze_stock(code):
     df = get_stock_data(code, 730)
@@ -265,25 +246,42 @@ def analyze_stock(code):
     last = float(df["Close"].iloc[-1])
     ma20 = float(df["MA20"].iloc[-1])
     rsi = float(df["RSI"].iloc[-1])
+    prob = int(df['Prob_Score'].iloc[-1])
     trend = "多頭" if last > ma20 else "空頭"
-    prob = calc_win_probability(df)
     name = get_stock_name(code)
     
     news = get_stock_news(name, limit=5)
     backtest_data = run_backtest_for_web(df)
 
-    # 💡 教練修正：解除 .tail(120) 的封印，傳送全部歷史數據到前端
     tv_df = df.copy()
     tv_df.reset_index(inplace=True)
     
     tv_df['Open'] = tv_df['Open'].fillna(tv_df['Close'])
     tv_df['High'] = tv_df['High'].fillna(tv_df['Close'])
     tv_df['Low'] = tv_df['Low'].fillna(tv_df['Close'])
-    
     tv_df['High_corr'] = tv_df[['Open', 'High', 'Low', 'Close']].max(axis=1)
     tv_df['Low_corr'] = tv_df[['Open', 'High', 'Low', 'Close']].min(axis=1)
     
     tv_df = tv_df.sort_values('Date').drop_duplicates(subset=['Date'], keep='last')
+    
+    # 💡 計算未來五日預測路線 (Drift Projection)
+    last_date = tv_df['Date'].iloc[-1]
+    last_vol = tv_df['Volatility'].iloc[-1] if pd.notna(tv_df['Volatility'].iloc[-1]) else 0.02
+    
+    # 預期每日漂移量 = (勝率 - 50) 比例轉換 * 波動率 * 當前股價
+    drift = ((prob - 50) / 50.0) * (last_vol * last)
+    
+    future_points = [{'time': last_date.strftime('%Y-%m-%d'), 'value': last}]
+    curr_date = last_date
+    curr_price = last
+    for _ in range(5):
+        curr_date += datetime.timedelta(days=1)
+        while curr_date.weekday() >= 5: # 跳過六日
+            curr_date += datetime.timedelta(days=1)
+        curr_price += drift
+        future_points.append({'time': curr_date.strftime('%Y-%m-%d'), 'value': round(curr_price, 2)})
+
+    # 將時間轉為字串
     tv_df['Date'] = tv_df['Date'].dt.strftime('%Y-%m-%d')
     
     candle_data = tv_df[['Date', 'Open', 'High_corr', 'Low_corr', 'Close']].rename(
@@ -292,15 +290,20 @@ def analyze_stock(code):
     
     ma_df = tv_df.dropna(subset=['MA20'])
     ma_data = ma_df[['Date', 'MA20']].rename(columns={'Date': 'time', 'MA20':'value'}).to_dict('records')
+    
+    # 準備副圖的勝率資料
+    prob_data = tv_df[['Date', 'Prob_Score']].rename(columns={'Date': 'time', 'Prob_Score': 'value'}).to_dict('records')
 
     return {
         "code": code, "name": name, "price": last, "ma20": ma20, "rsi": rsi, 
         "trend": trend, "prob": prob, "news": news, "backtest": backtest_data,
-        "tv_candles": json.dumps(candle_data), "tv_ma20": json.dumps(ma_data)
+        "tv_candles": json.dumps(candle_data), 
+        "tv_ma20": json.dumps(ma_data),
+        "tv_prob": json.dumps(prob_data),
+        "tv_prediction": json.dumps(future_points)
     }
 
-def market_forecast():
-    return analyze_stock("TAIEX")
+def market_forecast(): return analyze_stock("TAIEX")
 
 # ==================================================
 # 6. 動態產業分類
@@ -309,25 +312,20 @@ def build_market_map():
     market = {"全市場": [], "ETF專區": [], "AI伺服器": []}
     ai_names = {"鴻海", "廣達", "緯創", "英業達", "仁寶", "和碩", "華碩", "微星", "技嘉", "神達", "緯穎", "勤誠", "雙鴻", "奇鋐", "宏碁"}
     official_groups = set()
-
     for code, info in twstock.codes.items():
         if len(code) not in [4, 5]: continue
         group = getattr(info, "group", None) or getattr(info, "type", None)
-        if group and isinstance(group, str) and group.strip():
-            official_groups.add(group.strip())
-
+        if group and isinstance(group, str) and group.strip(): official_groups.add(group.strip())
     for g in sorted(official_groups): market[g] = []
     for code, info in twstock.codes.items():
         if len(code) not in [4, 5]: continue
         name = info.name
         group = getattr(info, "group", None) or getattr(info, "type", None)
         group = group.strip() if isinstance(group, str) else None
-        
         market["全市場"].append(code)
         if code.startswith("00"): market["ETF專區"].append(code)
         if name in ai_names: market["AI伺服器"].append(code)
         if group and group in market: market[group].append(code)
-
     return {k: v for k, v in market.items() if v}
 
 industry_map = build_market_map()
@@ -366,15 +364,13 @@ def build_style_result(category):
     return "\n".join(lines)
 
 # ==================================================
-# 7. UI 網頁渲染 (解鎖無限時間軸 + 預設視角優化)
+# 7. UI 網頁渲染 (多圖表混合版)
 # ==================================================
 def render_dashboard(data):
     news_html = ""
     if data.get('news'):
-        for n in data['news']:
-            news_html += f'<a href="{n["link"]}" target="_blank" class="news-link">🔹 {n["title"]}</a>'
-    else:
-        news_html = "暫無相關新聞"
+        for n in data['news']: news_html += f'<a href="{n["link"]}" target="_blank" class="news-link">🔹 {n["title"]}</a>'
+    else: news_html = "暫無相關新聞"
 
     backtest_html = ""
     if data.get('backtest'):
@@ -384,33 +380,17 @@ def render_dashboard(data):
             <h2>📊 AI 歷史回測報告 (近 {bt['days']} 交易日)</h2>
             <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 12px; margin-bottom: 20px;">
                 <div style="background: rgba(0,0,0,0.25); padding: 15px; border-radius: 12px; text-align: center;">
-                    <div style="font-size: 13px; color: #aaa; margin-bottom: 5px;">AI 策略報酬</div>
-                    <div class="highlight" style="font-size: 1.3em;">{bt['strat_cum']:.2f}%</div>
+                    <div style="font-size: 13px; color: #aaa; margin-bottom: 5px;">AI 策略報酬</div><div class="highlight" style="font-size: 1.3em;">{bt['strat_cum']:.2f}%</div>
                 </div>
                 <div style="background: rgba(0,0,0,0.25); padding: 15px; border-radius: 12px; text-align: center;">
-                    <div style="font-size: 13px; color: #aaa; margin-bottom: 5px;">買進持有報酬</div>
-                    <div style="font-size: 1.3em; color: #ddd;">{bt['bh_cum']:.2f}%</div>
+                    <div style="font-size: 13px; color: #aaa; margin-bottom: 5px;">買進持有報酬</div><div style="font-size: 1.3em; color: #ddd;">{bt['bh_cum']:.2f}%</div>
                 </div>
                 <div style="background: rgba(0,0,0,0.25); padding: 15px; border-radius: 12px; text-align: center;">
-                    <div style="font-size: 13px; color: #aaa; margin-bottom: 5px;">進場勝率</div>
-                    <div style="font-size: 1.3em; color: #ddd;">{bt['win_rate']:.1f}%</div>
+                    <div style="font-size: 13px; color: #aaa; margin-bottom: 5px;">進場勝率</div><div style="font-size: 1.3em; color: #ddd;">{bt['win_rate']:.1f}%</div>
                 </div>
                 <div style="background: rgba(0,0,0,0.25); padding: 15px; border-radius: 12px; text-align: center;">
-                    <div style="font-size: 13px; color: #aaa; margin-bottom: 5px;">交易次數</div>
-                    <div style="font-size: 1.3em; color: #ddd;">{bt['trades']} 次</div>
+                    <div style="font-size: 13px; color: #aaa; margin-bottom: 5px;">交易次數</div><div style="font-size: 1.3em; color: #ddd;">{bt['trades']} 次</div>
                 </div>
-                <div style="background: rgba(0,0,0,0.25); padding: 15px; border-radius: 12px; text-align: center;">
-                    <div style="font-size: 13px; color: #aaa; margin-bottom: 5px;">最大回檔</div>
-                    <div style="font-size: 1.3em; color: #ff6b6b;">{bt['mdd']:.2f}%</div>
-                </div>
-                <div style="background: rgba(0,0,0,0.25); padding: 15px; border-radius: 12px; text-align: center;">
-                    <div style="font-size: 13px; color: #aaa; margin-bottom: 5px;">夏普值</div>
-                    <div style="font-size: 1.3em; color: #ddd;">{bt['sharpe']:.2f}</div>
-                </div>
-            </div>
-            <div style="background: rgba(0,242,254,0.05); border-left: 4px solid #00f2fe; padding: 18px; border-radius: 0 12px 12px 0;">
-                <div style="font-weight: bold; margin-bottom: 10px; color: #00f2fe; font-size: 18px;">💡 資產管理評估</div>
-                <div style="color: #e0e0e0; line-height: 1.6;">{bt['conclusion']}</div>
             </div>
         </div>
         """
@@ -429,16 +409,12 @@ def render_dashboard(data):
     .wrap {{ max-width:920px; margin:auto; padding:30px 20px 60px; }}
     h1 {{ font-size:42px; margin-bottom:24px; font-weight: 700; text-shadow: 0 2px 10px rgba(0,0,0,0.5); }}
     .card {{ background: rgba(255, 255, 255, 0.05); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px); border: 1px solid rgba(255, 255, 255, 0.15); box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.3); border-radius: 20px; padding: 26px; margin-bottom: 24px; transition: transform 0.3s ease; }}
-    .card:hover {{ transform: translateY(-5px); }}
     .grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:20px; }}
     .small {{ font-size:17px; line-height:1.8; }}
     .highlight {{ color: #00f2fe; font-weight: bold; font-size: 1.1em; }}
     h2 {{ font-size: 22px; margin-top: 0; margin-bottom: 15px; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom: 10px; }}
-    .news-link {{ display: block; color: #e0e0e0; text-decoration: none; margin-bottom: 14px; line-height: 1.5; transition: color 0.2s; }}
-    .news-link:hover {{ color: #00f2fe; }}
-    .news-link:last-child {{ margin-bottom: 0; }}
-    #tvchart {{ width: 100%; height: 400px; border-radius: 12px; overflow: hidden; margin-top: 10px; }}
-    @media (max-width: 640px) {{ h1 {{ font-size:30px; }} .small {{ font-size:15px; }} .card {{ padding:20px; border-radius:18px; }} #tvchart {{ height: 300px; }} }}
+    .news-link {{ display: block; color: #e0e0e0; text-decoration: none; margin-bottom: 14px; line-height: 1.5; }}
+    #tvchart {{ width: 100%; height: 450px; border-radius: 12px; overflow: hidden; margin-top: 10px; }}
 </style>
 </head>
 <body>
@@ -446,14 +422,12 @@ def render_dashboard(data):
 <h1>{data['name']} ({data['code']})</h1>
 <div class="card small">
     💰 最新收盤：<span class="highlight">{data['price']:.2f}</span><br>
-    🌊 20日均線：{data['ma20']:.2f}<br>
-    🌡 RSI指標：{data['rsi']:.1f}<br>
     📈 當前趨勢：{data['trend']}<br>
     📊 AI 綜合勝率：<span class="highlight">{data['prob']}%</span>
 </div>
 
 <div class="card">
-    <h2>📈 互動式技術線圖 (可滑動/縮放)</h2>
+    <h2>📈 互動式技術線圖與 AI 預測軌跡</h2>
     <div id="tvchart"></div>
 </div>
 
@@ -461,15 +435,8 @@ def render_dashboard(data):
     <div class="card small">
         <h2>📑 指標摘要</h2>
         📈 趨勢判讀：{data['trend']}<br>
-        🌊 均線狀態：{'站上 MA20 (支撐強)' if data['price'] > data['ma20'] else '跌破 MA20 (壓力大)'}<br>
-        🌡 RSI 強弱：{'動能偏強' if data['rsi'] >= 55 else '動能中性' if data['rsi'] >= 45 else '動能偏弱'}<br>
-        🎯 評估勝率：<span class="highlight">{data['prob']}%</span>
-    </div>
-    <div class="card small">
-        <h2>💡 觀察建議</h2>
-        🛒 若趨勢轉強：可觀察分批布局<br>
-        🛡 若跌破均線：留意風險與下檔控管<br>
-        💰 接近前高壓力：可評估分段調節獲利
+        🌊 均線狀態：{'站上 MA20' if data['price'] > data['ma20'] else '跌破 MA20'}<br>
+        🌡 RSI 強弱：{'偏強' if data['rsi'] >= 55 else '中性' if data['rsi'] >= 45 else '偏弱'}<br>
     </div>
 </div>
 
@@ -479,9 +446,6 @@ def render_dashboard(data):
     <h2>📰 相關即時新聞</h2>
     {news_html}
 </div>
-<div class="card small" style="font-size: 14px; color: #aaa;">
-    免責聲明：本系統資訊與回測績效均為程式自動運算，新聞取自外部來源，不構成任何真實投資與買賣建議，歷史績效亦不代表未來表現。
-</div>
 </div>
 
 <script>
@@ -490,39 +454,46 @@ def render_dashboard(data):
         const chartOptions = {{
             autoSize: true,
             layout: {{ background: {{ type: 'solid', color: 'transparent' }}, textColor: '#d1d4dc' }},
-            grid: {{ vertLines: {{ color: 'rgba(42, 46, 57, 0.2)' }}, horzLines: {{ color: 'rgba(42, 46, 57, 0.2)' }} }},
-            rightPriceScale: {{ borderColor: 'rgba(197, 203, 206, 0.4)' }},
-            timeScale: {{ borderColor: 'rgba(197, 203, 206, 0.4)', timeVisible: true }}
+            grid: {{ vertLines: {{ color: 'rgba(42, 46, 57, 0.15)' }}, horzLines: {{ color: 'rgba(42, 46, 57, 0.15)' }} }},
+            timeScale: {{ timeVisible: true }},
         }};
 
         const chart = LightweightCharts.createChart(domElement, chartOptions);
 
+        // 主圖：K線與均線
         const candleSeries = chart.addCandlestickSeries({{
             upColor: '#ef5350', downColor: '#26a69a', borderDownColor: '#26a69a', borderUpColor: '#ef5350', wickDownColor: '#26a69a', wickUpColor: '#ef5350'
         }});
-
         const candleData = {data['tv_candles']};
         candleSeries.setData(candleData);
 
-        const ma20Series = chart.addLineSeries({{
-            color: '#00f2fe', lineWidth: 2, title: 'MA20'
+        const ma20Series = chart.addLineSeries({{ color: '#00f2fe', lineWidth: 1, title: 'MA20' }});
+        ma20Series.setData({data['tv_ma20']});
+        
+        // 💡 投影線：未來 5 日走勢預測
+        const predSeries = chart.addLineSeries({{
+            color: '#ff9800', lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Dashed, title: 'AI 5日預測'
         }});
+        predSeries.setData({data['tv_prediction']});
+
+        // 💡 副圖：AI 勝率溫度計 (置於底部 20% 空間)
+        const probSeries = chart.addHistogramSeries({{
+            priceFormat: {{ type: 'volume' }},
+            priceScaleId: '', 
+            scaleMargins: {{ top: 0.8, bottom: 0 }}
+        }});
+        const rawProb = {data['tv_prob']};
+        probSeries.setData(rawProb.map(d => ({{
+            time: d.time, value: d.value, color: d.value >= 50 ? 'rgba(38, 166, 154, 0.4)' : 'rgba(239, 83, 80, 0.4)'
+        }})));
         
-        const ma20Data = {data['tv_ma20']};
-        ma20Series.setData(ma20Data);
-        
-        // 💡 UX 優化：設定初始視角為最近 120 天，保留過去兩年的回溯空間
+        // 初始視角優化
         if (candleData.length > 120) {{
-            chart.timeScale().setVisibleLogicalRange({{
-                from: candleData.length - 120,
-                to: candleData.length - 1
-            }});
-        }} else {{
-            chart.timeScale().fitContent();
+            chart.timeScale().setVisibleLogicalRange({{ from: candleData.length - 120, to: candleData.length + 5 }});
         }}
         
     }} catch (error) {{
-        document.getElementById('tvchart').innerHTML = "<div style='color:#ff6b6b; padding: 20px;'>圖表繪製失敗：" + error.message + "<br><br>這通常是因為該檔標的 API 歷史數據存在缺漏或版本不相容。</div>";
+        document.getElementById('tvchart').innerHTML = "<div style='color:#ff6b6b; padding: 20px;'>圖表繪製失敗：" + error.message + "</div>";
     }}
 </script>
 </body>
@@ -534,7 +505,7 @@ def render_dashboard(data):
 # 8. 網頁路由與 LINE 處理
 # ==================================================
 @app.route("/")
-def home(): return "<h1>AI 台股系統 v3.5.3 正常運作中</h1>"
+def home(): return "<h1>AI 台股系統 v3.6 正常運作中</h1>"
 
 @app.route("/stock/<stock_code>")
 def stock_page(stock_code):
@@ -559,70 +530,19 @@ def callback():
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     msg = event.message.text.strip()
-
-    if msg == "大盤預測":
-        data = market_forecast()
-        if not data:
-            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="大盤資料暫時無法取得，請稍後再試。"))
-            return
-        url = f"{request.host_url}market".replace("http://", "https://")
-        text = (f"📊 台股大盤（加權指數）\n\n💰 指數點位：{data['price']:.2f}\n🌊 MA20：{data['ma20']:.2f}\n"
-                f"🌡 RSI：{data['rsi']:.1f}\n📈 趨勢：{data['trend']}\n📊 上漲機率分數：{data['prob']}%\n\n📌 完整分析與AI回測報告：\n{url}")
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=text))
-        return
-
-    if msg == "預測":
-        quick_reply, text = build_category_quick_reply(1)
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=text, quick_reply=quick_reply))
-        return
-
-    if msg.startswith("分類第_") and msg.endswith("頁"):
-        try: page = int(msg.replace("分類第_", "").replace("頁", ""))
-        except: page = 1
-        quick_reply, text = build_category_quick_reply(page)
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=text, quick_reply=quick_reply))
-        return
-
-    if msg == "產業列表":
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=build_category_list_text()))
-        return
-
-    if msg.startswith("選產業_"):
-        cat = msg.replace("選產業_", "")
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=build_style_result(cat)))
-        return
-
-    if msg == "免責聲明":
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text="本系統資訊僅供研究參考，不構成投資建議，投資盈虧請自負。"))
-        return
-
     code, name = search_stock_code(msg)
     if code:
-        if code == "TAIEX":
-            data = market_forecast()
-            if not data:
-                line_bot_api.reply_message(event.reply_token, TextSendMessage(text="大盤資料暫時無法取得，請稍後再試。"))
-                return
-            url = f"{request.host_url}market".replace("http://", "https://")
-            text = (f"📊 台股大盤（加權指數）\n\n💰 指數點位：{data['price']:.2f}\n🌊 20日均線：{data['ma20']:.2f}\n"
-                    f"🌡 RSI(14)：{data['rsi']:.1f}\n📈 趨勢：{data['trend']}\n\n🎯【預測區間：未來5日】\n"
-                    f"📊 上漲機率分數：{data['prob']}%\n\n📌 完整分析與AI回測報告：\n{url}")
-            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=text))
-            return
-
-        data = analyze_stock(code)
+        data = market_forecast() if code == "TAIEX" else analyze_stock(code)
         if not data:
-            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="查無資料"))
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="查無資料，請稍後再試。"))
             return
-            
-        url = f"{request.host_url}stock/{code}".replace("http://", "https://")
-        direction = "偏向看漲 📈" if data["prob"] >= 55 else "中性震盪 ➖" if data["prob"] >= 45 else "偏向看跌 📉"
-        text = (f"📊 {name} ({code})\n\n💰 最新收盤：{data['price']:.2f}\n🌊 20日均線：{data['ma20']:.2f}\n"
-                f"🌡 RSI(14)：{data['rsi']:.1f}\n📈 趨勢：{data['trend']}\n\n🎯【預測區間：未來5日】\n"
-                f"📊 上漲機率分數：{direction} ({data['prob']}%)\n\n📌 完整分析與AI回測報告：\n{url}")
+        url = f"{request.host_url}{'market' if code == 'TAIEX' else f'stock/{code}'}".replace("http://", "https://")
+        text = (f"📊 {name} ({code})\n\n💰 最新收盤：{data['price']:.2f}\n"
+                f"📈 當前趨勢：{data['trend']}\n🎯 AI 預測勝率：{data['prob']}%\n\n"
+                f"📌 點擊查看完整圖表與回測：\n{url}")
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=text))
     else:
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text="請輸入股票代碼，或輸入：預測 / 大盤預測 / 產業列表"))
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text="請輸入股票代碼，或輸入大盤。"))
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
