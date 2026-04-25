@@ -1,5 +1,5 @@
 # app.py
-# v3.7 滿血版：保留所有預測圖表，並完整恢復「詳細回測數據」與「指標觀察建議」
+# v3.8 升級版：第二階段 - 導入可解釋性 AI (XAI)，拆解 LightGBM 特徵重要性
 # --------------------------------------------------
 
 import os
@@ -127,7 +127,7 @@ def get_stock_data(stock_code, days=730):
         return pd.DataFrame()
 
 # ==================================================
-# 3. 新聞與特徵工程 (向量化勝率計算)
+# 3. 新聞與特徵工程
 # ==================================================
 def get_stock_news(keyword, limit=5):
     try:
@@ -166,7 +166,7 @@ def calc_indicators(df):
     return df.dropna()
 
 # ==================================================
-# 4. 回測引擎
+# 4. 回測引擎 (💡 升級 XAI 決策歸因)
 # ==================================================
 def run_backtest_for_web(df):
     try:
@@ -191,6 +191,25 @@ def run_backtest_for_web(df):
         model = LGBMClassifier(n_estimators=80, learning_rate=0.05, max_depth=4, random_state=42, verbose=-1)
         model.fit(X_train, train_df['Target'])
         
+        # 💡 [XAI 核心] 提取特徵重要性並轉化為人類語言
+        importances = model.feature_importances_
+        total_importance = sum(importances)
+        feature_map = {
+            'MA_5': '5日均線短線動能',
+            'MA20': '月線趨勢支撐狀態',
+            'RET_1': '單日股價反轉動能',
+            'RSI': 'RSI 超買超賣冷熱度',
+            'Volatility': '近20日價格波動收斂度'
+        }
+        top_features = []
+        if total_importance > 0:
+            feat_imp = sorted(zip(features, importances), key=lambda x: x[1], reverse=True)[:3]
+            for f, imp in feat_imp:
+                pct = (imp / total_importance) * 100
+                top_features.append(f"{feature_map.get(f, f)} (貢獻度: {pct:.1f}%)")
+        else:
+            top_features = ["資料不足以解析關鍵特徵"]
+
         test_df['Prob'] = model.predict_proba(X_test)[:, 1]
         test_df['Signal'] = np.where(test_df['Prob'] > 0.60, 1, 0)
         test_df['Next_Return'] = test_df['Close'].shift(-1) / test_df['Close'] - 1
@@ -223,7 +242,8 @@ def run_backtest_for_web(df):
         return {
             "days": days_in_test, "strat_cum": strat_cum * 100, "bh_cum": bh_cum * 100,
             "ann_ret": annualized_ret, "win_rate": win_rate, "trades": total_trades,
-            "profit_factor": profit_factor, "mdd": mdd, "sharpe": sharpe, "conclusion": conclusion
+            "profit_factor": profit_factor, "mdd": mdd, "sharpe": sharpe, 
+            "conclusion": conclusion, "top_features": top_features # 回傳最重要的三大特徵
         }
     except: return None
 
@@ -344,7 +364,7 @@ def build_style_result(category):
     return "\n".join(lines)
 
 # ==================================================
-# 7. UI 網頁渲染 (修復：完整恢復所有遺失的卡片與指標)
+# 7. UI 網頁渲染 (導入 XAI 決策卡片)
 # ==================================================
 def render_dashboard(data):
     news_html = ""
@@ -352,10 +372,29 @@ def render_dashboard(data):
         for n in data['news']: news_html += f'<a href="{n["link"]}" target="_blank" class="news-link">🔹 {n["title"]}</a>'
     else: news_html = "暫無相關新聞"
 
-    # 💡 修復：將完整的 HTML 回測報告 (包含 MDD, Sharpe, 結論) 加回
     backtest_html = ""
+    xai_html = ""
+    
     if data.get('backtest'):
         bt = data['backtest']
+        # 💡 XAI 決策核心邏輯卡片
+        if 'top_features' in bt and len(bt['top_features']) >= 3:
+            xai_html = f"""
+            <div class="card small" style="border-left: 4px solid #ff9800;">
+                <h2 style="color: #ff9800; border-bottom: none; margin-bottom: 5px;">🤖 AI 決策核心邏輯</h2>
+                <div style="font-size: 15px; color: #bbb; margin-bottom: 15px;">模型運算之關鍵特徵權重解析 (Feature Importance)</div>
+                <div style="background: rgba(0,0,0,0.3); padding: 15px; border-radius: 12px; margin-bottom: 10px;">
+                    🥇 <span style="color:#fff;">{bt['top_features'][0]}</span>
+                </div>
+                <div style="background: rgba(0,0,0,0.3); padding: 15px; border-radius: 12px; margin-bottom: 10px;">
+                    🥈 <span style="color:#fff;">{bt['top_features'][1]}</span>
+                </div>
+                <div style="background: rgba(0,0,0,0.3); padding: 15px; border-radius: 12px;">
+                    🥉 <span style="color:#fff;">{bt['top_features'][2]}</span>
+                </div>
+            </div>
+            """
+
         backtest_html = f"""
         <div class="card small">
             <h2>📊 AI 歷史回測報告 (近 {bt['days']} 交易日)</h2>
@@ -423,18 +462,13 @@ def render_dashboard(data):
 </div>
 
 <div class="grid">
+    {xai_html}
     <div class="card small">
         <h2>📑 指標摘要</h2>
         📈 趨勢判讀：{data['trend']}<br>
         🌊 均線狀態：{'站上 MA20 (支撐強)' if data['price'] > data['ma20'] else '跌破 MA20 (壓力大)'}<br>
         🌡 RSI 強弱：{'動能偏強' if data['rsi'] >= 55 else '中性' if data['rsi'] >= 45 else '動能偏弱'}<br>
         🎯 評估勝率：<span class="highlight">{data['prob']}%</span>
-    </div>
-    <div class="card small">
-        <h2>💡 觀察建議</h2>
-        🛒 若趨勢轉強：可觀察分批布局<br>
-        🛡 若跌破均線：留意風險與下檔控管<br>
-        💰 接近前高壓力：可評估分段調節獲利
     </div>
 </div>
 
@@ -443,6 +477,9 @@ def render_dashboard(data):
 <div class="card small">
     <h2>📰 相關即時新聞</h2>
     {news_html}
+</div>
+<div class="card small" style="font-size: 14px; color: #aaa;">
+    免責聲明：本系統資訊與回測績效均為程式自動運算，新聞取自外部來源，不構成任何真實投資與買賣建議，歷史績效亦不代表未來表現。
 </div>
 </div>
 
@@ -499,7 +536,7 @@ def render_dashboard(data):
 # 8. 網頁路由與 LINE 處理
 # ==================================================
 @app.route("/")
-def home(): return "<h1>AI 台股系統 v3.7 正常運作中</h1>"
+def home(): return "<h1>AI 台股系統 v3.8 正常運作中</h1>"
 
 @app.route("/stock/<stock_code>")
 def stock_page(stock_code):
