@@ -1,5 +1,5 @@
 # app.py
-# v4.0 升級版：導入真・AI 機率 (LGBM predict_proba)、修復 LINE 選單遺失
+# v5.0 終極完全體：導入 Gemini API 自動生成投資晨報觀點
 # --------------------------------------------------
 
 import os
@@ -13,6 +13,7 @@ import xml.etree.ElementTree as ET
 import urllib.parse
 import numpy as np
 import json
+import google.generativeai as genai
 
 from sklearn.preprocessing import StandardScaler
 from lightgbm import LGBMClassifier
@@ -27,22 +28,29 @@ from linebot.models import (
 )
 
 # ==================================================
-# 1. 基本設定
+# 1. 基本設定與 Gemini 初始化
 # ==================================================
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
 FINMIND_USER = os.getenv("FINMIND_USER")
 FINMIND_PASSWORD = os.getenv("FINMIND_PASSWORD")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 app = Flask(__name__)
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+    gemini_model = genai.GenerativeModel('gemini-1.5-flash')
+else:
+    gemini_model = None
+
 finmind_token = ""
 CATEGORY_PAGE_SIZE = 12
 
 # ==================================================
-# 2. API 與資料抓取工具 (前置防呆排序)
+# 2. API 與資料抓取工具
 # ==================================================
 def finmind_login():
     global finmind_token
@@ -70,7 +78,6 @@ def search_stock_code(keyword):
     return None, None
 
 def _clean_dataframe(df):
-    """共用清洗函式：處理遺失值並強制排序"""
     df[['Open', 'High', 'Low', 'Close']] = df[['Open', 'High', 'Low', 'Close']].replace(0, np.nan)
     df = df.dropna(subset=['Date', 'Close'])
     return df.sort_values('Date').drop_duplicates(subset=['Date'], keep='last').set_index("Date")
@@ -129,7 +136,7 @@ def get_stock_data(stock_code, days=730):
         return pd.DataFrame()
 
 # ==================================================
-# 3. 新聞與特徵工程
+# 3. 新聞、特徵工程與 Gemini 晨報生成
 # ==================================================
 def get_stock_news(keyword, limit=5):
     try:
@@ -142,6 +149,32 @@ def get_stock_news(keyword, limit=5):
             news_list.append({"title": item.find('title').text, "link": item.find('link').text})
         return news_list
     except: return []
+
+def generate_ai_insight(name, price, trend, prob, mdd, sharpe, news_list):
+    """呼叫 Gemini 撰寫投資晨報"""
+    if not gemini_model: return "請先設定 GEMINI_API_KEY 以啟用 AI 晨報功能。"
+    
+    news_text = "\n".join([n['title'] for n in news_list])
+    prompt = f"""
+    你現在是一位資深的華爾街證券分析師，以客觀、精準的口吻著稱。
+    請根據以下量化數據與最新新聞，為投資人撰寫一段 100 字以內的「AI 專屬晨報與觀點」。
+    不要寒暄，直接給出洞見與策略建議。
+
+    標的：{name}
+    最新收盤價：{price}
+    技術面趨勢：{trend}
+    AI 預測未來 5 日上漲機率：{prob}%
+    模型最大回檔風險：{mdd}%
+    模型夏普值：{sharpe}
+
+    最新市場新聞標題：
+    {news_text}
+    """
+    try:
+        response = gemini_model.generate_content(prompt)
+        return response.text.replace('\n', '<br>')
+    except Exception as e:
+        return "AI 晨報生成失敗，請稍後再試。"
 
 def calc_indicators(df):
     df = df.copy()
@@ -158,7 +191,7 @@ def calc_indicators(df):
     return df.dropna()
 
 # ==================================================
-# 4. 回測引擎與 AI 機率生成 (核心升級)
+# 4. 回測引擎與 XAI
 # ==================================================
 def run_backtest_for_web(df):
     try:
@@ -183,7 +216,6 @@ def run_backtest_for_web(df):
         model = LGBMClassifier(n_estimators=80, learning_rate=0.05, max_depth=4, random_state=42, verbose=-1)
         model.fit(X_train, train_df['Target'])
         
-        # 💡 [真・AI 機制] 利用訓練好的模型，重新預測歷史每一天的真實勝率
         X_all = scaler.transform(df[features].ffill().bfill())
         df['AI_Prob'] = model.predict_proba(X_all)[:, 1] * 100
         
@@ -253,12 +285,18 @@ def analyze_stock(code):
     last = float(df["Close"].iloc[-1])
     ma20 = float(df["MA20"].iloc[-1])
     rsi = float(df["RSI"].iloc[-1])
-    
-    # 💡 直接提取模型預測的真實機率
     prob = int(df['AI_Prob'].iloc[-1]) 
     trend = "多頭" if last > ma20 else "空頭"
     name = get_stock_name(code)
     news = get_stock_news(name, limit=5)
+
+    # 💡 呼叫 Gemini 生成觀點
+    insight = generate_ai_insight(
+        name=name, price=last, trend=trend, prob=prob, 
+        mdd=round(backtest_data['mdd'], 2), 
+        sharpe=round(backtest_data['sharpe'], 2), 
+        news_list=news
+    )
 
     tv_df = df.copy()
     tv_df.reset_index(inplace=True)
@@ -287,13 +325,12 @@ def analyze_stock(code):
     ).to_dict('records')
     ma_df = tv_df.dropna(subset=['MA20'])
     ma_data = ma_df[['Date', 'MA20']].rename(columns={'Date': 'time', 'MA20':'value'}).to_dict('records')
-    
-    # 💡 副圖現在顯示的是真正的 AI 評估走勢
     prob_data = tv_df[['Date', 'AI_Prob']].rename(columns={'Date': 'time', 'AI_Prob': 'value'}).to_dict('records')
 
     return {
         "code": code, "name": name, "price": last, "ma20": ma20, "rsi": rsi, 
         "trend": trend, "prob": prob, "news": news, "backtest": backtest_data,
+        "insight": insight, # 新增 insight 欄位
         "tv_candles": json.dumps(candle_data), "tv_ma20": json.dumps(ma_data),
         "tv_prob": json.dumps(prob_data), "tv_prediction": json.dumps(future_points)
     }
@@ -359,7 +396,7 @@ def build_style_result(category):
     return "\n".join(lines)
 
 # ==================================================
-# 7. UI 網頁渲染
+# 7. UI 網頁渲染 (導入 Gemini 觀點卡片)
 # ==================================================
 def render_dashboard(data):
     news_html = ""
@@ -401,6 +438,14 @@ def render_dashboard(data):
         </div>
         """
 
+    # 💡 插入 Gemini 觀點區塊
+    insight_html = f"""
+    <div class="card small" style="background: linear-gradient(135deg, rgba(0,242,254,0.1), rgba(79,172,254,0.05)); border: 1px solid #00f2fe;">
+        <h2 style="color: #00f2fe; border-bottom: 1px solid rgba(0,242,254,0.2);">🌞 AI 專屬晨報與觀點</h2>
+        <div style="font-size: 16px; line-height: 1.8; color: #fff;">{data['insight']}</div>
+    </div>
+    """
+
     html = f"""
 <!DOCTYPE html>
 <html lang="zh-Hant">
@@ -426,6 +471,9 @@ def render_dashboard(data):
 <body>
 <div class="wrap">
 <h1>{data['name']} ({data['code']})</h1>
+
+{insight_html}
+
 <div class="card small">
     💰 最新收盤：<span class="highlight">{data['price']:.2f}</span><br>
     📈 當前趨勢：{data['trend']}<br>
@@ -508,10 +556,10 @@ def render_dashboard(data):
     return render_template_string(html)
 
 # ==================================================
-# 8. 網頁路由與 LINE 處理 (💡 修復：完美恢復所有選單指令)
+# 8. 網頁路由與 LINE 處理
 # ==================================================
 @app.route("/")
-def home(): return "<h1>AI 台股系統 v4.0 真・AI 決策版 正常運作中</h1>"
+def home(): return "<h1>AI 台股系統 v5.0 完全體 正常運作中</h1>"
 
 @app.route("/stock/<stock_code>")
 def stock_page(stock_code):
@@ -537,7 +585,6 @@ def callback():
 def handle_message(event):
     msg = event.message.text.strip()
     
-    # 💡 教練自首：把之前誤刪的按鈕與導覽全部乾淨俐落地加回來了
     if msg == "大盤預測":
         data = market_forecast()
         if not data:
@@ -546,7 +593,7 @@ def handle_message(event):
         url = f"{request.host_url}market".replace("http://", "https://")
         text = (f"📊 台股大盤（加權指數）\n\n💰 指數點位：{data['price']:.2f}\n"
                 f"📈 當前趨勢：{data['trend']}\n🎯 真實 AI 預測勝率：{data['prob']}%\n\n"
-                f"📌 點擊查看完整圖表與回測：\n{url}")
+                f"📌 點擊查看【AI 專屬觀點與完整分析】：\n{url}")
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=text))
         
     elif msg == "預測":
@@ -579,7 +626,7 @@ def handle_message(event):
             url = f"{request.host_url}stock/{code}".replace("http://", "https://")
             text = (f"📊 {name} ({code})\n\n💰 最新收盤：{data['price']:.2f}\n"
                     f"📈 當前趨勢：{data['trend']}\n🎯 真實 AI 預測勝率：{data['prob']}%\n\n"
-                    f"📌 點擊查看完整圖表與回測：\n{url}")
+                    f"📌 點擊查看【AI 專屬觀點與完整分析】：\n{url}")
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text=text))
         else:
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text="請輸入股票代碼，或輸入：預測 / 大盤預測 / 產業列表"))
