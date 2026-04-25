@@ -1,10 +1,8 @@
 # app.py
-# v3.4 升級版：LINE 介面極簡化、LGBM 回測報告深度整合至 Web UI
+# v3.5 升級版：第一階段 - 導入 TradingView 互動式 K 線圖 (Lightweight Charts)
 # --------------------------------------------------
 
 import os
-import io
-import base64
 import datetime
 import requests
 import pandas as pd
@@ -16,11 +14,6 @@ import numpy as np
 from sklearn.preprocessing import StandardScaler
 from lightgbm import LGBMClassifier
 
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-import matplotlib.font_manager as fm
-
 from flask import Flask, request, abort, render_template_string
 
 from linebot import LineBotApi, WebhookHandler
@@ -31,19 +24,12 @@ from linebot.models import (
 )
 
 # ==================================================
-# 1. 基本設定與字體下載
+# 1. 基本設定
 # ==================================================
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
 FINMIND_USER = os.getenv("FINMIND_USER")
 FINMIND_PASSWORD = os.getenv("FINMIND_PASSWORD")
-
-font_path = 'taipei_sans.ttf'
-if not os.path.exists(font_path):
-    urllib.request.urlretrieve(
-        "https://github.com/googlefonts/noto-cjk/raw/main/Sans/OTF/TraditionalChinese/NotoSansCJKtc-Regular.otf", 
-        font_path
-    )
 
 app = Flask(__name__)
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
@@ -53,7 +39,7 @@ finmind_token = ""
 CATEGORY_PAGE_SIZE = 12
 
 # ==================================================
-# 2. API 與資料抓取工具
+# 2. API 與資料抓取工具 (升級 OHLC 支援)
 # ==================================================
 def finmind_login():
     global finmind_token
@@ -95,18 +81,23 @@ def _get_taiex_data(days=730):
         r = requests.get(url, params=params, timeout=15).json()
         if r.get("msg") == "success" and r.get("data"):
             df = pd.DataFrame(r["data"])
+            # 保留 OHLC 供 K 線圖使用
             df["Date"] = pd.to_datetime(df["date"], errors="coerce")
+            df["Open"] = pd.to_numeric(df["open"], errors="coerce")
+            df["High"] = pd.to_numeric(df["max"], errors="coerce")
+            df["Low"] = pd.to_numeric(df["min"], errors="coerce")
             df["Close"] = pd.to_numeric(df["close"], errors="coerce")
-            return df[["Date", "Close"]].dropna().set_index("Date")
+            return df[["Date", "Open", "High", "Low", "Close"]].dropna().set_index("Date")
     except: pass
     
     try:
         import yfinance as yf
         hist = yf.download("^TWII", start=start_date, progress=False, auto_adjust=False)
         if not hist.empty and "Close" in hist.columns:
-            df = hist[["Close"]].copy()
+            df = hist.copy()
             df.index = pd.to_datetime(df.index).tz_localize(None)
-            return df.dropna()
+            # 保留 OHLC
+            return df[["Open", "High", "Low", "Close"]].dropna()
     except: pass
     return pd.DataFrame()
 
@@ -124,8 +115,11 @@ def get_stock_data(stock_code, days=730):
         
         df = pd.DataFrame(data["data"])
         df["Date"] = pd.to_datetime(df["date"], errors="coerce")
+        df["Open"] = pd.to_numeric(df["open"], errors="coerce")
+        df["High"] = pd.to_numeric(df["max"], errors="coerce")
+        df["Low"] = pd.to_numeric(df["min"], errors="coerce")
         df["Close"] = pd.to_numeric(df["close"], errors="coerce")
-        return df[["Date", "Close"]].dropna().set_index("Date")
+        return df[["Date", "Open", "High", "Low", "Close"]].dropna().set_index("Date")
     except:
         return pd.DataFrame()
 
@@ -152,7 +146,6 @@ def calc_indicators(df):
     df = df.copy()
     close = df["Close"]
     
-    # 計算供勝率與模型使用的特徵
     df['MA_5'] = close.rolling(5).mean()
     df['MA20'] = close.rolling(20).mean()
     df['RET_1'] = close.pct_change()
@@ -181,7 +174,7 @@ def calc_win_probability(df):
     return int(max(5, min(95, round(score))))
 
 # ==================================================
-# 4. 回測引擎 (供網頁端調用)
+# 4. 回測引擎
 # ==================================================
 def run_backtest_for_web(df):
     try:
@@ -237,7 +230,6 @@ def run_backtest_for_web(df):
         std_dev = strategy_ret.std()
         sharpe = (strategy_ret.mean() / std_dev) * np.sqrt(252) if std_dev != 0 else 0
         
-        # HTML 格式的結論
         if total_trades == 0:
             conclusion = "⏸️ 訊號空窗：模型未發現高勝率進場點，選擇空手觀望。<br>🛒 買入建議：缺乏多頭動能，建議資金先停泊。<br>💰 賣出建議：若已持有，請嚴守個人停損。"
         elif strat_cum > bh_cum:
@@ -261,39 +253,9 @@ def run_backtest_for_web(df):
         return None
 
 # ==================================================
-# 5. 圖表生成
-# ==================================================
-def create_chart(df, title):
-    my_font = fm.FontProperties(fname=font_path)
-    fig, ax = plt.subplots(figsize=(10, 5))
-    fig.patch.set_alpha(0.0)
-    ax.patch.set_alpha(0.0)
-
-    ax.plot(df.index, df["Close"], label="收盤價", color="#00f2fe", linewidth=2)
-    ax.plot(df.index, df["MA20"], label="月線(MA20)", color="#ff0844", linestyle="--", linewidth=1.5)
-
-    ax.set_title(title, fontproperties=my_font, color="white", fontsize=18)
-    ax.tick_params(axis='x', colors='white')
-    ax.tick_params(axis='y', colors='white')
-    ax.grid(alpha=0.15, color="white")
-    
-    legend = ax.legend(prop=my_font)
-    for text in legend.get_texts(): text.set_color("white")
-    legend.get_frame().set_facecolor('none')
-    legend.get_frame().set_edgecolor('none')
-
-    img = io.BytesIO()
-    plt.tight_layout()
-    plt.savefig(img, format="png", transparent=True)
-    plt.close()
-    img.seek(0)
-    return base64.b64encode(img.read()).decode()
-
-# ==================================================
-# 6. 分析總控
+# 5. 分析總控與資料轉換
 # ==================================================
 def analyze_stock(code):
-    # 擴大抓取範圍至 730 天，滿足回測所需數據量
     df = get_stock_data(code, 730)
     if df.empty or len(df) < 30: return None
     df = calc_indicators(df)
@@ -306,25 +268,34 @@ def analyze_stock(code):
     prob = calc_win_probability(df)
     name = get_stock_name(code)
     
-    # 產生近期走勢圖 (取最後 60 天)
-    chart = create_chart(df.tail(60), f"{name} ({code}) 近期走勢")
-    
-    # 產生相關新聞與回測數據
     news = get_stock_news(name, limit=5)
     backtest_data = run_backtest_for_web(df)
+
+    # 將 Pandas DataFrame 轉換為前端 TradingView 需要的 JSON 格式 (取最後 120 天)
+    tv_df = df.tail(120).copy()
+    tv_df.reset_index(inplace=True)
+    # TradingView 時間格式必須為 YYYY-MM-DD
+    tv_df['Date'] = tv_df['Date'].dt.strftime('%Y-%m-%d')
+    
+    # K 線資料
+    candle_data = tv_df[['Date', 'Open', 'High', 'Low', 'Close']].rename(columns={'Date': 'time', 'Open':'open', 'High':'high', 'Low':'low', 'Close':'close'}).to_dict('records')
+    # 均線資料
+    ma_data = tv_df[['Date', 'MA20']].rename(columns={'Date': 'time', 'MA20':'value'}).to_dict('records')
 
     return {
         "code": code, "name": name, "price": last,
         "ma20": ma20, "rsi": rsi, "trend": trend,
-        "prob": prob, "chart": chart, "news": news,
-        "backtest": backtest_data
+        "prob": prob, "news": news,
+        "backtest": backtest_data,
+        "tv_candles": candle_data,
+        "tv_ma20": ma_data
     }
 
 def market_forecast():
     return analyze_stock("TAIEX")
 
 # ==================================================
-# 7. 動態產業分類
+# 6. 動態產業分類
 # ==================================================
 def build_market_map():
     market = {"全市場": [], "ETF專區": [], "AI伺服器": []}
@@ -387,7 +358,7 @@ def build_style_result(category):
     return "\n".join(lines)
 
 # ==================================================
-# 8. UI 網頁渲染
+# 7. UI 網頁渲染 (TradingView 版)
 # ==================================================
 def render_dashboard(data):
     news_html = ""
@@ -435,6 +406,11 @@ def render_dashboard(data):
             </div>
         </div>
         """
+        
+    # 將 Python dict 轉換為 JSON 格式字串供 JS 使用
+    import json
+    tv_candles_json = json.dumps(data['tv_candles'])
+    tv_ma20_json = json.dumps(data['tv_ma20'])
 
     html = f"""
 <!DOCTYPE html>
@@ -444,6 +420,7 @@ def render_dashboard(data):
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{data['name']} 分析報告</title>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@300;400;700&display=swap" rel="stylesheet">
+<script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
 <style>
     body {{ margin:0; background: linear-gradient(135deg, #0f2027, #203a43, #2c5364); background-attachment: fixed; color: #f1f1f1; font-family: 'Noto Sans TC', sans-serif; }}
     .wrap {{ max-width:920px; margin:auto; padding:30px 20px 60px; }}
@@ -451,14 +428,17 @@ def render_dashboard(data):
     .card {{ background: rgba(255, 255, 255, 0.05); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px); border: 1px solid rgba(255, 255, 255, 0.15); box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.3); border-radius: 20px; padding: 26px; margin-bottom: 24px; transition: transform 0.3s ease; }}
     .card:hover {{ transform: translateY(-5px); }}
     .grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:20px; }}
-    img {{ width:100%; border-radius:18px; }}
     .small {{ font-size:17px; line-height:1.8; }}
     .highlight {{ color: #00f2fe; font-weight: bold; font-size: 1.1em; }}
     h2 {{ font-size: 22px; margin-top: 0; margin-bottom: 15px; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom: 10px; }}
     .news-link {{ display: block; color: #e0e0e0; text-decoration: none; margin-bottom: 14px; line-height: 1.5; transition: color 0.2s; }}
     .news-link:hover {{ color: #00f2fe; }}
     .news-link:last-child {{ margin-bottom: 0; }}
-    @media (max-width: 640px) {{ h1 {{ font-size:30px; }} .small {{ font-size:15px; }} .card {{ padding:20px; border-radius:18px; }} }}
+    
+    /* 圖表容器樣式 */
+    #tvchart {{ width: 100%; height: 400px; border-radius: 12px; overflow: hidden; margin-top: 10px; }}
+    
+    @media (max-width: 640px) {{ h1 {{ font-size:30px; }} .small {{ font-size:15px; }} .card {{ padding:20px; border-radius:18px; }} #tvchart {{ height: 300px; }} }}
 </style>
 </head>
 <body>
@@ -471,9 +451,12 @@ def render_dashboard(data):
     📈 當前趨勢：{data['trend']}<br>
     📊 AI 綜合勝率：<span class="highlight">{data['prob']}%</span>
 </div>
+
 <div class="card">
-    <img src="data:image/png;base64,{data['chart']}">
+    <h2>📈 互動式技術線圖</h2>
+    <div id="tvchart"></div>
 </div>
+
 <div class="grid">
     <div class="card small">
         <h2>📑 指標摘要</h2>
@@ -500,16 +483,70 @@ def render_dashboard(data):
     免責聲明：本系統資訊與回測績效均為程式自動運算，新聞取自外部來源，不構成任何真實投資與買賣建議，歷史績效亦不代表未來表現。
 </div>
 </div>
+
+<script>
+    // 渲染 TradingView 圖表的腳本
+    const chartProperties = {{
+        layout: {{
+            background: {{ type: 'solid', color: 'transparent' }}, // 融入玻璃卡片背景
+            textColor: '#d1d4dc',
+        }},
+        grid: {{
+            vertLines: {{ color: 'rgba(42, 46, 57, 0.5)' }},
+            horzLines: {{ color: 'rgba(42, 46, 57, 0.5)' }},
+        }},
+        crosshair: {{ mode: LightweightCharts.CrosshairMode.Normal }},
+        rightPriceScale: {{
+            borderColor: 'rgba(197, 203, 206, 0.8)',
+        }},
+        timeScale: {{
+            borderColor: 'rgba(197, 203, 206, 0.8)',
+            timeVisible: true,
+        }},
+    }};
+
+    const domElement = document.getElementById('tvchart');
+    const chart = LightweightCharts.createChart(domElement, chartProperties);
+
+    // 1. 新增 K 線圖列
+    const candleSeries = chart.addCandlestickSeries({{
+        upColor: '#ef5350',     // 台灣股市：紅漲綠跌
+        downColor: '#26a69a',
+        borderDownColor: '#26a69a',
+        borderUpColor: '#ef5350',
+        wickDownColor: '#26a69a',
+        wickUpColor: '#ef5350',
+    }});
+
+    // 注入 Python 傳來的資料
+    const candleData = {tv_candles_json};
+    candleSeries.setData(candleData);
+
+    // 2. 新增 MA20 均線列
+    const ma20Series = chart.addLineSeries({{
+        color: '#00f2fe',
+        lineWidth: 2,
+        title: 'MA20',
+    }});
+    
+    const ma20Data = {tv_ma20_json};
+    ma20Series.setData(ma20Data);
+    
+    // 自適應大小
+    window.addEventListener('resize', () => {{
+        chart.resize(domElement.clientWidth, domElement.clientHeight);
+    }});
+</script>
 </body>
 </html>
 """
     return render_template_string(html)
 
 # ==================================================
-# 9. 網頁路由與 LINE 處理
+# 8. 網頁路由與 LINE 處理
 # ==================================================
 @app.route("/")
-def home(): return "<h1>AI 台股系統 v3.4 正常運作中</h1>"
+def home(): return "<h1>AI 台股系統 v3.5 正常運作中</h1>"
 
 @app.route("/stock/<stock_code>")
 def stock_page(stock_code):
