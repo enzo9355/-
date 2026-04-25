@@ -1,5 +1,5 @@
 # app.py
-# v3.5.1 修復版：修復 TradingView 圖表空白問題 (OHLC 防護網 + JSON 解析修正)
+# v3.5.2 升級版：鎖定 TradingView v4.2.2 版本，確保圖表穩定渲染
 # --------------------------------------------------
 
 import os
@@ -17,7 +17,7 @@ import json
 from sklearn.preprocessing import StandardScaler
 from lightgbm import LGBMClassifier
 
-from flask import Flask, request, abort
+from flask import Flask, request, abort, render_template_string
 
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
@@ -42,7 +42,7 @@ finmind_token = ""
 CATEGORY_PAGE_SIZE = 12
 
 # ==================================================
-# 2. API 與資料抓取工具 (升級 OHLC 支援)
+# 2. API 與資料抓取工具 (OHLC 防呆支援)
 # ==================================================
 def finmind_login():
     global finmind_token
@@ -77,6 +77,7 @@ def _get_taiex_data(days=730):
     finmind_login()
     start_date = (datetime.datetime.now() - datetime.timedelta(days=days)).strftime("%Y-%m-%d")
     end_date = datetime.datetime.now().strftime("%Y-%m-%d")
+    
     try:
         url = "https://api.finmindtrade.com/api/v4/data"
         params = {"dataset": "TaiwanStockPrice", "data_id": "TAIEX", "start_date": start_date, "end_date": end_date}
@@ -89,16 +90,21 @@ def _get_taiex_data(days=730):
             df["High"] = pd.to_numeric(df["max"], errors="coerce")
             df["Low"] = pd.to_numeric(df["min"], errors="coerce")
             df["Close"] = pd.to_numeric(df["close"], errors="coerce")
-            return df[["Date", "Open", "High", "Low", "Close"]].dropna().set_index("Date")
+            df[['Open', 'High', 'Low', 'Close']] = df[['Open', 'High', 'Low', 'Close']].replace(0, np.nan)
+            df = df.dropna(subset=['Date', 'Close'])
+            return df[["Date", "Open", "High", "Low", "Close"]].set_index("Date")
     except: pass
     
     try:
         import yfinance as yf
-        hist = yf.download("^TWII", start=start_date, progress=False, auto_adjust=False)
+        hist = yf.download("^TWII", start=start_date, progress=False)
+        if isinstance(hist.columns, pd.MultiIndex):
+            hist.columns = hist.columns.droplevel(1)
         if not hist.empty and "Close" in hist.columns:
             df = hist.copy()
             df.index = pd.to_datetime(df.index).tz_localize(None)
-            return df[["Open", "High", "Low", "Close"]].dropna()
+            df[['Open', 'High', 'Low', 'Close']] = df[['Open', 'High', 'Low', 'Close']].replace(0, np.nan)
+            return df[["Open", "High", "Low", "Close"]].dropna(subset=["Close"])
     except: pass
     return pd.DataFrame()
 
@@ -120,7 +126,10 @@ def get_stock_data(stock_code, days=730):
         df["High"] = pd.to_numeric(df["max"], errors="coerce")
         df["Low"] = pd.to_numeric(df["min"], errors="coerce")
         df["Close"] = pd.to_numeric(df["close"], errors="coerce")
-        return df[["Date", "Open", "High", "Low", "Close"]].dropna().set_index("Date")
+        
+        df[['Open', 'High', 'Low', 'Close']] = df[['Open', 'High', 'Low', 'Close']].replace(0, np.nan)
+        df = df.dropna(subset=['Date', 'Close'])
+        return df[["Date", "Open", "High", "Low", "Close"]].set_index("Date")
     except:
         return pd.DataFrame()
 
@@ -146,7 +155,6 @@ def get_stock_news(keyword, limit=5):
 def calc_indicators(df):
     df = df.copy()
     close = df["Close"]
-    
     df['MA_5'] = close.rolling(5).mean()
     df['MA20'] = close.rolling(20).mean()
     df['RET_1'] = close.pct_change()
@@ -180,7 +188,6 @@ def calc_win_probability(df):
 def run_backtest_for_web(df):
     try:
         if len(df) < 200: return None
-        
         work_df = df.copy()
         work_df['Future_5d_Close'] = work_df['Close'].shift(-5)
         work_df['Target'] = (work_df['Future_5d_Close'] > work_df['Close']).astype(int)
@@ -239,22 +246,15 @@ def run_backtest_for_web(df):
             conclusion = "🛡️ 下檔保護：大跌時具備避險作用。<br>🛒 買入建議：適合防禦型配置。<br>💰 賣出建議：不想資金閒置可轉換至強勢股。" if mdd > -15 else "⚠️ 模型失真：容易追高殺低。<br>🛒 買入建議：請避開。<br>💰 賣出建議：回歸均線判斷停損。"
 
         return {
-            "days": days_in_test,
-            "strat_cum": strat_cum * 100,
-            "bh_cum": bh_cum * 100,
-            "ann_ret": annualized_ret,
-            "win_rate": win_rate,
-            "trades": total_trades,
-            "profit_factor": profit_factor,
-            "mdd": mdd,
-            "sharpe": sharpe,
-            "conclusion": conclusion
+            "days": days_in_test, "strat_cum": strat_cum * 100, "bh_cum": bh_cum * 100,
+            "ann_ret": annualized_ret, "win_rate": win_rate, "trades": total_trades,
+            "profit_factor": profit_factor, "mdd": mdd, "sharpe": sharpe, "conclusion": conclusion
         }
     except:
         return None
 
 # ==================================================
-# 5. 分析總控與資料轉換
+# 5. 分析總控與資料清洗
 # ==================================================
 def analyze_stock(code):
     df = get_stock_data(code, 730)
@@ -272,34 +272,30 @@ def analyze_stock(code):
     news = get_stock_news(name, limit=5)
     backtest_data = run_backtest_for_web(df)
 
-    # 💡 [防呆機制] 解決 TradingView 崩潰的三大殺手
     tv_df = df.tail(120).copy()
     tv_df.reset_index(inplace=True)
     
-    # 1. 確保時間嚴格遞增
-    tv_df = tv_df.sort_values('Date')
-    # 2. 移除重複的日期
-    tv_df = tv_df.drop_duplicates(subset=['Date'], keep='last')
-    # 3. 確保 High 絕對大於 Low (校正 API 髒資料)
+    tv_df['Open'] = tv_df['Open'].fillna(tv_df['Close'])
+    tv_df['High'] = tv_df['High'].fillna(tv_df['Close'])
+    tv_df['Low'] = tv_df['Low'].fillna(tv_df['Close'])
+    
     tv_df['High_corr'] = tv_df[['Open', 'High', 'Low', 'Close']].max(axis=1)
     tv_df['Low_corr'] = tv_df[['Open', 'High', 'Low', 'Close']].min(axis=1)
     
+    tv_df = tv_df.sort_values('Date').drop_duplicates(subset=['Date'], keep='last')
     tv_df['Date'] = tv_df['Date'].dt.strftime('%Y-%m-%d')
     
-    # 產出最終 JSON 格式字典
     candle_data = tv_df[['Date', 'Open', 'High_corr', 'Low_corr', 'Close']].rename(
         columns={'Date': 'time', 'Open':'open', 'High_corr':'high', 'Low_corr':'low', 'Close':'close'}
     ).to_dict('records')
     
-    ma_data = tv_df[['Date', 'MA20']].rename(columns={'Date': 'time', 'MA20':'value'}).to_dict('records')
+    ma_df = tv_df.dropna(subset=['MA20'])
+    ma_data = ma_df[['Date', 'MA20']].rename(columns={'Date': 'time', 'MA20':'value'}).to_dict('records')
 
     return {
-        "code": code, "name": name, "price": last,
-        "ma20": ma20, "rsi": rsi, "trend": trend,
-        "prob": prob, "news": news,
-        "backtest": backtest_data,
-        "tv_candles": json.dumps(candle_data),
-        "tv_ma20": json.dumps(ma_data)
+        "code": code, "name": name, "price": last, "ma20": ma20, "rsi": rsi, 
+        "trend": trend, "prob": prob, "news": news, "backtest": backtest_data,
+        "tv_candles": json.dumps(candle_data), "tv_ma20": json.dumps(ma_data)
     }
 
 def market_forecast():
@@ -369,7 +365,7 @@ def build_style_result(category):
     return "\n".join(lines)
 
 # ==================================================
-# 7. UI 網頁渲染 (TradingView 版)
+# 7. UI 網頁渲染 (TradingView V4 鎖定版)
 # ==================================================
 def render_dashboard(data):
     news_html = ""
@@ -418,8 +414,6 @@ def render_dashboard(data):
         </div>
         """
 
-    # 💡 [關鍵修復] 直接回傳原生的 HTML 字串，不經過 Flask 的 render_template_string
-    # 這樣 Python 的 f-string 就不會跟前端 JavaScript 的大括號 {} 打架了
     html = f"""
 <!DOCTYPE html>
 <html lang="zh-Hant">
@@ -428,7 +422,7 @@ def render_dashboard(data):
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{data['name']} 分析報告</title>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@300;400;700&display=swap" rel="stylesheet">
-<script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
+<script src="https://unpkg.com/lightweight-charts@4.2.2/dist/lightweight-charts.standalone.production.js"></script>
 <style>
     body {{ margin:0; background: linear-gradient(135deg, #0f2027, #203a43, #2c5364); background-attachment: fixed; color: #f1f1f1; font-family: 'Noto Sans TC', sans-serif; }}
     .wrap {{ max-width:920px; margin:auto; padding:30px 20px 60px; }}
@@ -442,10 +436,7 @@ def render_dashboard(data):
     .news-link {{ display: block; color: #e0e0e0; text-decoration: none; margin-bottom: 14px; line-height: 1.5; transition: color 0.2s; }}
     .news-link:hover {{ color: #00f2fe; }}
     .news-link:last-child {{ margin-bottom: 0; }}
-    
-    /* 圖表容器樣式 */
     #tvchart {{ width: 100%; height: 400px; border-radius: 12px; overflow: hidden; margin-top: 10px; }}
-    
     @media (max-width: 640px) {{ h1 {{ font-size:30px; }} .small {{ font-size:15px; }} .card {{ padding:20px; border-radius:18px; }} #tvchart {{ height: 300px; }} }}
 </style>
 </head>
@@ -493,54 +484,35 @@ def render_dashboard(data):
 </div>
 
 <script>
-    const domElement = document.getElementById('tvchart');
-    
-    const chartProperties = {{
-        width: domElement.clientWidth,
-        height: domElement.clientHeight,
-        layout: {{
-            background: {{ type: 'solid', color: 'transparent' }}, 
-            textColor: '#d1d4dc',
-        }},
-        grid: {{
-            vertLines: {{ color: 'rgba(42, 46, 57, 0.2)' }},
-            horzLines: {{ color: 'rgba(42, 46, 57, 0.2)' }},
-        }},
-        rightPriceScale: {{
-            borderColor: 'rgba(197, 203, 206, 0.4)',
-        }},
-        timeScale: {{
-            borderColor: 'rgba(197, 203, 206, 0.4)',
-            timeVisible: true,
-        }},
-    }};
+    try {{
+        const domElement = document.getElementById('tvchart');
+        const chartOptions = {{
+            autoSize: true,
+            layout: {{ background: {{ type: 'solid', color: 'transparent' }}, textColor: '#d1d4dc' }},
+            grid: {{ vertLines: {{ color: 'rgba(42, 46, 57, 0.2)' }}, horzLines: {{ color: 'rgba(42, 46, 57, 0.2)' }} }},
+            rightPriceScale: {{ borderColor: 'rgba(197, 203, 206, 0.4)' }},
+            timeScale: {{ borderColor: 'rgba(197, 203, 206, 0.4)', timeVisible: true }}
+        }};
 
-    const chart = LightweightCharts.createChart(domElement, chartProperties);
+        const chart = LightweightCharts.createChart(domElement, chartOptions);
 
-    const candleSeries = chart.addCandlestickSeries({{
-        upColor: '#ef5350',     
-        downColor: '#26a69a',
-        borderDownColor: '#26a69a',
-        borderUpColor: '#ef5350',
-        wickDownColor: '#26a69a',
-        wickUpColor: '#ef5350',
-    }});
+        const candleSeries = chart.addCandlestickSeries({{
+            upColor: '#ef5350', downColor: '#26a69a', borderDownColor: '#26a69a', borderUpColor: '#ef5350', wickDownColor: '#26a69a', wickUpColor: '#ef5350'
+        }});
 
-    const candleData = {data['tv_candles']};
-    candleSeries.setData(candleData);
+        const candleData = {data['tv_candles']};
+        candleSeries.setData(candleData);
 
-    const ma20Series = chart.addLineSeries({{
-        color: '#00f2fe',
-        lineWidth: 2,
-        title: 'MA20',
-    }});
-    
-    const ma20Data = {data['tv_ma20']};
-    ma20Series.setData(ma20Data);
-    
-    window.addEventListener('resize', () => {{
-        chart.resize(domElement.clientWidth, domElement.clientHeight);
-    }});
+        const ma20Series = chart.addLineSeries({{
+            color: '#00f2fe', lineWidth: 2, title: 'MA20'
+        }});
+        
+        const ma20Data = {data['tv_ma20']};
+        ma20Series.setData(ma20Data);
+        
+    }} catch (error) {{
+        document.getElementById('tvchart').innerHTML = "<div style='color:#ff6b6b; padding: 20px;'>圖表繪製失敗：" + error.message + "<br><br>這通常是因為該檔標的 API 歷史數據存在缺漏或版本不相容。</div>";
+    }}
 </script>
 </body>
 </html>
@@ -551,7 +523,7 @@ def render_dashboard(data):
 # 8. 網頁路由與 LINE 處理
 # ==================================================
 @app.route("/")
-def home(): return "<h1>AI 台股系統 v3.5.1 正常運作中</h1>"
+def home(): return "<h1>AI 台股系統 v3.5.2 正常運作中</h1>"
 
 @app.route("/stock/<stock_code>")
 def stock_page(stock_code):
@@ -585,7 +557,6 @@ def handle_message(event):
         url = f"{request.host_url}market".replace("http://", "https://")
         text = (f"📊 台股大盤（加權指數）\n\n💰 指數點位：{data['price']:.2f}\n🌊 MA20：{data['ma20']:.2f}\n"
                 f"🌡 RSI：{data['rsi']:.1f}\n📈 趨勢：{data['trend']}\n📊 上漲機率分數：{data['prob']}%\n\n📌 完整分析與AI回測報告：\n{url}")
-        
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=text))
         return
 
@@ -625,7 +596,6 @@ def handle_message(event):
             text = (f"📊 台股大盤（加權指數）\n\n💰 指數點位：{data['price']:.2f}\n🌊 20日均線：{data['ma20']:.2f}\n"
                     f"🌡 RSI(14)：{data['rsi']:.1f}\n📈 趨勢：{data['trend']}\n\n🎯【預測區間：未來5日】\n"
                     f"📊 上漲機率分數：{data['prob']}%\n\n📌 完整分析與AI回測報告：\n{url}")
-            
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text=text))
             return
 
@@ -639,13 +609,9 @@ def handle_message(event):
         text = (f"📊 {name} ({code})\n\n💰 最新收盤：{data['price']:.2f}\n🌊 20日均線：{data['ma20']:.2f}\n"
                 f"🌡 RSI(14)：{data['rsi']:.1f}\n📈 趨勢：{data['trend']}\n\n🎯【預測區間：未來5日】\n"
                 f"📊 上漲機率分數：{direction} ({data['prob']}%)\n\n📌 完整分析與AI回測報告：\n{url}")
-        
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=text))
     else:
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text="請輸入股票代碼，或輸入：預測 / 大盤預測 / 產業列表"))
 
-# ==================================================
-# 啟動
-# ==================================================
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
