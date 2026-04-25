@@ -1,8 +1,10 @@
 # app.py
-# v3.5 升級版：第一階段 - 導入 TradingView 互動式 K 線圖 (Lightweight Charts)
+# v3.5.1 修復版：修復 TradingView 圖表空白問題 (OHLC 防護網 + JSON 解析修正)
 # --------------------------------------------------
 
 import os
+import io
+import base64
 import datetime
 import requests
 import pandas as pd
@@ -10,11 +12,12 @@ import twstock
 import xml.etree.ElementTree as ET
 import urllib.parse
 import numpy as np
+import json
 
 from sklearn.preprocessing import StandardScaler
 from lightgbm import LGBMClassifier
 
-from flask import Flask, request, abort, render_template_string
+from flask import Flask, request, abort
 
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
@@ -81,7 +84,6 @@ def _get_taiex_data(days=730):
         r = requests.get(url, params=params, timeout=15).json()
         if r.get("msg") == "success" and r.get("data"):
             df = pd.DataFrame(r["data"])
-            # 保留 OHLC 供 K 線圖使用
             df["Date"] = pd.to_datetime(df["date"], errors="coerce")
             df["Open"] = pd.to_numeric(df["open"], errors="coerce")
             df["High"] = pd.to_numeric(df["max"], errors="coerce")
@@ -96,7 +98,6 @@ def _get_taiex_data(days=730):
         if not hist.empty and "Close" in hist.columns:
             df = hist.copy()
             df.index = pd.to_datetime(df.index).tz_localize(None)
-            # 保留 OHLC
             return df[["Open", "High", "Low", "Close"]].dropna()
     except: pass
     return pd.DataFrame()
@@ -271,15 +272,25 @@ def analyze_stock(code):
     news = get_stock_news(name, limit=5)
     backtest_data = run_backtest_for_web(df)
 
-    # 將 Pandas DataFrame 轉換為前端 TradingView 需要的 JSON 格式 (取最後 120 天)
+    # 💡 [防呆機制] 解決 TradingView 崩潰的三大殺手
     tv_df = df.tail(120).copy()
     tv_df.reset_index(inplace=True)
-    # TradingView 時間格式必須為 YYYY-MM-DD
+    
+    # 1. 確保時間嚴格遞增
+    tv_df = tv_df.sort_values('Date')
+    # 2. 移除重複的日期
+    tv_df = tv_df.drop_duplicates(subset=['Date'], keep='last')
+    # 3. 確保 High 絕對大於 Low (校正 API 髒資料)
+    tv_df['High_corr'] = tv_df[['Open', 'High', 'Low', 'Close']].max(axis=1)
+    tv_df['Low_corr'] = tv_df[['Open', 'High', 'Low', 'Close']].min(axis=1)
+    
     tv_df['Date'] = tv_df['Date'].dt.strftime('%Y-%m-%d')
     
-    # K 線資料
-    candle_data = tv_df[['Date', 'Open', 'High', 'Low', 'Close']].rename(columns={'Date': 'time', 'Open':'open', 'High':'high', 'Low':'low', 'Close':'close'}).to_dict('records')
-    # 均線資料
+    # 產出最終 JSON 格式字典
+    candle_data = tv_df[['Date', 'Open', 'High_corr', 'Low_corr', 'Close']].rename(
+        columns={'Date': 'time', 'Open':'open', 'High_corr':'high', 'Low_corr':'low', 'Close':'close'}
+    ).to_dict('records')
+    
     ma_data = tv_df[['Date', 'MA20']].rename(columns={'Date': 'time', 'MA20':'value'}).to_dict('records')
 
     return {
@@ -287,8 +298,8 @@ def analyze_stock(code):
         "ma20": ma20, "rsi": rsi, "trend": trend,
         "prob": prob, "news": news,
         "backtest": backtest_data,
-        "tv_candles": candle_data,
-        "tv_ma20": ma_data
+        "tv_candles": json.dumps(candle_data),
+        "tv_ma20": json.dumps(ma_data)
     }
 
 def market_forecast():
@@ -406,12 +417,9 @@ def render_dashboard(data):
             </div>
         </div>
         """
-        
-    # 將 Python dict 轉換為 JSON 格式字串供 JS 使用
-    import json
-    tv_candles_json = json.dumps(data['tv_candles'])
-    tv_ma20_json = json.dumps(data['tv_ma20'])
 
+    # 💡 [關鍵修復] 直接回傳原生的 HTML 字串，不經過 Flask 的 render_template_string
+    # 這樣 Python 的 f-string 就不會跟前端 JavaScript 的大括號 {} 打架了
     html = f"""
 <!DOCTYPE html>
 <html lang="zh-Hant">
@@ -485,32 +493,32 @@ def render_dashboard(data):
 </div>
 
 <script>
-    // 渲染 TradingView 圖表的腳本
+    const domElement = document.getElementById('tvchart');
+    
     const chartProperties = {{
+        width: domElement.clientWidth,
+        height: domElement.clientHeight,
         layout: {{
-            background: {{ type: 'solid', color: 'transparent' }}, // 融入玻璃卡片背景
+            background: {{ type: 'solid', color: 'transparent' }}, 
             textColor: '#d1d4dc',
         }},
         grid: {{
-            vertLines: {{ color: 'rgba(42, 46, 57, 0.5)' }},
-            horzLines: {{ color: 'rgba(42, 46, 57, 0.5)' }},
+            vertLines: {{ color: 'rgba(42, 46, 57, 0.2)' }},
+            horzLines: {{ color: 'rgba(42, 46, 57, 0.2)' }},
         }},
-        crosshair: {{ mode: LightweightCharts.CrosshairMode.Normal }},
         rightPriceScale: {{
-            borderColor: 'rgba(197, 203, 206, 0.8)',
+            borderColor: 'rgba(197, 203, 206, 0.4)',
         }},
         timeScale: {{
-            borderColor: 'rgba(197, 203, 206, 0.8)',
+            borderColor: 'rgba(197, 203, 206, 0.4)',
             timeVisible: true,
         }},
     }};
 
-    const domElement = document.getElementById('tvchart');
     const chart = LightweightCharts.createChart(domElement, chartProperties);
 
-    // 1. 新增 K 線圖列
     const candleSeries = chart.addCandlestickSeries({{
-        upColor: '#ef5350',     // 台灣股市：紅漲綠跌
+        upColor: '#ef5350',     
         downColor: '#26a69a',
         borderDownColor: '#26a69a',
         borderUpColor: '#ef5350',
@@ -518,21 +526,18 @@ def render_dashboard(data):
         wickUpColor: '#ef5350',
     }});
 
-    // 注入 Python 傳來的資料
-    const candleData = {tv_candles_json};
+    const candleData = {data['tv_candles']};
     candleSeries.setData(candleData);
 
-    // 2. 新增 MA20 均線列
     const ma20Series = chart.addLineSeries({{
         color: '#00f2fe',
         lineWidth: 2,
         title: 'MA20',
     }});
     
-    const ma20Data = {tv_ma20_json};
+    const ma20Data = {data['tv_ma20']};
     ma20Series.setData(ma20Data);
     
-    // 自適應大小
     window.addEventListener('resize', () => {{
         chart.resize(domElement.clientWidth, domElement.clientHeight);
     }});
@@ -540,13 +545,13 @@ def render_dashboard(data):
 </body>
 </html>
 """
-    return render_template_string(html)
+    return html
 
 # ==================================================
 # 8. 網頁路由與 LINE 處理
 # ==================================================
 @app.route("/")
-def home(): return "<h1>AI 台股系統 v3.5 正常運作中</h1>"
+def home(): return "<h1>AI 台股系統 v3.5.1 正常運作中</h1>"
 
 @app.route("/stock/<stock_code>")
 def stock_page(stock_code):
