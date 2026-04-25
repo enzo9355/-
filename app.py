@@ -1,8 +1,9 @@
 # app.py
-# v5.4 穩定版：修復變數名稱、NaN 污染、yfinance 索引錯誤，並解決前端 v4 語法衝突與自適應問題
+# v5.6 企業級架構版：導入記憶體快取、修復 Pandas/NumPy 廣播衝突、增強穩定度
 # --------------------------------------------------
 
 import os
+import time
 import datetime
 import requests
 import pandas as pd
@@ -24,7 +25,7 @@ from linebot.models import (
 )
 
 # ==================================================
-# 1. 基本設定與 Gemini 初始化
+# 1. 基本設定與系統快取
 # ==================================================
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
@@ -46,6 +47,11 @@ else:
 finmind_token = ""
 CATEGORY_PAGE_SIZE = 12
 
+# 💡 [架構升級] 系統級快取字典 (Code -> (Data, Timestamp))
+# 避免 Render OOM 與解決 LINE Webhook 5秒超時問題
+_SYSTEM_CACHE = {}
+CACHE_EXPIRY_SECONDS = 3600  # 快取保留 1 小時
+
 # ==================================================
 # 2. 資料抓取與清洗模組
 # ==================================================
@@ -56,7 +62,7 @@ def finmind_login():
         r = requests.post(
             "https://api.finmindtrade.com/api/v4/login",
             data={"user_id": FINMIND_USER, "password": FINMIND_PASSWORD},
-            timeout=10
+            timeout=5
         ).json()
         if r.get("msg") == "success": finmind_token = r["token"]
     except: pass
@@ -88,7 +94,7 @@ def get_data(code, days=730):
         url = "https://api.finmindtrade.com/api/v4/data"
         params = {"dataset": "TaiwanStockPrice", "data_id": code, "start_date": start_date, "end_date": end_date}
         if finmind_token: params["token"] = finmind_token
-        r = requests.get(url, params=params, timeout=15).json()
+        r = requests.get(url, params=params, timeout=8).json()
         if r.get("data"):
             df = pd.DataFrame(r["data"])
             df["Date"] = pd.to_datetime(df["date"], errors="coerce")
@@ -107,8 +113,7 @@ def get_data(code, days=730):
         if not hist.empty and "Close" in hist.columns:
             df = hist.copy()
             df.index = pd.to_datetime(df.index).tz_localize(None)
-            # 💡 [修正清單 #3] 防護 yfinance 索引錯誤，不再使用 rename
-            df.index.name = 'Date' 
+            df.index.name = 'Date'
             df = df.reset_index()
             return _clean_df(df[["Date", "Open", "High", "Low", "Close"]])
     except: pass
@@ -142,7 +147,11 @@ def run_ai_engine(df):
         w_df = df.copy()
         w_df['T'] = (w_df['Close'].shift(-5) > w_df['Close']).astype(int)
         v_df = w_df.dropna(subset=['T']).copy()
+        
+        # 💡 [修正] 防護機制：資料量不足時放棄訓練，避免演算法崩潰
+        if len(v_df) < 60: return None
         split = int(len(v_df) * 0.8)
+        
         sc = StandardScaler()
         X_tr = sc.fit_transform(v_df.iloc[:split][feats])
         model = LGBMClassifier(n_estimators=80, learning_rate=0.05, max_depth=4, random_state=42, verbose=-1)
@@ -153,8 +162,8 @@ def run_ai_engine(df):
         X_te = sc.transform(v_df.iloc[split:][feats])
         probs = model.predict_proba(X_te)[:, 1]
         
-        # 💡 [修正清單 #2] 避免 shift(-1) 產生 NaN 導致 cumprod 崩潰
-        rets = (v_df.iloc[split:]['Close'].shift(-1) / v_df.iloc[split:]['Close'] - 1).fillna(0)
+        # 💡 [修正] 將 pandas Series 強制轉換為 numpy array (.values)，避免 np.where 索引不對齊
+        rets = (v_df.iloc[split:]['Close'].shift(-1) / v_df.iloc[split:]['Close'] - 1).fillna(0).values
         strat_ret = np.where(probs > 0.6, rets, 0)
         
         imps = model.feature_importances_
@@ -162,56 +171,57 @@ def run_ai_engine(df):
         top = [f"{f_map.get(f, f)} (貢獻度: {(i/sum(imps))*100:.1f}%)" for f, i in sorted(zip(feats, imps), key=lambda x:x[1], reverse=True)[:3]]
         while len(top) < 3: top.append("無")
         
-        cum_ret = np.cumprod(1+strat_ret)
-        bh_ret = np.cumprod(1+rets)
+        cum_ret = np.cumprod(1 + strat_ret)
+        bh_ret = np.cumprod(1 + rets)
+        
+        # 💡 [修正] numpy array 使用 [-1] 提取最後一筆，不再有 KeyError
         strat_cum = cum_ret[-1] - 1 if len(cum_ret) > 0 else 0
         bh_cum = bh_ret[-1] - 1 if len(bh_ret) > 0 else 0
         win_rate = (strat_ret[strat_ret!=0]>0).mean()*100 if len(strat_ret[strat_ret!=0])>0 else 0
         trades = len(strat_ret[strat_ret!=0])
         
-        days_in_test = len(v_df.iloc[split:])
+        days_in_test = len(rets)
         mdd = (cum_ret/np.maximum.accumulate(cum_ret)-1).min()*100 if len(cum_ret) > 0 else 0
         sharpe = (strat_ret.mean()/strat_ret.std())*np.sqrt(252) if strat_ret.std()!=0 else 0
 
-        if trades == 0: conclusion = "⏸️ 訊號空窗：模型未發現高勝率進場點，選擇空手觀望。<br>🛒 買入建議：缺乏多頭動能，建議資金先停泊。<br>💰 賣出建議：若已持有，請嚴守個人停損。"
-        elif strat_cum > bh_cum: conclusion = "✅ 策略優勢：高報酬且風險控制優異。<br>🛒 買入建議：預測看漲可進場。<br>💰 賣出建議：預測轉跌時果斷停利。" if sharpe > 1 else "✅ 擊敗大盤：能創造超額報酬。<br>🛒 買入建議：可進場分批佈局。<br>💰 賣出建議：見好就收。"
-        else: conclusion = "🛡️ 下檔保護：大跌時具備避險作用。<br>🛒 買入建議：適合防禦型配置。<br>💰 賣出建議：不想資金閒置可轉換至強勢股。" if mdd > -15 else "⚠️ 模型失真：容易追高殺低。<br>🛒 買入建議：請避開。<br>💰 賣出建議：回歸均線判斷停損。"
+        if trades == 0: conclusion = "⏸️ 訊號空窗：模型未發現高勝率進場點，選擇空手觀望。"
+        elif strat_cum > bh_cum: conclusion = "✅ 策略優勢：高報酬且風險控制優異。" if sharpe > 1 else "✅ 擊敗大盤：能創造超額報酬。"
+        else: conclusion = "🛡️ 下檔保護：大跌時具備避險作用。" if mdd > -15 else "⚠️ 模型失真：容易追高殺低。"
 
         return {
             "days": days_in_test, "strat_cum": strat_cum * 100, "bh_cum": bh_cum * 100,
             "win_rate": win_rate, "trades": trades, "mdd": mdd, "sharpe": sharpe, 
             "conclusion": conclusion, "top_features": top
         }
-    except: return None
+    except Exception as e: 
+        print(f"回測引擎錯誤: {e}")
+        return None
 
 def get_ai_insight(name, data, bt, news):
     if not gemini_model: return "未設定 API Key，無法生成觀點。"
     n_txt = "\n".join([n['title'] for n in news])
-    prompt = f"""
-    請以資深證券分析師語氣，針對{name}撰寫100字內洞見。不要廢話，直接給建議。
-    最新價:{data['price']}
-    AI勝率:{data['prob']}%
-    模型夏普值:{bt['sharpe']:.2f}
-    新聞:\n{n_txt}
-    """
+    prompt = f"""請以資深分析師語氣，針對{name}撰寫100字內洞見。不要廢話，直接給建議。
+最新價:{data['price']}
+AI勝率:{data['prob']}%
+夏普值:{bt['sharpe']:.2f}
+新聞:\n{n_txt}"""
     try:
-        safety_settings = [
+        safety = [
             {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
             {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
             {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
             {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"}
         ]
-        response = gemini_model.generate_content(prompt, safety_settings=safety_settings)
-        if response.text:
-            return response.text.replace('\n', '<br>')
-        return "AI 回應為空，可能觸發安全限制。"
+        response = gemini_model.generate_content(prompt, safety_settings=safety)
+        # 💡 [修正] 統一內部處理為純文字，由前端 HTML 自行處理換行
+        return response.text.strip() if response.text else "AI 觀點生成為空。"
     except Exception as e:
-        return f"AI 觀點生成失敗 (系統訊息: {str(e)})"
+        return "暫時無法生成 AI 觀點，請參考量化數據。"
 
 # ==================================================
-# 4. 分析總控
+# 4. 分析總控 (💡 實作記憶體快取)
 # ==================================================
-def analyze(code):
+def _do_analyze(code):
     df = get_data(code)
     if df.empty or len(df) < 200: return None
     df = calc_all(df)
@@ -233,7 +243,6 @@ def analyze(code):
     tv_df['High_corr'] = tv_df[['Open', 'High', 'Low', 'Close']].max(axis=1)
     tv_df['Low_corr'] = tv_df[['Open', 'High', 'Low', 'Close']].min(axis=1)
     
-    # 💡 [修正清單 #1] 變數名稱修正 Volatility -> Volat
     last_vol = df['Volat'].iloc[-1] if pd.notna(df['Volat'].iloc[-1]) else 0.02
     drift = ((prob - 50) / 50.0) * (last_vol * last['Close'])
     pred = [{'time': tv_df['Date'].iloc[-1], 'value': last['Close']}]
@@ -255,61 +264,32 @@ def analyze(code):
         "pred": json.dumps(pred)
     }
 
+def analyze(code):
+    """快取包裝器：優先從記憶體讀取，若無則執行運算並存入"""
+    now = time.time()
+    if code in _SYSTEM_CACHE:
+        cached_data, timestamp = _SYSTEM_CACHE[code]
+        if now - timestamp < CACHE_EXPIRY_SECONDS:
+            return cached_data
+            
+    # 執行實際運算
+    data = _do_analyze(code)
+    if data:
+        _SYSTEM_CACHE[code] = (data, now)
+    return data
+
 def market_forecast(): return analyze("TAIEX")
 
 # ==================================================
-# 5. UI 渲染
+# 5. UI 渲染 
 # ==================================================
 def render_web(d):
     bt = d['bt']
     news_html = "".join([f'<a href="{n["link"]}" target="_blank" class="news-link">🔹 {n["title"]}</a>' for n in d['news']]) if d['news'] else "暫無相關新聞"
     
-    xai_html = f"""
-    <div class="card small" style="border-left: 4px solid #ff9800;">
-        <h2 style="color: #ff9800; border-bottom: none; margin-bottom: 5px;">🤖 AI 決策核心邏輯</h2>
-        <div style="font-size: 15px; color: #bbb; margin-bottom: 15px;">模型運算之關鍵特徵權重解析 (Feature Importance)</div>
-        <div style="background: rgba(0,0,0,0.3); padding: 15px; border-radius: 12px; margin-bottom: 10px;">🥇 <span style="color:#fff;">{bt['top_features'][0]}</span></div>
-        <div style="background: rgba(0,0,0,0.3); padding: 15px; border-radius: 12px; margin-bottom: 10px;">🥈 <span style="color:#fff;">{bt['top_features'][1]}</span></div>
-        <div style="background: rgba(0,0,0,0.3); padding: 15px; border-radius: 12px;">🥉 <span style="color:#fff;">{bt['top_features'][2]}</span></div>
-    </div>
-    """
-
-    grid_html = f"""
-    <div class="grid">
-        <div class="card small">
-            <h2>📑 指標摘要</h2>
-            📈 趨勢判讀：{d['trend']}<br>
-            🌊 均線狀態：{'站上 MA20 (支撐強)' if d['price'] > d['ma20'] else '跌破 MA20 (壓力大)'}<br>
-            🌡 RSI 強弱：{'動能偏強' if d['rsi'] >= 55 else '中性' if d['rsi'] >= 45 else '動能偏弱'}<br>
-            🎯 評估勝率：<span class="highlight">{d['prob']}%</span>
-        </div>
-        <div class="card small">
-            <h2>💡 觀察建議</h2>
-            🛒 若趨勢轉強：可觀察分批布局<br>
-            🛡 若跌破均線：留意風險與下檔控管<br>
-            💰 接近前高壓力：可評估分段調節獲利
-        </div>
-    </div>
-    """
-
-    backtest_html = f"""
-    <div class="card small">
-        <h2>📊 AI 歷史回測報告 (近 {bt['days']} 交易日)</h2>
-        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 12px; margin-bottom: 20px;">
-            <div style="background: rgba(0,0,0,0.25); padding: 15px; border-radius: 12px; text-align: center;"><div style="font-size: 13px; color: #aaa; margin-bottom: 5px;">AI 策略報酬</div><div class="highlight" style="font-size: 1.3em;">{bt['strat_cum']:.2f}%</div></div>
-            <div style="background: rgba(0,0,0,0.25); padding: 15px; border-radius: 12px; text-align: center;"><div style="font-size: 13px; color: #aaa; margin-bottom: 5px;">買進持有報酬</div><div style="font-size: 1.3em; color: #ddd;">{bt['bh_cum']:.2f}%</div></div>
-            <div style="background: rgba(0,0,0,0.25); padding: 15px; border-radius: 12px; text-align: center;"><div style="font-size: 13px; color: #aaa; margin-bottom: 5px;">進場勝率</div><div style="font-size: 1.3em; color: #ddd;">{bt['win_rate']:.1f}%</div></div>
-            <div style="background: rgba(0,0,0,0.25); padding: 15px; border-radius: 12px; text-align: center;"><div style="font-size: 13px; color: #aaa; margin-bottom: 5px;">交易次數</div><div style="font-size: 1.3em; color: #ddd;">{bt['trades']} 次</div></div>
-            <div style="background: rgba(0,0,0,0.25); padding: 15px; border-radius: 12px; text-align: center;"><div style="font-size: 13px; color: #aaa; margin-bottom: 5px;">最大回檔</div><div style="font-size: 1.3em; color: #ff6b6b;">{bt['mdd']:.2f}%</div></div>
-            <div style="background: rgba(0,0,0,0.25); padding: 15px; border-radius: 12px; text-align: center;"><div style="font-size: 13px; color: #aaa; margin-bottom: 5px;">夏普值</div><div style="font-size: 1.3em; color: #ddd;">{bt['sharpe']:.2f}</div></div>
-        </div>
-        <div style="background: rgba(0,242,254,0.05); border-left: 4px solid #00f2fe; padding: 18px; border-radius: 0 12px 12px 0;">
-            <div style="font-weight: bold; margin-bottom: 10px; color: #00f2fe; font-size: 18px;">💡 資產管理評估</div>
-            <div style="color: #e0e0e0; line-height: 1.6;">{bt['conclusion']}</div>
-        </div>
-    </div>
-    """
-
+    # 前端處理 insight 的換行
+    insight_html_content = d['insight'].replace('\n', '<br>')
+    
     html = f"""
 <!DOCTYPE html>
 <html lang="zh-Hant">
@@ -338,7 +318,7 @@ def render_web(d):
 
 <div class="card small" style="background: linear-gradient(135deg, rgba(0,242,254,0.1), rgba(79,172,254,0.05)); border: 1px solid #00f2fe;">
     <h2 style="color: #00f2fe; border-bottom: 1px solid rgba(0,242,254,0.2);">🌞 AI 專屬晨報與觀點</h2>
-    <div style="font-size: 16px; line-height: 1.8; color: #fff;">{d['insight']}</div>
+    <div style="font-size: 16px; line-height: 1.8; color: #fff;">{insight_html_content}</div>
 </div>
 
 <div class="card small">
@@ -352,32 +332,54 @@ def render_web(d):
     <div id="tvchart"></div>
 </div>
 
-{xai_html}
-{grid_html}
-{backtest_html}
+<div class="grid">
+    <div class="card small" style="border-left: 4px solid #ff9800;">
+        <h2 style="color: #ff9800; border-bottom: none; margin-bottom: 5px;">🤖 AI 決策核心邏輯</h2>
+        <div style="font-size: 15px; color: #bbb; margin-bottom: 15px;">特徵權重解析 (Feature Importance)</div>
+        <div style="background: rgba(0,0,0,0.3); padding: 15px; border-radius: 12px; margin-bottom: 10px;">🥇 <span style="color:#fff;">{bt['top_features'][0]}</span></div>
+        <div style="background: rgba(0,0,0,0.3); padding: 15px; border-radius: 12px; margin-bottom: 10px;">🥈 <span style="color:#fff;">{bt['top_features'][1]}</span></div>
+        <div style="background: rgba(0,0,0,0.3); padding: 15px; border-radius: 12px;">🥉 <span style="color:#fff;">{bt['top_features'][2]}</span></div>
+    </div>
+    <div class="card small">
+        <h2>📑 指標摘要</h2>
+        📈 趨勢判讀：{d['trend']}<br>
+        🌊 均線狀態：{'站上 MA20 (支撐強)' if d['price'] > d['ma20'] else '跌破 MA20 (壓力大)'}<br>
+        🌡 RSI 強弱：{'動能偏強' if d['rsi'] >= 55 else '中性' if d['rsi'] >= 45 else '動能偏弱'}<br>
+        🎯 評估勝率：<span class="highlight">{d['prob']}%</span>
+    </div>
+</div>
+
+<div class="card small">
+    <h2>📊 AI 歷史回測報告 (近 {bt['days']} 交易日)</h2>
+    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 12px; margin-bottom: 20px;">
+        <div style="background: rgba(0,0,0,0.25); padding: 15px; border-radius: 12px; text-align: center;"><div style="font-size: 13px; color: #aaa; margin-bottom: 5px;">AI 策略報酬</div><div class="highlight" style="font-size: 1.3em;">{bt['strat_cum']:.2f}%</div></div>
+        <div style="background: rgba(0,0,0,0.25); padding: 15px; border-radius: 12px; text-align: center;"><div style="font-size: 13px; color: #aaa; margin-bottom: 5px;">買進持有報酬</div><div style="font-size: 1.3em; color: #ddd;">{bt['bh_cum']:.2f}%</div></div>
+        <div style="background: rgba(0,0,0,0.25); padding: 15px; border-radius: 12px; text-align: center;"><div style="font-size: 13px; color: #aaa; margin-bottom: 5px;">進場勝率</div><div style="font-size: 1.3em; color: #ddd;">{bt['win_rate']:.1f}%</div></div>
+        <div style="background: rgba(0,0,0,0.25); padding: 15px; border-radius: 12px; text-align: center;"><div style="font-size: 13px; color: #aaa; margin-bottom: 5px;">交易次數</div><div style="font-size: 1.3em; color: #ddd;">{bt['trades']} 次</div></div>
+        <div style="background: rgba(0,0,0,0.25); padding: 15px; border-radius: 12px; text-align: center;"><div style="font-size: 13px; color: #aaa; margin-bottom: 5px;">最大回檔</div><div style="font-size: 1.3em; color: #ff6b6b;">{bt['mdd']:.2f}%</div></div>
+        <div style="background: rgba(0,0,0,0.25); padding: 15px; border-radius: 12px; text-align: center;"><div style="font-size: 13px; color: #aaa; margin-bottom: 5px;">夏普值</div><div style="font-size: 1.3em; color: #ddd;">{bt['sharpe']:.2f}</div></div>
+    </div>
+    <div style="background: rgba(0,242,254,0.05); border-left: 4px solid #00f2fe; padding: 18px; border-radius: 0 12px 12px 0;">
+        <div style="font-weight: bold; margin-bottom: 10px; color: #00f2fe; font-size: 18px;">💡 資產管理評估</div>
+        <div style="color: #e0e0e0; line-height: 1.6;">{bt['conclusion']}</div>
+    </div>
+</div>
 
 <div class="card small">
     <h2>📰 相關即時新聞</h2>
     {news_html}
-</div>
-<div class="card small" style="font-size: 14px; color: #aaa;">
-    免責聲明：本系統資訊與回測績效均為程式自動運算，新聞取自外部來源，不構成任何真實投資與買賣建議，歷史績效亦不代表未來表現。
 </div>
 </div>
 
 <script>
     try {{
         const chartContainer = document.getElementById('tvchart');
-        
-        // 💡 [修正清單 #4] 改回 v4 支援的 backgroundColor 與移除 autoSize
         const chartOptions = {{
-            width: chartContainer.clientWidth,
-            height: 450,
+            width: chartContainer.clientWidth, height: 450,
             layout: {{ backgroundColor: 'transparent', textColor: '#d1d4dc' }},
             grid: {{ vertLines: {{ color: 'rgba(42, 46, 57, 0.15)' }}, horzLines: {{ color: 'rgba(42, 46, 57, 0.15)' }} }},
             timeScale: {{ timeVisible: true }}
         }};
-        
         const chart = LightweightCharts.createChart(chartContainer, chartOptions);
 
         const candleS = chart.addCandlestickSeries({{ upColor: '#ef5350', downColor: '#26a69a', borderDownColor: '#26a69a', borderUpColor: '#ef5350', wickDownColor: '#26a69a', wickUpColor: '#ef5350' }});
@@ -387,19 +389,13 @@ def render_web(d):
         chart.addLineSeries({{ color: '#00f2fe', lineWidth: 1, title: 'MA20' }}).setData({d['ma20_line']});
         chart.addLineSeries({{ color: '#ff9800', lineWidth: 2, lineStyle: 2, title: 'AI 5日預測' }}).setData({d['pred']});
 
-        // 💡 [修正清單 #4] v4 的 scaleMargins 必須寫在 applyOptions 中
         const probS = chart.addHistogramSeries({{ priceFormat: {{ type: 'volume' }}, priceScaleId: '' }});
         chart.priceScale('').applyOptions({{ scaleMargins: {{ top: 0.8, bottom: 0 }} }});
-        
         probS.setData({d['prob_h']}.map(x=>({{ time: x.time, value: x.value, color: x.value >= 50 ? 'rgba(38,166,154,0.4)' : 'rgba(239,83,80,0.4)' }})));
         
         if (cData.length > 120) chart.timeScale().setVisibleLogicalRange({{ from: cData.length - 120, to: cData.length + 5 }});
         
-        // 💡 [修正清單 #5] 補回 resize 監聽器，確保手機版面與視窗縮放不破裂
-        window.addEventListener('resize', () => {{
-            chart.resize(chartContainer.clientWidth, 450);
-        }});
-        
+        window.addEventListener('resize', () => {{ chart.resize(chartContainer.clientWidth, 450); }});
     }} catch (err) {{
         document.getElementById('tvchart').innerHTML = "<div style='color:#ff6b6b; padding:20px;'>圖表載入失敗：" + err.message + "</div>";
     }}
@@ -449,8 +445,7 @@ def broadcast_weekly():
     if not d: return "分析失敗", 500
     
     url = f"{request.host_url}market".replace("http://", "https://")
-    clean_insight = d['insight'].replace('<br>', '\n')
-    msg = f"🌞 周一 AI 投資晨報\n\n📊 大盤分析：\n{clean_insight[:120]}...\n\n🔗 點擊查看 AI 預測軌跡：\n{url}"
+    msg = f"🌞 周一 AI 投資晨報\n\n📊 大盤分析：\n{d['insight'][:120]}...\n\n🔗 點擊查看 AI 預測軌跡：\n{url}"
     try:
         line_bot_api.broadcast(TextSendMessage(text=msg))
         return f"廣播成功：{datetime.datetime.now()}", 200
@@ -458,7 +453,7 @@ def broadcast_weekly():
         return f"發送失敗：{str(e)}", 500
 
 # ==================================================
-# 8. 路由與 LINE 基礎指令
+# 8. 路由與 LINE 基礎指令 (💡 修正過度轉義字串)
 # ==================================================
 @app.route("/stock/<code>")
 def stock_page(code):
@@ -486,9 +481,7 @@ def handle_message(event):
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text="大盤資料暫時無法取得，請稍後再試。"))
             return
         url = f"{request.host_url}market".replace("http://", "https://")
-        text = (f"📊 台股大盤（加權指數）\n\n💰 指數點位：{data['price']:.2f}\n"
-                f"📈 當前趨勢：{data['trend']}\n🎯 真實 AI 預測勝率：{data['prob']}%\n\n"
-                f"📌 點擊查看【AI 專屬觀點與完整分析】：\n{url}")
+        text = f"📊 台股大盤（加權指數）\n\n💰 指數點位：{data['price']:.2f}\n📈 當前趨勢：{data['trend']}\n🎯 真實 AI 預測勝率：{data['prob']}%\n\n📌 點擊查看【AI 專屬觀點與完整分析】：\n{url}"
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=text))
         
     elif msg == "預測":
@@ -511,7 +504,7 @@ def handle_message(event):
         if not arr: text = "❌ 無資料"
         else:
             lines = [f"📈 {cat} Top10\n", "🔥 激進型"] + [f"{i}. {c} {get_stock_name(c)}" for i, c in enumerate(arr[:5], 1)]
-            lines += ["", "🛡 保守型"] + [f"{i}. {c} {get_stock_name(c)}" for i, c in enumerate(arr[5:10], 1)]
+            lines += ["\n🛡 保守型"] + [f"{i}. {c} {get_stock_name(c)}" for i, c in enumerate(arr[5:10], 1)]
             text = "\n".join(lines)
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=text))
         
@@ -526,9 +519,7 @@ def handle_message(event):
                 line_bot_api.reply_message(event.reply_token, TextSendMessage(text="查無資料，請稍後再試。"))
                 return
             url = f"{request.host_url}stock/{code}".replace("http://", "https://")
-            text = (f"📊 {name} ({code})\n\n💰 最新收盤：{data['price']:.2f}\n"
-                    f"📈 當前趨勢：{data['trend']}\n🎯 真實 AI 預測勝率：{data['prob']}%\n\n"
-                    f"📌 點擊查看【AI 專屬觀點與完整分析】：\n{url}")
+            text = f"📊 {name} ({code})\n\n💰 最新收盤：{data['price']:.2f}\n📈 當前趨勢：{data['trend']}\n🎯 真實 AI 預測勝率：{data['prob']}%\n\n📌 點擊查看【AI 專屬觀點與完整分析】：\n{url}"
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text=text))
         else:
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text="請輸入股票代碼，或輸入：預測 / 大盤預測 / 產業列表"))
