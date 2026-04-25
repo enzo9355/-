@@ -1,5 +1,5 @@
 # app.py
-# v3.6 升級版：新增「未來五日投影線」與「AI 動能副圖」，並向量化勝率計算
+# v3.7 滿血版：保留所有預測圖表，並完整恢復「詳細回測數據」與「指標觀察建議」
 # --------------------------------------------------
 
 import os
@@ -73,7 +73,6 @@ def _get_taiex_data(days=730):
     finmind_login()
     start_date = (datetime.datetime.now() - datetime.timedelta(days=days)).strftime("%Y-%m-%d")
     end_date = datetime.datetime.now().strftime("%Y-%m-%d")
-    
     try:
         url = "https://api.finmindtrade.com/api/v4/data"
         params = {"dataset": "TaiwanStockPrice", "data_id": "TAIEX", "start_date": start_date, "end_date": end_date}
@@ -94,8 +93,7 @@ def _get_taiex_data(days=730):
     try:
         import yfinance as yf
         hist = yf.download("^TWII", start=start_date, progress=False)
-        if isinstance(hist.columns, pd.MultiIndex):
-            hist.columns = hist.columns.droplevel(1)
+        if isinstance(hist.columns, pd.MultiIndex): hist.columns = hist.columns.droplevel(1)
         if not hist.empty and "Close" in hist.columns:
             df = hist.copy()
             df.index = pd.to_datetime(df.index).tz_localize(None)
@@ -122,7 +120,6 @@ def get_stock_data(stock_code, days=730):
         df["High"] = pd.to_numeric(df["max"], errors="coerce")
         df["Low"] = pd.to_numeric(df["min"], errors="coerce")
         df["Close"] = pd.to_numeric(df["close"], errors="coerce")
-        
         df[['Open', 'High', 'Low', 'Close']] = df[['Open', 'High', 'Low', 'Close']].replace(0, np.nan)
         df = df.dropna(subset=['Date', 'Close'])
         return df[["Date", "Open", "High", "Low", "Close"]].set_index("Date")
@@ -130,7 +127,7 @@ def get_stock_data(stock_code, days=730):
         return pd.DataFrame()
 
 # ==================================================
-# 3. 新聞與特徵工程 (導入向量化勝率計算)
+# 3. 新聞與特徵工程 (向量化勝率計算)
 # ==================================================
 def get_stock_news(keyword, limit=5):
     try:
@@ -159,7 +156,6 @@ def calc_indicators(df):
     df["RSI"] = 100 - (100 / (1 + rs))
     df['Volatility'] = df['RET_1'].rolling(20).std()
     
-    # 💡 向量化重構：一次算出所有歷史勝率分數，消滅冗餘函式
     ret_5 = close.pct_change(5) * 100
     ret_10 = close.pct_change(10) * 100
     vol_10 = df['Volatility'] * 100
@@ -167,7 +163,6 @@ def calc_indicators(df):
     
     score = 50 + (ma_gap * 3.0) + ((df["RSI"] - 50) * 0.6) + (ret_5 * 1.5) + (ret_10 * 0.8) - (vol_10 * 1.2)
     df['Prob_Score'] = score.fillna(50).clip(lower=5, upper=95).round().astype(int)
-    
     return df.dropna()
 
 # ==================================================
@@ -209,7 +204,6 @@ def run_backtest_for_web(df):
         
         strat_cum = np.cumprod(1 + strategy_ret)[-1] - 1
         bh_cum = np.cumprod(1 + bh_ret)[-1] - 1
-        
         trades = strategy_ret[signals == 1]
         total_trades = len(trades)
         win_rate = (trades > 0).mean() * 100 if total_trades > 0 else 0
@@ -217,15 +211,14 @@ def run_backtest_for_web(df):
         
         days_in_test = len(test_df)
         annualized_ret = ((1 + strat_cum) ** (252 / days_in_test) - 1) * 100 if days_in_test > 0 else 0
-        
         cum_ret_arr = np.cumprod(1 + strategy_ret)
         mdd = (cum_ret_arr / np.maximum.accumulate(cum_ret_arr) - 1).min() * 100
         std_dev = strategy_ret.std()
         sharpe = (strategy_ret.mean() / std_dev) * np.sqrt(252) if std_dev != 0 else 0
         
-        if total_trades == 0: conclusion = "⏸️ 選擇空手觀望。<br>🛒 缺乏多頭動能。<br>💰 嚴守個人停損。"
-        elif strat_cum > bh_cum: conclusion = "✅ 策略優勢高報酬。<br>🛒 預測看漲可進場。<br>💰 轉跌時果斷停利。" 
-        else: conclusion = "🛡️ 具備避險作用。<br>🛒 適合防禦型配置。<br>💰 轉換至強勢股。"
+        if total_trades == 0: conclusion = "⏸️ 訊號空窗：模型未發現高勝率進場點，選擇空手觀望。<br>🛒 買入建議：缺乏多頭動能，建議資金先停泊。<br>💰 賣出建議：若已持有，請嚴守個人停損。"
+        elif strat_cum > bh_cum: conclusion = "✅ 策略優勢：高報酬且風險控制優異。<br>🛒 買入建議：預測看漲可進場。<br>💰 賣出建議：預測轉跌時果斷停利。" if sharpe > 1 else "✅ 擊敗大盤：能創造超額報酬。<br>🛒 買入建議：可進場分批佈局。<br>💰 賣出建議：見好就收。"
+        else: conclusion = "🛡️ 下檔保護：大跌時具備避險作用。<br>🛒 買入建議：適合防禦型配置。<br>💰 賣出建議：不想資金閒置可轉換至強勢股。" if mdd > -15 else "⚠️ 模型失真：容易追高殺低。<br>🛒 買入建議：請避開。<br>💰 賣出建議：回歸均線判斷停損。"
 
         return {
             "days": days_in_test, "strat_cum": strat_cum * 100, "bh_cum": bh_cum * 100,
@@ -255,20 +248,15 @@ def analyze_stock(code):
 
     tv_df = df.copy()
     tv_df.reset_index(inplace=True)
-    
     tv_df['Open'] = tv_df['Open'].fillna(tv_df['Close'])
     tv_df['High'] = tv_df['High'].fillna(tv_df['Close'])
     tv_df['Low'] = tv_df['Low'].fillna(tv_df['Close'])
     tv_df['High_corr'] = tv_df[['Open', 'High', 'Low', 'Close']].max(axis=1)
     tv_df['Low_corr'] = tv_df[['Open', 'High', 'Low', 'Close']].min(axis=1)
-    
     tv_df = tv_df.sort_values('Date').drop_duplicates(subset=['Date'], keep='last')
     
-    # 💡 計算未來五日預測路線 (Drift Projection)
     last_date = tv_df['Date'].iloc[-1]
     last_vol = tv_df['Volatility'].iloc[-1] if pd.notna(tv_df['Volatility'].iloc[-1]) else 0.02
-    
-    # 預期每日漂移量 = (勝率 - 50) 比例轉換 * 波動率 * 當前股價
     drift = ((prob - 50) / 50.0) * (last_vol * last)
     
     future_points = [{'time': last_date.strftime('%Y-%m-%d'), 'value': last}]
@@ -276,31 +264,23 @@ def analyze_stock(code):
     curr_price = last
     for _ in range(5):
         curr_date += datetime.timedelta(days=1)
-        while curr_date.weekday() >= 5: # 跳過六日
-            curr_date += datetime.timedelta(days=1)
+        while curr_date.weekday() >= 5: curr_date += datetime.timedelta(days=1)
         curr_price += drift
         future_points.append({'time': curr_date.strftime('%Y-%m-%d'), 'value': round(curr_price, 2)})
 
-    # 將時間轉為字串
     tv_df['Date'] = tv_df['Date'].dt.strftime('%Y-%m-%d')
-    
     candle_data = tv_df[['Date', 'Open', 'High_corr', 'Low_corr', 'Close']].rename(
         columns={'Date': 'time', 'Open':'open', 'High_corr':'high', 'Low_corr':'low', 'Close':'close'}
     ).to_dict('records')
-    
     ma_df = tv_df.dropna(subset=['MA20'])
     ma_data = ma_df[['Date', 'MA20']].rename(columns={'Date': 'time', 'MA20':'value'}).to_dict('records')
-    
-    # 準備副圖的勝率資料
     prob_data = tv_df[['Date', 'Prob_Score']].rename(columns={'Date': 'time', 'Prob_Score': 'value'}).to_dict('records')
 
     return {
         "code": code, "name": name, "price": last, "ma20": ma20, "rsi": rsi, 
         "trend": trend, "prob": prob, "news": news, "backtest": backtest_data,
-        "tv_candles": json.dumps(candle_data), 
-        "tv_ma20": json.dumps(ma_data),
-        "tv_prob": json.dumps(prob_data),
-        "tv_prediction": json.dumps(future_points)
+        "tv_candles": json.dumps(candle_data), "tv_ma20": json.dumps(ma_data),
+        "tv_prob": json.dumps(prob_data), "tv_prediction": json.dumps(future_points)
     }
 
 def market_forecast(): return analyze_stock("TAIEX")
@@ -364,7 +344,7 @@ def build_style_result(category):
     return "\n".join(lines)
 
 # ==================================================
-# 7. UI 網頁渲染 (多圖表混合版)
+# 7. UI 網頁渲染 (修復：完整恢復所有遺失的卡片與指標)
 # ==================================================
 def render_dashboard(data):
     news_html = ""
@@ -372,6 +352,7 @@ def render_dashboard(data):
         for n in data['news']: news_html += f'<a href="{n["link"]}" target="_blank" class="news-link">🔹 {n["title"]}</a>'
     else: news_html = "暫無相關新聞"
 
+    # 💡 修復：將完整的 HTML 回測報告 (包含 MDD, Sharpe, 結論) 加回
     backtest_html = ""
     if data.get('backtest'):
         bt = data['backtest']
@@ -391,6 +372,16 @@ def render_dashboard(data):
                 <div style="background: rgba(0,0,0,0.25); padding: 15px; border-radius: 12px; text-align: center;">
                     <div style="font-size: 13px; color: #aaa; margin-bottom: 5px;">交易次數</div><div style="font-size: 1.3em; color: #ddd;">{bt['trades']} 次</div>
                 </div>
+                <div style="background: rgba(0,0,0,0.25); padding: 15px; border-radius: 12px; text-align: center;">
+                    <div style="font-size: 13px; color: #aaa; margin-bottom: 5px;">最大回檔</div><div style="font-size: 1.3em; color: #ff6b6b;">{bt['mdd']:.2f}%</div>
+                </div>
+                <div style="background: rgba(0,0,0,0.25); padding: 15px; border-radius: 12px; text-align: center;">
+                    <div style="font-size: 13px; color: #aaa; margin-bottom: 5px;">夏普值</div><div style="font-size: 1.3em; color: #ddd;">{bt['sharpe']:.2f}</div>
+                </div>
+            </div>
+            <div style="background: rgba(0,242,254,0.05); border-left: 4px solid #00f2fe; padding: 18px; border-radius: 0 12px 12px 0;">
+                <div style="font-weight: bold; margin-bottom: 10px; color: #00f2fe; font-size: 18px;">💡 資產管理評估</div>
+                <div style="color: #e0e0e0; line-height: 1.6;">{bt['conclusion']}</div>
             </div>
         </div>
         """
@@ -435,8 +426,15 @@ def render_dashboard(data):
     <div class="card small">
         <h2>📑 指標摘要</h2>
         📈 趨勢判讀：{data['trend']}<br>
-        🌊 均線狀態：{'站上 MA20' if data['price'] > data['ma20'] else '跌破 MA20'}<br>
-        🌡 RSI 強弱：{'偏強' if data['rsi'] >= 55 else '中性' if data['rsi'] >= 45 else '偏弱'}<br>
+        🌊 均線狀態：{'站上 MA20 (支撐強)' if data['price'] > data['ma20'] else '跌破 MA20 (壓力大)'}<br>
+        🌡 RSI 強弱：{'動能偏強' if data['rsi'] >= 55 else '中性' if data['rsi'] >= 45 else '動能偏弱'}<br>
+        🎯 評估勝率：<span class="highlight">{data['prob']}%</span>
+    </div>
+    <div class="card small">
+        <h2>💡 觀察建議</h2>
+        🛒 若趨勢轉強：可觀察分批布局<br>
+        🛡 若跌破均線：留意風險與下檔控管<br>
+        💰 接近前高壓力：可評估分段調節獲利
     </div>
 </div>
 
@@ -460,7 +458,6 @@ def render_dashboard(data):
 
         const chart = LightweightCharts.createChart(domElement, chartOptions);
 
-        // 主圖：K線與均線
         const candleSeries = chart.addCandlestickSeries({{
             upColor: '#ef5350', downColor: '#26a69a', borderDownColor: '#26a69a', borderUpColor: '#ef5350', wickDownColor: '#26a69a', wickUpColor: '#ef5350'
         }});
@@ -470,13 +467,11 @@ def render_dashboard(data):
         const ma20Series = chart.addLineSeries({{ color: '#00f2fe', lineWidth: 1, title: 'MA20' }});
         ma20Series.setData({data['tv_ma20']});
         
-        // 💡 投影線：未來 5 日走勢預測
         const predSeries = chart.addLineSeries({{
             color: '#ff9800', lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Dashed, title: 'AI 5日預測'
         }});
         predSeries.setData({data['tv_prediction']});
 
-        // 💡 副圖：AI 勝率溫度計 (置於底部 20% 空間)
         const probSeries = chart.addHistogramSeries({{
             priceFormat: {{ type: 'volume' }},
             priceScaleId: '', 
@@ -487,7 +482,6 @@ def render_dashboard(data):
             time: d.time, value: d.value, color: d.value >= 50 ? 'rgba(38, 166, 154, 0.4)' : 'rgba(239, 83, 80, 0.4)'
         }})));
         
-        // 初始視角優化
         if (candleData.length > 120) {{
             chart.timeScale().setVisibleLogicalRange({{ from: candleData.length - 120, to: candleData.length + 5 }});
         }}
@@ -505,7 +499,7 @@ def render_dashboard(data):
 # 8. 網頁路由與 LINE 處理
 # ==================================================
 @app.route("/")
-def home(): return "<h1>AI 台股系統 v3.6 正常運作中</h1>"
+def home(): return "<h1>AI 台股系統 v3.7 正常運作中</h1>"
 
 @app.route("/stock/<stock_code>")
 def stock_page(stock_code):
