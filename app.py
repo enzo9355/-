@@ -1,5 +1,5 @@
 # app.py
-# v3.5.2 升級版：鎖定 TradingView v4.2.2 版本，確保圖表穩定渲染
+# v3.5.3 升級版：解除圖表時間限制，釋放兩年歷史數據，優化初始視角
 # --------------------------------------------------
 
 import os
@@ -272,7 +272,8 @@ def analyze_stock(code):
     news = get_stock_news(name, limit=5)
     backtest_data = run_backtest_for_web(df)
 
-    tv_df = df.tail(120).copy()
+    # 💡 教練修正：解除 .tail(120) 的封印，傳送全部歷史數據到前端
+    tv_df = df.copy()
     tv_df.reset_index(inplace=True)
     
     tv_df['Open'] = tv_df['Open'].fillna(tv_df['Close'])
@@ -365,7 +366,7 @@ def build_style_result(category):
     return "\n".join(lines)
 
 # ==================================================
-# 7. UI 網頁渲染 (TradingView V4 鎖定版)
+# 7. UI 網頁渲染 (解鎖無限時間軸 + 預設視角優化)
 # ==================================================
 def render_dashboard(data):
     news_html = ""
@@ -452,7 +453,7 @@ def render_dashboard(data):
 </div>
 
 <div class="card">
-    <h2>📈 互動式技術線圖</h2>
+    <h2>📈 互動式技術線圖 (可滑動/縮放)</h2>
     <div id="tvchart"></div>
 </div>
 
@@ -510,6 +511,16 @@ def render_dashboard(data):
         const ma20Data = {data['tv_ma20']};
         ma20Series.setData(ma20Data);
         
+        // 💡 UX 優化：設定初始視角為最近 120 天，保留過去兩年的回溯空間
+        if (candleData.length > 120) {{
+            chart.timeScale().setVisibleLogicalRange({{
+                from: candleData.length - 120,
+                to: candleData.length - 1
+            }});
+        }} else {{
+            chart.timeScale().fitContent();
+        }}
+        
     }} catch (error) {{
         document.getElementById('tvchart').innerHTML = "<div style='color:#ff6b6b; padding: 20px;'>圖表繪製失敗：" + error.message + "<br><br>這通常是因為該檔標的 API 歷史數據存在缺漏或版本不相容。</div>";
     }}
@@ -517,13 +528,13 @@ def render_dashboard(data):
 </body>
 </html>
 """
-    return html
+    return render_template_string(html)
 
 # ==================================================
 # 8. 網頁路由與 LINE 處理
 # ==================================================
 @app.route("/")
-def home(): return "<h1>AI 台股系統 v3.5.2 正常運作中</h1>"
+def home(): return "<h1>AI 台股系統 v3.5.3 正常運作中</h1>"
 
 @app.route("/stock/<stock_code>")
 def stock_page(stock_code):
