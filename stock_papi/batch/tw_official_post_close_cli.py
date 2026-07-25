@@ -18,10 +18,8 @@ from stock_papi.integrations.market_data.tw_official_historical import (
     OfficialSnapshotSeries,
     build_official_snapshot_series,
 )
-from stock_papi.quant.tw_incremental import (
-    OfficialCompatFetcher,
-    audit_artifact_dates,
-)
+from stock_papi.quant.tw_artifact_audit import audit_artifact_dates
+from stock_papi.quant.tw_incremental import OfficialCompatFetcher
 
 
 def _universe_sha256(symbols: list[str]) -> str:
