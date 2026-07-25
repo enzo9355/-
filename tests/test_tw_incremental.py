@@ -16,10 +16,10 @@ from stock_papi.integrations.market_data.tw_official_bulk import (
 from stock_papi.integrations.market_data.tw_official_historical import (
     OfficialSnapshotSeries,
 )
+from stock_papi.quant.tw_artifact_audit import audit_artifact_dates
 from stock_papi.quant.tw_incremental import (
     IncrementalHistoryError,
     OfficialCompatFetcher,
-    audit_artifact_dates,
     load_incremental_artifact,
 )
 
