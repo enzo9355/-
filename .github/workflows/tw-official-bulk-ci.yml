@@ -1,4 +1,4 @@
-name: TW Official Bulk Source Diagnostic
+name: TW Official Hardening RED
 
 on:
   pull_request:
@@ -8,17 +8,15 @@ permissions:
   contents: read
 
 jobs:
-  exact-head-marker:
+  hardening-red:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: 1fdb3fa23f8eb63958cc8fdba43ce134dadc2c04
+          ref: ad5e7283b16e312283583eaf9aa7b8a8d6b285e9
           fetch-depth: 0
       - name: Assert exact implementation head
-        run: test "$(git rev-parse HEAD)" = "1fdb3fa23f8eb63958cc8fdba43ce134dadc2c04"
-      - name: Confirm diagnostic is read-only
-        run: |
-          test -z "$(git status --porcelain)"
-          echo "read-only diagnostic marker"
+        run: test "$(git rev-parse HEAD)" = "ad5e7283b16e312283583eaf9aa7b8a8d6b285e9"
+      - name: Run hardening contract tests
+        run: python -m unittest tests.test_tw_official_hardening -v
