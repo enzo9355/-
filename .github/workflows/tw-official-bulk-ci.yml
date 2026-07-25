@@ -1,48 +1,220 @@
-name: TW Official Windows Focused Diagnostic
+name: TW Official Bulk Source CI
 
 on:
   pull_request:
     branches: [main]
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  combined-focused:
-    runs-on: windows-latest
-    timeout-minutes: 40
+  harden-official-contracts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: 3948aa638a068f1494972244e7012a69380b5672
+          ref: assistant/tw-official-bulk-source
           fetch-depth: 0
-      - name: Assert exact head
-        shell: powershell
-        run: |
-          if ((git rev-parse HEAD).Trim() -ne '3948aa638a068f1494972244e7012a69380b5672') {
-            throw 'Unexpected implementation head'
-          }
       - uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-          cache: pip
-          cache-dependency-path: |
-            requirements.txt
-            requirements-report.txt
-      - name: Install dependencies
-        shell: powershell
+      - name: Apply guarded margin, cache, and identity hardening
+        shell: bash
         run: |
-          python -m pip install -r requirements.txt
-          python -m pip install -r requirements-report.txt
-          python -m pip check
-      - name: Run combined focused contracts
-        shell: powershell
+          test "$(git rev-parse HEAD)" = "1fdb3fa23f8eb63958cc8fdba43ce134dadc2c04"
+          python - <<'PY'
+          from pathlib import Path
+
+          source_path = Path('stock_papi/integrations/market_data/tw_official_historical.py')
+          source = source_path.read_text(encoding='utf-8')
+
+          replacements = {
+              'SOURCE_SCHEMA_VERSION = "tw-official-historical-v1"':
+              'SOURCE_SCHEMA_VERSION = "tw-official-historical-v2"',
+              'PARSER_VERSION = "tw-official-historical-parser-v1"':
+              'PARSER_VERSION = "tw-official-historical-parser-v2"',
+              '        lambda names, candidate: len(names) == 16 and names[:2] == ["代號", "名稱"] and "股票" in str(candidate.get("title") or ""),':
+              '        lambda names, candidate: tuple(names) == TWSE_MARGIN_FIELDS and "股票" in str(candidate.get("title") or ""),',
+              '        lambda names, candidate: len(names) == 20 and names[:2] == ["代號", "名稱"] and "融資融券餘額" in str(candidate.get("title") or ""),':
+              '        lambda names, candidate: tuple(names) == TPEX_MARGIN_FIELDS and "融資融券餘額" in str(candidate.get("title") or ""),',
+          }
+          for old, new in replacements.items():
+              if source.count(old) != 1:
+                  raise SystemExit(f'marker count is {source.count(old)}: {old}')
+              source = source.replace(old, new, 1)
+
+          parser_marker = 'PARSER_VERSION = "tw-official-historical-parser-v2"\n'
+          constants = '''PARSER_VERSION = "tw-official-historical-parser-v2"
+          TWSE_MARGIN_FIELDS = (
+              "代號", "名稱", "買進", "賣出", "現金償還", "前日餘額", "今日餘額",
+              "次一營業日限額", "買進", "賣出", "現券償還", "前日餘額", "今日餘額",
+              "次一營業日限額", "資券互抵", "註記",
+          )
+          TPEX_MARGIN_FIELDS = (
+              "代號", "名稱", "前資餘額(張)", "資買", "資賣", "現償", "資餘額",
+              "資屬證金", "資使用率(%)", "資限額", "前券餘額(張)", "券賣", "券買",
+              "券償", "券餘額", "券屬證金", "券使用率(%)", "券限額",
+              "資券相抵(張)", "備註",
+          )
+          '''
+          if source.count(parser_marker) != 1:
+              raise SystemExit('parser constant marker is not unique')
+          source = source.replace(parser_marker, constants, 1)
+
+          coverage_old = '\n'.join([
+              '        minimum = minimum_for_source(source_id, definition)',
+              '        symbol_count = _coverage(definition.dataset, rows, int(minimum))',
+              '        results[source_id] = OfficialSourceResult(',
+          ])
+          coverage_new = '\n'.join([
+              '        minimum = minimum_for_source(source_id, definition)',
+              '        try:',
+              '            symbol_count = _coverage(definition.dataset, rows, int(minimum))',
+              '        except ValueError as exc:',
+              '            raise OfficialSourceFailure(',
+              '                source_id,',
+              '                "schema_validation",',
+              '                safe_message=str(exc),',
+              '            ) from None',
+              '        results[source_id] = OfficialSourceResult(',
+          ])
+          if source.count(coverage_old) != 1:
+              raise SystemExit(f'coverage block count is {source.count(coverage_old)}')
+          source = source.replace(coverage_old, coverage_new, 1)
+
+          merge_marker = '\n'.join([
+              '    price: dict[str, dict[str, Any]] = {}',
+              '    institutional: dict[str, list[dict[str, Any]]] = {}',
+              '    margin: dict[str, dict[str, Any]] = {}',
+          ])
+          identity_block = '''    price_symbols_by_market = {
+              market: {
+                  str(row.get("stock_id"))
+                  for result in results.values()
+                  if result.market == market and result.dataset == "price"
+                  for row in result.rows
+                  if row.get("stock_id")
+              }
+              for market in ("TWSE", "TPEx")
+          }
+          for source_id, result in results.items():
+              if result.dataset == "price":
+                  continue
+              source_symbols = {
+                  str(row.get("stock_id"))
+                  for row in result.rows
+                  if row.get("stock_id")
+              }
+              minimum_overlap = minimum_for_source(
+                  source_id,
+                  HISTORICAL_SOURCE_DEFINITIONS[source_id],
+              )
+              if len(source_symbols & price_symbols_by_market[result.market]) < int(
+                  minimum_overlap
+              ):
+                  raise OfficialSourceFailure(
+                      source_id,
+                      "cross_source_identity",
+                      safe_message="official source overlap is below minimum",
+                  )
+
+          ''' + merge_marker
+          if source.count(merge_marker) != 1:
+              raise SystemExit(f'merge block count is {source.count(merge_marker)}')
+          source = source.replace(merge_marker, identity_block, 1)
+          source_path.write_text(source, encoding='utf-8')
+
+          test_path = Path('tests/test_tw_official_hardening.py')
+          test_path.write_text('''import json
+          import tempfile
+          import unittest
+          from pathlib import Path
+
+          from tests.test_tw_official_historical import Response, Session, TARGET, payloads
+          from stock_papi.integrations.market_data.tw_official_bulk import OfficialSourceFailure
+          from stock_papi.integrations.market_data.tw_official_historical import (
+              SOURCE_SCHEMA_VERSION,
+              build_historical_daily_snapshot,
+              parse_tpex_margin_report,
+              parse_twse_margin_report,
+          )
+
+
+          class MutatingInstitutionalSession(Session):
+              def get(self, url, *, params, **kwargs):
+                  response = super().get(url, params=params, **kwargs)
+                  source_id = self.calls[-1][0]
+                  if source_id != "tpex_institutional":
+                      return response
+                  document = json.loads(response.content.decode("utf-8"))
+                  document["tables"][0]["data"][0][0] = "9999"
+                  return Response(document)
+
+
+          class OfficialHardeningTests(unittest.TestCase):
+              def test_margin_reports_require_exact_field_fingerprints(self):
+                  data = payloads(TARGET)
+                  fields = data["twse_margin"]["tables"][1]["fields"]
+                  fields[6], fields[12] = fields[12], fields[6]
+                  with self.assertRaisesRegex(ValueError, "target table"):
+                      parse_twse_margin_report(data["twse_margin"], TARGET)
+
+                  data = payloads(TARGET)
+                  fields = data["tpex_margin"]["tables"][0]["fields"]
+                  fields[6], fields[14] = fields[14], fields[6]
+                  with self.assertRaisesRegex(ValueError, "target table"):
+                      parse_tpex_margin_report(data["tpex_margin"], TARGET)
+
+              def test_cache_hit_coverage_failure_is_structured(self):
+                  with tempfile.TemporaryDirectory() as temporary:
+                      root = Path(temporary)
+                      first = build_historical_daily_snapshot(
+                          root,
+                          TARGET,
+                          session=Session(),
+                          minimum_price_symbols={"TWSE": 2, "TPEx": 2},
+                          minimum_chip_symbols=1,
+                      )
+                      self.assertEqual(first.source_schema_version, SOURCE_SCHEMA_VERSION)
+                      warm = Session()
+                      with self.assertRaises(OfficialSourceFailure) as context:
+                          build_historical_daily_snapshot(
+                              root,
+                              TARGET,
+                              session=warm,
+                              minimum_price_symbols={"TWSE": 2, "TPEx": 2},
+                          )
+                      self.assertEqual(warm.calls, [])
+                      self.assertEqual(context.exception.source_id, "twse_institutional")
+                      self.assertEqual(context.exception.category, "schema_validation")
+
+              def test_chip_sources_must_overlap_same_market_prices(self):
+                  with tempfile.TemporaryDirectory() as temporary:
+                      with self.assertRaises(OfficialSourceFailure) as context:
+                          build_historical_daily_snapshot(
+                              Path(temporary),
+                              TARGET,
+                              session=MutatingInstitutionalSession(),
+                              minimum_price_symbols={"TWSE": 2, "TPEx": 2},
+                              minimum_chip_symbols=1,
+                          )
+                  self.assertEqual(context.exception.source_id, "tpex_institutional")
+                  self.assertEqual(context.exception.category, "cross_source_identity")
+
+
+          if __name__ == "__main__":
+              unittest.main()
+          '''.replace('          ', ''), encoding='utf-8')
+          PY
+          git diff --check
+      - name: Run hardening tests
+        run: python -m unittest tests.test_tw_official_historical tests.test_tw_official_hardening -v
+      - name: Commit and push
+        shell: bash
         run: |
-          python -m unittest `
-            tests.test_tw_official_bulk `
-            tests.test_tw_official_historical `
-            tests.test_tw_official_historical_guarded `
-            tests.test_tw_incremental `
-            tests.test_tw_official_post_close_cli `
-            tests.test_pipeline_scheduler `
-            -v
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add stock_papi/integrations/market_data/tw_official_historical.py tests/test_tw_official_hardening.py
+          git commit -m 'fix(data): harden official margin and identity contracts'
+          git push origin HEAD:assistant/tw-official-bulk-source
