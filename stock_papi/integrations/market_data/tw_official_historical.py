@@ -31,8 +31,8 @@ from stock_papi.integrations.market_data.tw_official_cache import (
 )
 
 SOURCE_MODE = "tw_official_bulk_v2"
-SOURCE_SCHEMA_VERSION = "tw-official-historical-v1"
-PARSER_VERSION = "tw-official-historical-parser-v1"
+SOURCE_SCHEMA_VERSION = "tw-official-historical-v2"
+PARSER_VERSION = "tw-official-historical-parser-v2"
 DEFAULT_TIMEOUT_SECONDS = 30
 DEFAULT_RETRY_ATTEMPTS = 2
 MAX_CATCHUP_SESSIONS = 10
@@ -42,6 +42,17 @@ DEFAULT_MINIMUM_SOURCE_SYMBOLS = MappingProxyType({
     "tpex_institutional": 300,
     "tpex_margin": 300,
 })
+TWSE_MARGIN_FIELDS = (
+    "代號", "名稱", "買進", "賣出", "現金償還", "前日餘額", "今日餘額",
+    "次一營業日限額", "買進", "賣出", "現券償還", "前日餘額", "今日餘額",
+    "次一營業日限額", "資券互抵", "註記",
+)
+TPEX_MARGIN_FIELDS = (
+    "代號", "名稱", "前資餘額(張)", "資買", "資賣", "現償", "資餘額",
+    "資屬證金", "資使用率(%)", "資限額", "前券餘額(張)", "券賣", "券買",
+    "券償", "券餘額", "券屬證金", "券使用率(%)", "券限額",
+    "資券相抵(張)", "備註",
+)
 
 
 @dataclass(frozen=True)
@@ -209,7 +220,7 @@ def parse_twse_margin_report(payload: Any, target_date: _datetime.date) -> tuple
     document = _status_date(payload, target_date, "TWSE margin")
     fields, data, _ = _table(
         document,
-        lambda names, candidate: len(names) == 16 and names[:2] == ["代號", "名稱"] and "股票" in str(candidate.get("title") or ""),
+        lambda names, candidate: tuple(names) == TWSE_MARGIN_FIELDS and "股票" in str(candidate.get("title") or ""),
         "TWSE margin",
     )
     rows = []
@@ -257,7 +268,7 @@ def parse_tpex_margin_report(payload: Any, target_date: _datetime.date) -> tuple
     document = _status_date(payload, target_date, "TPEx margin")
     fields, data, table = _table(
         document,
-        lambda names, candidate: len(names) == 20 and names[:2] == ["代號", "名稱"] and "融資融券餘額" in str(candidate.get("title") or ""),
+        lambda names, candidate: tuple(names) == TPEX_MARGIN_FIELDS and "融資融券餘額" in str(candidate.get("title") or ""),
         "TPEx margin",
     )
     if normalize_market_date(table.get("date")) != target_date:
@@ -373,6 +384,7 @@ def build_historical_daily_snapshot(
         if minimum_chip_symbols is not None:
             return minimum_chip_symbols
         return int(DEFAULT_MINIMUM_SOURCE_SYMBOLS[source_id])
+
     results: dict[str, OfficialSourceResult] = {}
     request_count = 0
     cold_sources = 0
@@ -416,7 +428,14 @@ def build_historical_daily_snapshot(
             response_size = cached.compressed_size
             cache_hit = True
         minimum = minimum_for_source(source_id, definition)
-        symbol_count = _coverage(definition.dataset, rows, int(minimum))
+        try:
+            symbol_count = _coverage(definition.dataset, rows, int(minimum))
+        except ValueError as exc:
+            raise OfficialSourceFailure(
+                source_id,
+                "schema_validation",
+                safe_message=str(exc),
+            ) from None
         results[source_id] = OfficialSourceResult(
             source_id=source_id,
             market=definition.market,
@@ -430,8 +449,38 @@ def build_historical_daily_snapshot(
             date_verification="explicit",
         )
 
+    price_symbols_by_market = {
+        market: {
+            str(row.get("stock_id"))
+            for result in results.values()
+            if result.market == market and result.dataset == "price"
+            for row in result.rows
+            if row.get("stock_id")
+        }
+        for market in ("TWSE", "TPEx")
+    }
+    for source_id, result in results.items():
+        if result.dataset == "price":
+            continue
+        source_symbols = {
+            str(row.get("stock_id"))
+            for row in result.rows
+            if row.get("stock_id")
+        }
+        minimum_overlap = minimum_for_source(
+            source_id,
+            HISTORICAL_SOURCE_DEFINITIONS[source_id],
+        )
+        if len(source_symbols & price_symbols_by_market[result.market]) < int(minimum_overlap):
+            raise OfficialSourceFailure(
+                source_id,
+                "cross_source_identity",
+                safe_message="official source overlap is below minimum",
+            )
+
     price: dict[str, dict[str, Any]] = {}
     institutional: dict[str, list[dict[str, Any]]] = {}
+    institutional_keys: set[tuple[str, str]] = set()
     margin: dict[str, dict[str, Any]] = {}
     for result in results.values():
         for source_row in result.rows:
@@ -442,6 +491,14 @@ def build_historical_daily_snapshot(
                     raise OfficialSourceFailure(result.source_id, "cross_source_duplicate", safe_message=f"duplicate price symbol {symbol}")
                 price[symbol] = row
             elif result.dataset == "institutional":
+                identity = (symbol, str(row["name"]))
+                if identity in institutional_keys:
+                    raise OfficialSourceFailure(
+                        result.source_id,
+                        "cross_source_duplicate",
+                        safe_message=f"duplicate institutional symbol/category {symbol}/{row['name']}",
+                    )
+                institutional_keys.add(identity)
                 institutional.setdefault(symbol, []).append(row)
             else:
                 if symbol in margin and margin[symbol] != row:
@@ -450,7 +507,13 @@ def build_historical_daily_snapshot(
 
     manifest_document = {
         "source_schema_version": SOURCE_SCHEMA_VERSION,
+        "parser_version": PARSER_VERSION,
         "target_date": target_date.isoformat(),
+        "validation": {
+            "minimum_price_symbols": dict(sorted(minimum_price_symbols.items())),
+            "minimum_chip_symbols": minimum_chip_symbols,
+            "default_minimum_source_symbols": dict(DEFAULT_MINIMUM_SOURCE_SYMBOLS),
+        },
         "sources": {
             source_id: {
                 "content_sha256": result.content_sha256,
@@ -508,6 +571,8 @@ def build_official_snapshot_series(
         snapshot = snapshot_builder(root, value, **kwargs)
         if snapshot.target_date != value:
             raise ValueError("official snapshot series date mismatch")
+        if snapshot.source_schema_version != SOURCE_SCHEMA_VERSION:
+            raise ValueError("official snapshot schema version mismatch")
         snapshots[value] = snapshot
         request_count += snapshot.request_count
         minimum += snapshot.request_budget.planned_minimum_requests
