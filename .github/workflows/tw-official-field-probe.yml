@@ -12,17 +12,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
       - name: Probe six public official endpoints
         shell: bash
         run: |
-          python - <<'PY'
+          python3 - <<'PY'
           import json
-          import re
-          import urllib.parse
           import urllib.request
 
           sources = {
@@ -44,7 +38,6 @@ jobs:
                   print(f"SOURCE={name}")
                   print(f"STATUS={response.status}")
                   print(f"BYTES={len(body)}")
-                  print(f"CONTENT_TYPE={response.headers.get('Content-Type', '')}")
                   if isinstance(payload, list):
                       print(f"SHAPE=list ROWS={len(payload)}")
                       sample = next((row for row in payload if isinstance(row, dict)), {})
@@ -52,10 +45,7 @@ jobs:
                       date_fields = sorted(k for k in sample if "date" in k.lower() or "日期" in k)
                       print("DATE_FIELDS=" + json.dumps(date_fields, ensure_ascii=True))
                       for key in date_fields:
-                          values = []
-                          for row in payload[:50]:
-                              if isinstance(row, dict) and row.get(key) not in (None, ""):
-                                  values.append(str(row[key]))
+                          values = [str(row[key]) for row in payload[:50] if isinstance(row, dict) and row.get(key) not in (None, "")]
                           print(f"DATE_VALUES[{key}]=" + json.dumps(sorted(set(values))[:5], ensure_ascii=True))
                   elif isinstance(payload, dict):
                       print("SHAPE=dict")
@@ -79,7 +69,7 @@ jobs:
               try:
                   safe_summary(name, url)
               except Exception as exc:
-                  failures.append((name, type(exc).__name__, str(exc)))
+                  failures.append(name)
                   print(f"SOURCE={name}")
                   print(f"ERROR_TYPE={type(exc).__name__}")
                   print(f"ERROR={str(exc)[:300]}")
