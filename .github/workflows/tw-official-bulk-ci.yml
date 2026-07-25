@@ -10,72 +10,58 @@ permissions:
   pull-requests: write
 
 jobs:
-  compact-historical-contract-probe:
+  focused-python310:
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 30
     steps:
-      - name: Locate exact price and margin tables
+      - name: Checkout exact implementation head
+        uses: actions/checkout@v4
+        with:
+          ref: 7bd3d0c297afc11abadc1711917fec40b5921d7a
+          fetch-depth: 0
+      - name: Assert exact head
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "7bd3d0c297afc11abadc1711917fec40b5921d7a"
+          test ! -e .github/workflows/tw-official-bulk-ci.yml
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: pip
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install -r requirements-report.txt
+          python -m pip check
+      - name: Focused tests with concise failure report
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           REPOSITORY: ${{ github.repository }}
         shell: bash
         run: |
-          python3 - <<'PY' > /tmp/probe.md
-          import json
-          import urllib.parse
-          import urllib.request
-
-          sources = {
-              "twse_price": (
-                  "https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX",
-                  {"date": "20260724", "type": "ALLBUT0999", "response": "json"},
-                  {"證券代號", "開盤價", "最高價", "最低價", "收盤價"},
-              ),
-              "twse_margin": (
-                  "https://www.twse.com.tw/rwd/zh/marginTrading/MI_MARGN",
-                  {"date": "20260724", "selectType": "STOCK", "response": "json"},
-                  {"代號", "名稱", "今日餘額"},
-              ),
-              "tpex_price": (
-                  "https://www.tpex.org.tw/web/stock/aftertrading/daily_close_quotes/stk_quote_result.php",
-                  {"l": "zh-tw", "o": "json", "d": "115/07/24", "s": "0,asc,0"},
-                  {"代號", "開盤", "最高", "最低", "收盤"},
-              ),
-              "tpex_margin": (
-                  "https://www.tpex.org.tw/web/stock/margin_trading/margin_balance/margin_bal_result.php",
-                  {"l": "zh-tw", "o": "json", "d": "115/07/24", "s": "0,asc"},
-                  {"代號", "名稱", "資餘額", "券餘額"},
-              ),
-          }
-
-          print("## Compact historical table contracts")
-          for source_id, (base, params, expected) in sources.items():
-              url = base + "?" + urllib.parse.urlencode(params)
-              request = urllib.request.Request(url, headers={"User-Agent": "ABSORB-contract-probe/1.0"})
-              with urllib.request.urlopen(request, timeout=60) as response:
-                  payload = json.loads(response.read(30 * 1024 * 1024).decode("utf-8-sig"))
-              print()
-              print(f"### `{source_id}`")
-              print(f"- date: `{payload.get('date')}`; stat: `{payload.get('stat')}`")
-              matches = []
-              for index, table in enumerate(payload.get("tables") or []):
-                  if not isinstance(table, dict):
-                      continue
-                  fields = [str(item) for item in (table.get("fields") or [])]
-                  compact = {item.replace(" ", "").replace("\n", "") for item in fields}
-                  score = sum(any(token in field for field in compact) for token in expected)
-                  if score >= max(2, len(expected) - 1):
-                      rows = table.get("data") or table.get("aaData") or table.get("rows") or []
-                      first = next((item for item in rows if isinstance(item, list)), [])
-                      matches.append({
-                          "index": index,
-                          "title": table.get("title"),
-                          "date": table.get("date"),
-                          "fields": fields,
-                          "row_count": len(rows),
-                          "first_row_length": len(first),
-                      })
-              print("- matches: `" + json.dumps(matches, ensure_ascii=True, sort_keys=True) + "`")
-          PY
-          gh pr comment "$PR_NUMBER" --repo "$REPOSITORY" --body-file /tmp/probe.md
+          set +e
+          python -m unittest \
+            tests.test_tw_official_bulk \
+            tests.test_tw_official_historical \
+            tests.test_tw_incremental \
+            tests.test_tw_official_post_close_cli \
+            tests.test_pipeline_scheduler \
+            -v > /tmp/focused.txt 2>&1
+          code=$?
+          if [ "$code" -ne 0 ]; then
+            {
+              echo '## Focused official catch-up diagnostic'
+              echo
+              echo '```text'
+              grep -E '^(FAIL|ERROR):|^Ran [0-9]+ tests|^FAILED \(|^OK$' /tmp/focused.txt || true
+              echo '--- final 160 lines ---'
+              tail -n 160 /tmp/focused.txt
+              echo '```'
+            } > /tmp/comment.md
+            gh pr comment "$PR_NUMBER" --repo "$REPOSITORY" --body-file /tmp/comment.md
+          else
+            tail -n 12 /tmp/focused.txt
+          fi
+          exit "$code"
