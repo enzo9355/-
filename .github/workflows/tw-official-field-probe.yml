@@ -14,7 +14,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 8
     steps:
-      - name: Inspect nested TPEx institutional field names
+      - name: Inspect nested TPEx institutional grouping schema
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
@@ -36,12 +36,13 @@ jobs:
               payload = json.loads(response.read(15 * 1024 * 1024).decode("utf-8-sig"))
           tables = payload.get("tables") or []
           table = tables[0] if tables else {}
-          fields = table.get("fields") or []
-          print("## TPEx institutional field names")
+          print("## TPEx institutional grouping schema")
           print(f"- date: `{payload.get('date')}`")
-          print(f"- row count: `{len(table.get('data') or [])}`")
-          print("- fields:")
-          for index, field in enumerate(fields):
-              print(f"  - {index}: `{field}`")
+          print(f"- title: `{table.get('title')}`")
+          print(f"- columnNum: `{table.get('columnNum')}`")
+          print("- summary type: `" + type(table.get('summary')).__name__ + "`")
+          print("- summary: `" + json.dumps(table.get('summary'), ensure_ascii=True, separators=(',', ':')) + "`")
+          print("- template type: `" + type(payload.get('template')).__name__ + "`")
+          print("- template: `" + json.dumps(payload.get('template'), ensure_ascii=True, separators=(',', ':'))[:12000] + "`")
           PY
           gh pr comment "$PR_NUMBER" --repo "$REPOSITORY" --body-file /tmp/probe.md
