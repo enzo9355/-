@@ -78,6 +78,18 @@ class PipelineSchedulerTests(unittest.TestCase):
         self.assertNotIn("'--observation-only'", post_close)
         self.assertNotIn("AllowDegradedBootstrap", post_close)
         self.assertIn("-RequireDashboard", post_close)
+        self.assertIn("$ParsedTargetDate.Year", post_close)
+        self.assertIn("$Year - 1", post_close)
+        self.assertIn("$Year + 1", post_close)
+        self.assertGreaterEqual(post_close.count("'--calendar-artifact'"), 2)
+        self.assertLess(
+            post_close.index("$CalendarArguments"),
+            post_close.index("$QuantArguments"),
+        )
+        self.assertLess(
+            post_close.index("$QuantArguments"),
+            post_close.index("$CandidateArguments"),
+        )
         pre_market = (scripts / "run_tw_pre_market_pipeline.ps1").read_text(
             encoding="utf-8"
         )
