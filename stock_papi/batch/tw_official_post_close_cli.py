@@ -13,7 +13,7 @@ from typing import Any, Iterator
 
 from stock_papi.batch.calendar import TradingCalendarSet
 from stock_papi.integrations.market_data.tw_official_bulk import OfficialSourceFailure
-from stock_papi.integrations.market_data.tw_official_historical import (
+from stock_papi.integrations.market_data.tw_official_historical_guarded import (
     MAX_CATCHUP_SESSIONS,
     OfficialSnapshotSeries,
     build_official_snapshot_series,
