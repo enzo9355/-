@@ -1,4 +1,4 @@
-name: TW Official Hardening GREEN
+name: TW Official Exact-Head Focused CI
 
 on:
   pull_request:
@@ -8,7 +8,7 @@ permissions:
   contents: read
 
 jobs:
-  hardening-green:
+  focused:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -16,16 +16,42 @@ jobs:
         with:
           ref: b22cf60e8cee4f416aef3ddfc701b59cbd09980e
           fetch-depth: 0
-      - name: Assert exact implementation head
-        run: test "$(git rev-parse HEAD)" = "b22cf60e8cee4f416aef3ddfc701b59cbd09980e"
-      - name: Run official source contracts
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Assert exact clean head
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "b22cf60e8cee4f416aef3ddfc701b59cbd09980e"
+          test -z "$(git status --porcelain)"
+      - name: Run hardening and official-source focused tests
+        shell: bash
         run: |
           python -m unittest \
+            tests.test_tw_official_bulk \
             tests.test_tw_official_historical \
             tests.test_tw_official_hardening \
+            tests.test_tw_incremental \
+            tests.test_tw_official_post_close_cli \
+            tests.test_pipeline_scheduler \
             -v
-      - name: Check syntax and diff
+      - name: Check diff and governance
+        shell: bash
         run: |
-          python -m py_compile stock_papi/integrations/market_data/tw_official_historical.py
           git diff --check origin/main...HEAD
-          test -z "$(git status --porcelain)"
+          python - <<'PY'
+          from pathlib import Path
+          from reporting.regression_input_builder import (
+              PRODUCTION_REGRESSION_SOURCE_ADAPTER_READY,
+              PRODUCTION_REGRESSION_INPUT_READY,
+              PRODUCTION_REGRESSION_ARTIFACT_AVAILABLE,
+              AGGREGATE_MANIFEST_INTERVAL_VALIDATION_READY,
+          )
+          assert not any((
+              PRODUCTION_REGRESSION_SOURCE_ADAPTER_READY,
+              PRODUCTION_REGRESSION_INPUT_READY,
+              PRODUCTION_REGRESSION_ARTIFACT_AVAILABLE,
+              AGGREGATE_MANIFEST_INTERVAL_VALIDATION_READY,
+          ))
+          assert not Path('backtests/v1/latest-TW.json').exists()
+          PY
