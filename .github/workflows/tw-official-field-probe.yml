@@ -14,7 +14,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 8
     steps:
-      - name: Probe TPEx institutional report JSON
+      - name: Inspect nested TPEx institutional table
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
@@ -27,42 +27,36 @@ jobs:
           import urllib.request
 
           base = "https://www.tpex.org.tw/web/stock/3insti/daily_trade/3itrade_hedge_result.php"
-          params = {
-              "l": "zh-tw",
-              "o": "json",
-              "se": "EW",
-              "t": "D",
-              "d": "115/07/24",
-              "s": "0,asc",
-          }
-          url = base + "?" + urllib.parse.urlencode(params)
+          url = base + "?" + urllib.parse.urlencode({
+              "l": "zh-tw", "o": "json", "se": "EW", "t": "D",
+              "d": "115/07/24", "s": "0,asc",
+          })
           request = urllib.request.Request(url, headers={"User-Agent": "ABSORB-contract-probe/1.0"})
-          print("## TPEx institutional report JSON contract")
           with urllib.request.urlopen(request, timeout=60) as response:
-              body = response.read(15 * 1024 * 1024 + 1)
-              if len(body) > 15 * 1024 * 1024:
-                  raise RuntimeError("response too large")
-              payload = json.loads(body.decode("utf-8-sig"))
-              print(f"- status: `{response.status}`")
-              print(f"- bytes: `{len(body)}`")
-              print("- top keys: `" + "`, `".join(sorted(payload.keys())) + "`")
-              for key in ("date", "reportDate", "report_date", "iTotalRecords", "iTotalDisplayRecords"):
-                  if key in payload:
-                      print(f"- {key}: `{payload[key]}`")
-              rows = payload.get("aaData") or payload.get("data") or []
-              print(f"- rows: `{len(rows)}`")
-              first = next((row for row in rows if isinstance(row, list)), None)
-              if first is not None:
-                  print(f"- first row length: `{len(first)}`")
-                  print("- first row cell types: `" + "`, `".join(type(item).__name__ for item in first) + "`")
-              columns = payload.get("aoColumns") or payload.get("columns")
-              if isinstance(columns, list):
-                  names = []
-                  for item in columns:
-                      if isinstance(item, dict):
-                          names.append(str(item.get("sTitle") or item.get("title") or item.get("data") or ""))
-                      else:
-                          names.append(str(item))
-                  print("- columns: `" + "`, `".join(names) + "`")
+              payload = json.loads(response.read(15 * 1024 * 1024).decode("utf-8-sig"))
+          print("## TPEx institutional nested table contract")
+          print(f"- date: `{payload.get('date')}`")
+          tables = payload.get("tables")
+          print(f"- tables type: `{type(tables).__name__}`")
+          print(f"- table count: `{len(tables) if isinstance(tables, list) else 0}`")
+          if isinstance(tables, list) and tables:
+              table = tables[0]
+              print("- first table keys: `" + "`, `".join(sorted(table.keys())) + "`")
+              for key in ("title", "subtitle", "date", "columnNum"):
+                  if key in table and isinstance(table[key], (str, int, float, bool)):
+                      print(f"- table {key}: `{table[key]}`")
+              for key in ("fields", "columns", "headers", "data", "aaData"):
+                  value = table.get(key)
+                  if isinstance(value, list):
+                      print(f"- {key} length: `{len(value)}`")
+                      if value:
+                          first = value[0]
+                          print(f"- {key} first type: `{type(first).__name__}`")
+                          if isinstance(first, list):
+                              print(f"- {key} first row length: `{len(first)}`")
+                              print("- first row cell types: `" + "`, `".join(type(item).__name__ for item in first) + "`")
+                          elif isinstance(first, dict):
+                              print("- first row keys: `" + "`, `".join(sorted(first.keys())) + "`")
+              print("- first table compact shape: `" + json.dumps({k: type(v).__name__ for k, v in table.items()}, ensure_ascii=True, sort_keys=True) + "`")
           PY
           gh pr comment "$PR_NUMBER" --repo "$REPOSITORY" --body-file /tmp/probe.md
