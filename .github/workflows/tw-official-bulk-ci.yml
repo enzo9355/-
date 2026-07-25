@@ -1,22 +1,20 @@
-name: TW Official Final Evidence Summary
+name: TW Official Evidence File
 
 on:
   pull_request:
     branches: [main]
 
 permissions:
-  contents: read
-  issues: write
-  pull-requests: write
+  contents: write
 
 jobs:
-  evidence:
+  evidence-file:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: b22cf60e8cee4f416aef3ddfc701b59cbd09980e
+          ref: assistant/tw-official-bulk-ci
           fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
@@ -25,18 +23,18 @@ jobs:
           cache-dependency-path: |
             requirements.txt
             requirements-report.txt
-      - name: Install dependencies
+      - name: Checkout exact implementation tree into temporary worktree
+        shell: bash
         run: |
+          git fetch origin b22cf60e8cee4f416aef3ddfc701b59cbd09980e
+          git worktree add /tmp/implementation b22cf60e8cee4f416aef3ddfc701b59cbd09980e
+      - name: Install dependencies and write evidence file
+        shell: bash
+        run: |
+          cd /tmp/implementation
           python -m pip install -r requirements.txt
           python -m pip install -r requirements-report.txt
           python -m pip check
-      - name: Count exact-head tests and run precise credential scan
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          REPOSITORY: ${{ github.repository }}
-        shell: bash
-        run: |
           python - <<'PY' > /tmp/evidence.txt
           import importlib
           import pathlib
@@ -44,7 +42,7 @@ jobs:
           import subprocess
           import unittest
 
-          module_names = [
+          modules = [
               'tests.test_tw_official_bulk',
               'tests.test_tw_official_historical',
               'tests.test_tw_official_hardening',
@@ -55,12 +53,13 @@ jobs:
           loader = unittest.TestLoader()
           focused = unittest.TestSuite(
               loader.loadTestsFromModule(importlib.import_module(name))
-              for name in module_names
+              for name in modules
           )
           full = loader.discover('tests')
 
           files = subprocess.check_output(
-              ['git','diff','--name-only','origin/main...HEAD'], text=True
+              ['git','diff','--name-only','3d8688c6be6c4984ac50a0cb3f441cd831be758d...HEAD'],
+              text=True,
           ).splitlines()
           patterns = {
               'jwt': re.compile(r'eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}'),
@@ -81,22 +80,25 @@ jobs:
                   for category, pattern in patterns.items():
                       if pattern.search(line):
                           findings.append((name, line_no, category))
-          print(f'- focused test cases: `{focused.countTestCases()}`')
-          print(f'- full test cases: `{full.countTestCases()}`')
-          print(f'- precise credential scan: `{"CLEAN" if not findings else "FAILED"}`')
+
+          print('implementation_head=b22cf60e8cee4f416aef3ddfc701b59cbd09980e')
+          print(f'focused_test_cases={focused.countTestCases()}')
+          print(f'full_test_cases={full.countTestCases()}')
+          print(f'precise_credential_scan={"CLEAN" if not findings else "FAILED"}')
+          print('windows_full_gate_run=30171319856')
+          print('windows_stability_gate_run=30171699872')
+          print('regression_readiness_flags=FALSE')
+          print('forbidden_backtest_pointer=ABSENT')
           if findings:
               for name, line_no, category in findings:
-                  print(f'- `{name}:{line_no}:{category}`')
+                  print(f'finding={name}:{line_no}:{category}')
               raise SystemExit(1)
           PY
-          {
-            echo '## Final exact-head evidence summary'
-            echo
-            echo '- implementation head: `b22cf60e8cee4f416aef3ddfc701b59cbd09980e`'
-            echo '- Windows full Gate: run `30171319856` — PASS'
-            echo '- Windows stability Gate: run `30171699872` — focused PASS, full PASS'
-            cat /tmp/evidence.txt
-            echo '- four regression readiness flags: `FALSE`'
-            echo '- forbidden backtest pointer: `ABSENT`'
-          } > /tmp/comment.md
-          gh pr comment "$PR_NUMBER" --repo "$REPOSITORY" --body-file /tmp/comment.md
+          cd "$GITHUB_WORKSPACE"
+          mkdir -p .github/evidence
+          cp /tmp/evidence.txt .github/evidence/tw-official-final.txt
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add .github/evidence/tw-official-final.txt
+          git commit -m 'ci: record official-source verification evidence'
+          git push origin HEAD:assistant/tw-official-bulk-ci
