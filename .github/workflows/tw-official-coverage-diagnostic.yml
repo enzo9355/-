@@ -1,0 +1,53 @@
+name: TW Official Coverage Diagnostic
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: assistant/tw-official-bulk-source
+          fetch-depth: 0
+      - name: Report guarded marker counts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPOSITORY: ${{ github.repository }}
+        shell: bash
+        run: |
+          python - <<'PY' > /tmp/coverage.md
+          from pathlib import Path
+          import subprocess
+
+          head = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
+          source = Path('stock_papi/integrations/market_data/tw_official_historical.py').read_text(encoding='utf-8')
+          tests = Path('tests/test_tw_official_historical.py').read_text(encoding='utf-8')
+          markers = {
+              'constant': 'MAX_CATCHUP_SESSIONS = 10\n',
+              'signature': '    minimum_chip_symbols: int = 1,\n',
+              'setup': '    minimum_price_symbols = dict(minimum_price_symbols or {"TWSE": 500, "TPEx": 500})\n',
+              'inner': '                minimum = minimum_price_symbols.get(definition.market, 1) if definition.dataset == "price" else minimum_chip_symbols\n',
+              'outer': '        minimum = minimum_price_symbols.get(definition.market, 1) if definition.dataset == "price" else minimum_chip_symbols\n',
+          }
+          test_markers = {
+              'import': 'from stock_papi.integrations.market_data.tw_official_bulk import TPEX_INSTITUTIONAL_FIELDS\n',
+              'test': '    def test_series_rejects_more_than_bounded_catchup(self):\n',
+          }
+          print('## Coverage patch marker diagnostic')
+          print(f'- head: `{head}`')
+          for name, marker in markers.items():
+              print(f'- source {name}: `{source.count(marker)}`')
+          for name, marker in test_markers.items():
+              print(f'- test {name}: `{tests.count(marker)}`')
+          PY
+          gh pr comment "$PR_NUMBER" --repo "$REPOSITORY" --body-file /tmp/coverage.md
