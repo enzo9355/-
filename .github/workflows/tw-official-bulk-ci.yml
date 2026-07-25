@@ -1,4 +1,4 @@
-name: TW Official Credential Marker Diagnostic
+name: TW Official Credential Marker Evidence
 
 on:
   pull_request:
@@ -6,6 +6,8 @@ on:
 
 permissions:
   contents: read
+  issues: write
+  pull-requests: write
 
 jobs:
   scan:
@@ -16,10 +18,14 @@ jobs:
         with:
           ref: b22cf60e8cee4f416aef3ddfc701b59cbd09980e
           fetch-depth: 0
-      - name: Report marker matches without values
+      - name: Publish marker matches without values
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPOSITORY: ${{ github.repository }}
         shell: bash
         run: |
-          python3 - <<'PY'
+          python3 - <<'PY' > /tmp/markers.txt
           import pathlib
           import subprocess
 
@@ -42,8 +48,16 @@ jobs:
                   for category, needle in needles.items():
                       if needle in line:
                           found.append((name, line_no, category))
-          for name, line_no, category in found:
-              print(f'{name}:{line_no}:{category}')
-          if not found:
-              print('no marker matches')
+          if found:
+              for name, line_no, category in found:
+                  print(f'- `{name}:{line_no}:{category}`')
+          else:
+              print('- no marker matches')
           PY
+          {
+            echo '## Credential marker diagnostic'
+            echo
+            echo '- implementation head: `b22cf60e8cee4f416aef3ddfc701b59cbd09980e`'
+            cat /tmp/markers.txt
+          } > /tmp/comment.md
+          gh pr comment "$PR_NUMBER" --repo "$REPOSITORY" --body-file /tmp/comment.md
