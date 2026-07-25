@@ -54,7 +54,7 @@ This is rejected because the project schema, source lineage, update process, RLS
 
 Fetch current-day market-wide snapshots from TWSE and TPEx, normalize them to the existing FinMind-shaped interfaces, and append the verified day to existing local historical artifacts.
 
-This is the selected approach. It reduces the normal daily exchange request count to a small fixed number, preserves the historical store already used by the quant pipeline, and keeps source lineage under ABSORB control.
+This is the selected approach. It reduces the normal daily exchange request count to a small fixed number, preserves the historical rows already stored in ABSORB per-symbol artifacts, and keeps source lineage under ABSORB control.
 
 ## Authoritative sources
 
@@ -62,13 +62,15 @@ This is the selected approach. It reduces the normal daily exchange request coun
 
 - Price snapshot: `https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL`
 - Margin snapshot: `https://openapi.twse.com.tw/v1/exchangeReport/MI_MARGN`
-- Institutional snapshot: official TWSE T86 report endpoint, requested for the explicit target date and `selectType=ALL`
+- Institutional snapshot: `https://www.twse.com.tw/fund/T86?response=json&date={YYYYMMDD}&selectType=ALL`
 
 ### TPEx
 
 - Price snapshot: `https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes`
 - Margin snapshot: `https://www.tpex.org.tw/openapi/v1/tpex_mainboard_margin_balance`
 - Institutional snapshot: `https://www.tpex.org.tw/openapi/v1/tpex_3insti_daily_trading`
+
+The TWSE and TPEx OpenAPI resources are latest-snapshot sources, not a historical backfill service. T86 is requested for the explicit target date. Every source still must prove the target trading date through its response contract; the runner may not assign the requested date to undated or stale rows.
 
 Endpoint paths must be isolated in one source-definition table. Parsers must not depend on column positions when the response supplies field names. The implementation must accept documented name aliases only; unknown schema changes fail closed.
 
@@ -179,20 +181,20 @@ A provider-wide official-source failure therefore occurs before `progress.json` 
 
 ### 5. Incremental per-symbol history
 
-The existing historical data remains authoritative for dates before the target date. For each symbol, the official snapshot contributes the target-day row.
+The latest valid per-symbol artifact supplies historical rows before the target date. For each symbol, the official snapshot contributes the target-day price, institutional, and margin data. This is a new read path over existing artifacts; the current FinMind-backed `get_data()` path does not yet consume those artifacts as history.
 
 The data path must:
 
-- load the existing local historical frame/artifact when available;
+- load and validate the existing local per-symbol artifact when available;
 - reject an existing latest date later than the target date;
 - append the official row only when that date is missing;
 - replace an existing same-date row only if an explicit integrity comparison proves the prior row is stale and the operation is recorded;
 - sort and deduplicate by date;
 - preserve at least the current 730-day analysis window;
 - write only through existing atomic per-symbol artifact handling;
-- retain source lineage showing historical and official-daily components.
+- retain source lineage showing local historical and official-daily components.
 
-The implementation must not issue a FinMind history request simply because one symbol enters the batch.
+When no valid local history exists, the normal Production observation run fails that symbol unless a separately authorized, budgeted bootstrap source is available. The implementation must not issue a FinMind history request merely because one symbol enters the batch.
 
 ### 6. TAIEX and market context
 
