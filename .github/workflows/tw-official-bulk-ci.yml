@@ -156,7 +156,7 @@ jobs:
               def test_margin_reports_require_exact_field_fingerprints(self):
                   data = payloads(TARGET)
                   fields = data["twse_margin"]["tables"][1]["fields"]
-                  fields[6], fields[12] = fields[12], fields[6]
+                  fields[6], fields[7] = fields[7], fields[6]
                   with self.assertRaisesRegex(ValueError, "target table"):
                       parse_twse_margin_report(data["twse_margin"], TARGET)
 
