@@ -6,62 +6,82 @@ on:
 
 permissions:
   contents: read
-  issues: write
-  pull-requests: write
 
 jobs:
-  focused-python310:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+  full-python310:
+    runs-on: windows-latest
+    timeout-minutes: 60
     steps:
       - name: Checkout exact implementation head
         uses: actions/checkout@v4
         with:
           ref: 286f91b0676de11f0a68dc19a668f8848e2e9579
           fetch-depth: 0
-      - name: Assert exact head
-        shell: bash
+      - name: Assert exact clean head
+        shell: pwsh
         run: |
-          test "$(git rev-parse HEAD)" = "286f91b0676de11f0a68dc19a668f8848e2e9579"
-          test ! -e .github/workflows/tw-official-bulk-ci.yml
+          if ((git rev-parse HEAD).Trim() -ne '286f91b0676de11f0a68dc19a668f8848e2e9579') { throw 'unexpected head' }
+          if (Test-Path '.github/workflows/tw-official-bulk-ci.yml') { throw 'diagnostic workflow leaked into implementation head' }
+          if (git status --porcelain) { throw 'checkout is dirty' }
       - uses: actions/setup-python@v5
         with:
           python-version: '3.10'
           cache: pip
       - name: Install dependencies
+        shell: pwsh
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
           python -m pip install -r requirements-report.txt
           python -m pip check
-      - name: Focused tests with concise failure report
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          REPOSITORY: ${{ github.repository }}
-        shell: bash
+      - name: Install test-only Noto CJK fonts
+        shell: pwsh
         run: |
-          set +e
-          python -m unittest \
-            tests.test_tw_official_bulk \
-            tests.test_tw_official_historical \
-            tests.test_tw_incremental \
-            tests.test_tw_official_post_close_cli \
-            tests.test_pipeline_scheduler \
-            -v > /tmp/focused.txt 2>&1
-          code=$?
-          if [ "$code" -ne 0 ]; then
-            {
-              echo '## Focused official catch-up diagnostic'
-              echo
-              echo '```text'
-              grep -E '^(FAIL|ERROR):|^Ran [0-9]+ tests|^FAILED \(|^OK$' /tmp/focused.txt || true
-              echo '--- final 160 lines ---'
-              tail -n 160 /tmp/focused.txt
-              echo '```'
-            } > /tmp/comment.md
-            gh pr comment "$PR_NUMBER" --repo "$REPOSITORY" --body-file /tmp/comment.md
-          else
-            tail -n 12 /tmp/focused.txt
-          fi
-          exit "$code"
+          $base = 'https://raw.githubusercontent.com/notofonts/noto-cjk/f8d157532fbfaeda587e826d4cd5b21a49186f7c'
+          Invoke-WebRequest "$base/Sans/Variable/TTF/Subset/NotoSansTC-VF.ttf" -OutFile 'C:\Windows\Fonts\NotoSansTC-VF.ttf'
+          Invoke-WebRequest "$base/Serif/Variable/TTF/Subset/NotoSerifTC-VF.ttf" -OutFile 'C:\Windows\Fonts\NotoSerifTC-VF.ttf'
+      - name: Focused official-source tests
+        shell: pwsh
+        run: |
+          python -m unittest tests.test_tw_official_bulk tests.test_tw_official_historical tests.test_tw_incremental tests.test_tw_official_post_close_cli tests.test_pipeline_scheduler -v
+      - name: Full suite
+        shell: pwsh
+        run: python -m unittest discover -s tests -v
+      - name: Static checks
+        shell: pwsh
+        run: |
+          python -m compileall -q reporting stock_papi tests
+          python -m py_compile local_quant.py
+          node --check static/app.js
+          git diff --check origin/main...HEAD
+          if (git status --porcelain) { throw 'verification changed the tree' }
+      - name: PowerShell 5.1 parser
+        shell: powershell
+        run: |
+          $paths = @(
+            'scripts/python_runtime.ps1',
+            'scripts/run_tw_post_close_pipeline.ps1',
+            'scripts/run_tw_pre_market_pipeline.ps1',
+            'scripts/invoke_pipeline_task.ps1',
+            'scripts/native_process.ps1'
+          )
+          foreach ($path in $paths) {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $path), [ref]$tokens, [ref]$errors) | Out-Null
+            if ($errors.Count -gt 0) { $errors | Format-List *; throw "parser failure: $path" }
+          }
+      - name: Governance invariants
+        shell: pwsh
+        run: |
+          $text = Get-ChildItem -Recurse -File -Include *.py,*.json,*.md | ForEach-Object { Get-Content $_.FullName -Raw -ErrorAction SilentlyContinue }
+          foreach ($name in @(
+            'PRODUCTION_REGRESSION_SOURCE_ADAPTER_READY',
+            'PRODUCTION_REGRESSION_INPUT_READY',
+            'PRODUCTION_REGRESSION_ARTIFACT_AVAILABLE',
+            'AGGREGATE_MANIFEST_INTERVAL_VALIDATION_READY'
+          )) {
+            $matches = Select-String -Path (Get-ChildItem -Recurse -File -Include *.py | Select-Object -ExpandProperty FullName) -Pattern "$name\s*=\s*True" -ErrorAction SilentlyContinue
+            if ($matches) { throw "$name was enabled" }
+          }
+          if (Test-Path 'backtests/v1/latest-TW.json') { throw 'forbidden backtest pointer exists' }
