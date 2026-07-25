@@ -1,0 +1,8 @@
+implementation_head=b22cf60e8cee4f416aef3ddfc701b59cbd09980e
+focused_test_cases=33
+full_test_cases=898
+precise_credential_scan=CLEAN
+windows_full_gate_run=30171319856
+windows_stability_gate_run=30171699872
+regression_readiness_flags=FALSE
+forbidden_backtest_pointer=ABSENT
