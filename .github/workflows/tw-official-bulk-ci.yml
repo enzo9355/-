@@ -1,4 +1,4 @@
-name: TW Official Exact-Head Stability Diagnostic
+name: TW Official Minimal Stability Gate
 
 on:
   pull_request:
@@ -6,11 +6,9 @@ on:
 
 permissions:
   contents: read
-  issues: write
-  pull-requests: write
 
 jobs:
-  stability:
+  verify:
     runs-on: windows-latest
     timeout-minutes: 120
     steps:
@@ -25,7 +23,7 @@ jobs:
           cache-dependency-path: |
             requirements.txt
             requirements-report.txt
-      - name: Install dependencies and pinned test fonts
+      - name: Environment
         shell: powershell
         run: |
           if ((git rev-parse HEAD).Trim() -ne 'b22cf60e8cee4f416aef3ddfc701b59cbd09980e') { throw 'Unexpected head' }
@@ -35,41 +33,22 @@ jobs:
           $c = 'f8d157532fbfaeda587e826d4cd5b21a49186f7c'
           Invoke-WebRequest -UseBasicParsing "https://raw.githubusercontent.com/notofonts/noto-cjk/$c/Sans/Variable/TTF/Subset/NotoSansTC-VF.ttf" -OutFile 'C:\Windows\Fonts\NotoSansTC-VF.ttf'
           Invoke-WebRequest -UseBasicParsing "https://raw.githubusercontent.com/notofonts/noto-cjk/$c/Serif/Variable/TTF/Subset/NotoSerifTC-VF.ttf" -OutFile 'C:\Windows\Fonts\NotoSerifTC-VF.ttf'
-      - name: Run tests and always publish exact exit codes
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          REPOSITORY: ${{ github.repository }}
+      - name: Focused tests
+        shell: powershell
+        run: python -m unittest tests.test_tw_official_bulk tests.test_tw_official_historical tests.test_tw_official_hardening tests.test_tw_incremental tests.test_tw_official_post_close_cli tests.test_pipeline_scheduler -q
+      - name: Full tests
+        shell: powershell
+        run: python -m unittest discover -s tests -q
+      - name: Credential markers
         shell: powershell
         run: |
-          python -m unittest tests.test_tw_official_bulk tests.test_tw_official_historical tests.test_tw_official_hardening tests.test_tw_incremental tests.test_tw_official_post_close_cli tests.test_pipeline_scheduler -v *> focused.txt
-          $focusedCode = $LASTEXITCODE
-          python -m unittest discover -s tests -v *> full.txt
-          $fullCode = $LASTEXITCODE
-          $focusedRan = (Select-String -Path focused.txt -Pattern '^Ran \d+ tests' | Select-Object -Last 1).Line
-          $fullRan = (Select-String -Path full.txt -Pattern '^Ran \d+ tests' | Select-Object -Last 1).Line
-          $focusedStatus = if ($focusedCode -eq 0) { 'OK' } else { 'FAILED' }
-          $fullStatus = if ($fullCode -eq 0) { 'OK' } else { 'FAILED' }
-          @"
-          ## Exact-head stability diagnostic
-
-          - implementation head: ``b22cf60e8cee4f416aef3ddfc701b59cbd09980e``
-          - focused exit code: ``$focusedCode``
-          - focused summary: ``$focusedRan`` — $focusedStatus
-          - full exit code: ``$fullCode``
-          - full summary: ``$fullRan`` — $fullStatus
-
-          ### Focused tail
-          ``````text
-          $((Get-Content focused.txt -Tail 80) -join "`n")
-          ``````
-
-          ### Full tail
-          ``````text
-          $((Get-Content full.txt -Tail 120) -join "`n")
-          ``````
-          "@ | Set-Content diagnostic.md -Encoding UTF8
-          gh pr comment $env:PR_NUMBER --repo $env:REPOSITORY --body-file diagnostic.md
-          Remove-Item focused.txt, full.txt, diagnostic.md -Force
-          if ($focusedCode -ne 0) { exit $focusedCode }
-          if ($fullCode -ne 0) { exit $fullCode }
+          $needles = '-----BEGIN PRIVATE KEY-----','sb_secret_','AIza','Authorization: Bearer '
+          foreach ($name in (git diff --name-only origin/main...HEAD)) {
+            if (-not (Test-Path -LiteralPath $name -PathType Leaf)) { continue }
+            $text = Get-Content -LiteralPath $name -Raw -Encoding utf8
+            foreach ($needle in $needles) {
+              if ($text.Contains($needle)) { throw "Credential marker in $name" }
+            }
+          }
+          Write-Host 'credential markers: clean'
+          if (git status --porcelain) { throw 'Verification changed tree' }
