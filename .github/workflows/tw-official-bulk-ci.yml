@@ -135,9 +135,9 @@ jobs:
               raise SystemExit('TPEx fixture replacement count is not one')
           new_test = '''    def test_tpex_reordered_or_unlabelled_schema_fails_closed(self):
                   payload = tpex_payload()
-                  payload["tables"][0]["fields"][8], payload["tables"][0]["fields"][11] = (
-                      payload["tables"][0]["fields"][11],
-                      payload["tables"][0]["fields"][8],
+                  payload["tables"][0]["fields"][2], payload["tables"][0]["fields"][3] = (
+                      payload["tables"][0]["fields"][3],
+                      payload["tables"][0]["fields"][2],
                   )
                   with self.assertRaisesRegex(ValueError, "schema fingerprint"):
                       parse_tpex_institutional(payload, TARGET)
