@@ -12,9 +12,9 @@ permissions:
 jobs:
   probe:
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 10
     steps:
-      - name: Inspect nested TPEx institutional grouping schema
+      - name: Probe official row counts and TPEx institutional fields
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
@@ -23,26 +23,88 @@ jobs:
         run: |
           python3 - <<'PY' > /tmp/probe.md
           import json
+          import re
           import urllib.parse
           import urllib.request
 
-          base = "https://www.tpex.org.tw/web/stock/3insti/daily_trade/3itrade_hedge_result.php"
-          url = base + "?" + urllib.parse.urlencode({
-              "l": "zh-tw", "o": "json", "se": "EW", "t": "D",
-              "d": "115/07/24", "s": "0,asc",
-          })
-          request = urllib.request.Request(url, headers={"User-Agent": "ABSORB-contract-probe/1.0"})
-          with urllib.request.urlopen(request, timeout=60) as response:
-              payload = json.loads(response.read(15 * 1024 * 1024).decode("utf-8-sig"))
-          tables = payload.get("tables") or []
-          table = tables[0] if tables else {}
-          print("## TPEx institutional grouping schema")
-          print(f"- date: `{payload.get('date')}`")
-          print(f"- title: `{table.get('title')}`")
-          print(f"- columnNum: `{table.get('columnNum')}`")
-          print("- summary type: `" + type(table.get('summary')).__name__ + "`")
-          print("- summary: `" + json.dumps(table.get('summary'), ensure_ascii=True, separators=(',', ':')) + "`")
-          print("- template type: `" + type(payload.get('template')).__name__ + "`")
-          print("- template: `" + json.dumps(payload.get('template'), ensure_ascii=True, separators=(',', ':'))[:12000] + "`")
+          target_ymd = '20260724'
+          target_roc = '115/07/24'
+          sources = {
+              'twse_price': (
+                  'https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX',
+                  {'date': target_ymd, 'type': 'ALLBUT0999', 'response': 'json'},
+              ),
+              'twse_institutional': (
+                  'https://www.twse.com.tw/rwd/zh/fund/T86',
+                  {'date': target_ymd, 'selectType': 'ALLBUT0999', 'response': 'json'},
+              ),
+              'twse_margin': (
+                  'https://www.twse.com.tw/rwd/zh/marginTrading/MI_MARGN',
+                  {'date': target_ymd, 'selectType': 'STOCK', 'response': 'json'},
+              ),
+              'tpex_price': (
+                  'https://www.tpex.org.tw/web/stock/aftertrading/daily_close_quotes/stk_quote_result.php',
+                  {'l': 'zh-tw', 'o': 'json', 'd': target_roc, 's': '0,asc,0'},
+              ),
+              'tpex_institutional': (
+                  'https://www.tpex.org.tw/web/stock/3insti/daily_trade/3itrade_hedge_result.php',
+                  {'l': 'zh-tw', 'o': 'json', 'se': 'EW', 't': 'D', 'd': target_roc, 's': '0,asc'},
+              ),
+              'tpex_margin': (
+                  'https://www.tpex.org.tw/web/stock/margin_trading/margin_balance/margin_bal_result.php',
+                  {'l': 'zh-tw', 'o': 'json', 'd': target_roc, 's': '0,asc'},
+              ),
+          }
+
+          def fetch(base, params):
+              url = base + '?' + urllib.parse.urlencode(params)
+              request = urllib.request.Request(url, headers={'User-Agent': 'ABSORB-contract-probe/1.0'})
+              with urllib.request.urlopen(request, timeout=60) as response:
+                  body = response.read(30 * 1024 * 1024 + 1)
+                  if len(body) > 30 * 1024 * 1024:
+                      raise RuntimeError('response too large')
+                  return response.status, len(body), json.loads(body.decode('utf-8-sig'))
+
+          def clean(value):
+              return re.sub(r'<[^>]*>', '', str(value or '')).replace('&nbsp;', ' ').strip()
+
+          print('## Official source coverage metadata')
+          for source_id, (base, params) in sources.items():
+              status, size, payload = fetch(base, params)
+              tables = payload.get('tables') if isinstance(payload, dict) else None
+              selected = None
+              if source_id == 'twse_price':
+                  selected = next((t for t in tables or [] if isinstance(t, dict) and (t.get('fields') or [])[:2] == ['證券代號', '證券名稱']), None)
+              elif source_id == 'twse_margin':
+                  selected = next((t for t in tables or [] if isinstance(t, dict) and len(t.get('fields') or []) == 16 and (t.get('fields') or [])[:2] == ['代號', '名稱']), None)
+              elif source_id == 'tpex_price':
+                  selected = next((t for t in tables or [] if isinstance(t, dict) and (t.get('fields') or [])[:2] == ['代號', '名稱'] and '上櫃股票行情' in str(t.get('title') or '')), None)
+              elif source_id == 'tpex_institutional':
+                  selected = next((t for t in tables or [] if isinstance(t, dict) and '三大法人買賣明細資訊' in str(t.get('title') or '')), None)
+              elif source_id == 'tpex_margin':
+                  selected = next((t for t in tables or [] if isinstance(t, dict) and (t.get('fields') or [])[:2] == ['代號', '名稱'] and '融資融券餘額' in str(t.get('title') or '')), None)
+
+              if source_id == 'twse_institutional':
+                  fields = payload.get('fields') or []
+                  rows = payload.get('data') or []
+                  date_value = payload.get('date')
+              else:
+                  fields = selected.get('fields') if isinstance(selected, dict) else []
+                  rows = selected.get('data') if isinstance(selected, dict) else []
+                  date_value = (selected or {}).get('date') or (payload.get('date') if isinstance(payload, dict) else None)
+              symbols = {
+                  clean(row[0]) for row in rows
+                  if isinstance(row, list) and row and re.fullmatch(r'\d{4,6}', clean(row[0]))
+              }
+              print(f'\n### {source_id}')
+              print(f'- HTTP: `{status}`')
+              print(f'- bytes: `{size}`')
+              print(f'- date: `{date_value}`')
+              print(f'- rows: `{len(rows)}`')
+              print(f'- numeric symbols: `{len(symbols)}`')
+              print(f'- field count: `{len(fields)}`')
+              if source_id == 'tpex_institutional':
+                  print('- title: `' + str((selected or {}).get('title')) + '`')
+                  print('- fields JSON: `' + json.dumps(fields, ensure_ascii=True, separators=(',', ':')) + '`')
           PY
           gh pr comment "$PR_NUMBER" --repo "$REPOSITORY" --body-file /tmp/probe.md
