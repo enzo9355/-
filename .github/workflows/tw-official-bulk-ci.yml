@@ -5,164 +5,83 @@ on:
     branches: [main]
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  patch-schema-fingerprint:
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
+  full-python310:
+    runs-on: windows-latest
+    timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout exact implementation head
+        uses: actions/checkout@v4
         with:
-          ref: assistant/tw-official-bulk-source
+          ref: d62b557d6f7e9c99a6ac73735d0a0e320b7408d5
           fetch-depth: 0
+      - name: Assert exact clean head
+        shell: pwsh
+        run: |
+          if ((git rev-parse HEAD).Trim() -ne 'd62b557d6f7e9c99a6ac73735d0a0e320b7408d5') { throw 'unexpected head' }
+          if (Test-Path '.github/workflows/tw-official-bulk-ci.yml') { throw 'diagnostic workflow leaked into implementation head' }
+          if (git status --porcelain) { throw 'checkout is dirty' }
       - uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-      - name: Apply guarded schema fingerprint patch
-        shell: bash
+          cache: pip
+      - name: Install dependencies
+        shell: pwsh
         run: |
-          test "$(git rev-parse HEAD)" = "286f91b0676de11f0a68dc19a668f8848e2e9579"
-          python - <<'PY'
-          import re
-          from pathlib import Path
-
-          source_path = Path('stock_papi/integrations/market_data/tw_official_bulk.py')
-          source = source_path.read_text(encoding='utf-8')
-          marker = '_SYMBOL_RE = re.compile(r"\\d{4,6}")\n'
-          constant = '''_SYMBOL_RE = re.compile(r"\\d{4,6}")
-          TPEX_INSTITUTIONAL_FIELDS = (
-              "代號", "名稱",
-              "買進股數", "賣出股數", "買賣超股數",
-              "買進股數", "賣出股數", "買賣超股數",
-              "買進股數", "賣出股數", "買賣超股數",
-              "買進股數", "賣出股數", "買賣超股數",
-              "買進股數", "賣出股數", "買賣超股數",
-              "買進股數", "賣出股數", "買賣超股數",
-              "買進股數", "賣出股數", "買賣超股數",
-              "三大法人買賣超股數合計",
-          )
-          '''
-          if source.count(marker) != 1:
-              raise SystemExit('symbol marker count is not one')
-          source = source.replace(marker, constant, 1)
-          replacement = '''def _find_tpex_table_rows(
-              payload: Mapping[str, Any],
-          ) -> tuple[Mapping[str, Any], _datetime.date]:
-              actual_date = normalize_market_date(payload.get("date"))
-              tables = payload.get("tables")
-              if not isinstance(tables, list):
-                  raise ValueError("TPEx institutional tables are missing")
-              matches = []
-              for table in tables:
-                  if not isinstance(table, dict):
-                      continue
-                  table_date = table.get("date")
-                  if table_date is not None and normalize_market_date(table_date) != actual_date:
-                      raise ValueError("TPEx institutional table date mismatch")
-                  if (
-                      table.get("title") == "三大法人買賣明細資訊"
-                      and table.get("columnNum") == 25
-                      and tuple(str(item) for item in table.get("fields") or ())
-                      == TPEX_INSTITUTIONAL_FIELDS
-                      and isinstance(table.get("data"), list)
-                      and table.get("data")
-                  ):
-                      matches.append(table)
-              if len(matches) != 1:
-                  raise ValueError("TPEx institutional schema fingerprint is invalid")
-              return matches[0], actual_date
-          '''
-          source, count = re.subn(
-              r'def _find_tpex_table_rows\([\s\S]*?\n\ndef parse_tpex_institutional',
-              replacement + '\n\ndef parse_tpex_institutional', source, count=1,
-          )
-          if count != 1:
-              raise SystemExit('table replacement count is not one')
-          source = source.replace(
-              '    data, actual_date = _find_tpex_table_rows(payload)\n',
-              '    table, actual_date = _find_tpex_table_rows(payload)\n    data = table["data"]\n', 1,
-          )
-          source = source.replace(
-              '        elif isinstance(source, list) and len(source) >= 24:\n',
-              '        elif (\n            isinstance(source, list)\n            and len(source) == len(TPEX_INSTITUTIONAL_FIELDS)\n        ):\n', 1,
-          )
-          source_path.write_text(source, encoding='utf-8')
-
-          bulk_path = Path('tests/test_tw_official_bulk.py')
-          bulk = bulk_path.read_text(encoding='utf-8')
-          bulk = bulk.replace(
-              '    OfficialSourceFailure,\n',
-              '    OfficialSourceFailure,\n    TPEX_INSTITUTIONAL_FIELDS,\n', 1,
-          )
-          fixture = '''def tpex_payload():
-              return {
-                  "stat": "ok",
-                  "date": "20260724",
-                  "tables": [{
-                      "title": "三大法人買賣明細資訊",
-                      "columnNum": 25,
-                      "date": "115/07/24",
-                      "fields": list(TPEX_INSTITUTIONAL_FIELDS),
-                      "data": [["6488", "環球晶"] + [str(index) for index in range(2, 24)]],
-                  }],
-              }
-          '''
-          bulk, count = re.subn(
-              r'def tpex_payload\(\):[\s\S]*?\n\nclass TWOfficialContractTests',
-              fixture + '\n\nclass TWOfficialContractTests', bulk, count=1,
-          )
-          if count != 1:
-              raise SystemExit('bulk fixture replacement count is not one')
-          new_test = '''    def test_tpex_reordered_or_unlabelled_schema_fails_closed(self):
-                  payload = tpex_payload()
-                  payload["tables"][0]["fields"][2], payload["tables"][0]["fields"][3] = (
-                      payload["tables"][0]["fields"][3],
-                      payload["tables"][0]["fields"][2],
-                  )
-                  with self.assertRaisesRegex(ValueError, "schema fingerprint"):
-                      parse_tpex_institutional(payload, TARGET)
-                  payload = tpex_payload()
-                  payload["tables"][0]["title"] = "unknown"
-                  with self.assertRaisesRegex(ValueError, "schema fingerprint"):
-                      parse_tpex_institutional(payload, TARGET)
-
-          '''
-          needle = '    def test_date_mismatch_fails_closed(self):\n'
-          if bulk.count(needle) != 1:
-              raise SystemExit('bulk test marker count is not one')
-          bulk = bulk.replace(needle, new_test + needle, 1)
-          bulk_path.write_text(bulk, encoding='utf-8')
-
-          historical_path = Path('tests/test_tw_official_historical.py')
-          historical = historical_path.read_text(encoding='utf-8')
-          import_marker = 'from stock_papi.integrations.market_data.tw_official_historical import (\n'
-          extra_import = 'from stock_papi.integrations.market_data.tw_official_bulk import TPEX_INSTITUTIONAL_FIELDS\n'
-          if historical.count(import_marker) != 1:
-              raise SystemExit('historical import marker count is not one')
-          historical = historical.replace(import_marker, extra_import + import_marker, 1)
-          old = '            "tables": [{"date": roc_text, "fields": [f"f{i}" for i in range(24)], "data": [tpex_institutional]}],\n'
-          new = '''            "tables": [{
-              "title": "三大法人買賣明細資訊",
-              "columnNum": 25,
-              "date": roc_text,
-              "fields": list(TPEX_INSTITUTIONAL_FIELDS),
-              "data": [tpex_institutional],
-          }],
-          '''
-          if historical.count(old) != 1:
-              raise SystemExit('historical fixture marker count is not one')
-          historical = historical.replace(old, new, 1)
-          historical_path.write_text(historical, encoding='utf-8')
-          PY
-          git diff --check
-      - name: Run schema-focused tests
-        run: python -m unittest tests.test_tw_official_bulk tests.test_tw_official_historical -v
-      - name: Commit and push
-        shell: bash
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install -r requirements-report.txt
+          python -m pip check
+      - name: Install test-only Noto CJK fonts
+        shell: pwsh
         run: |
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add stock_papi/integrations/market_data/tw_official_bulk.py tests/test_tw_official_bulk.py tests/test_tw_official_historical.py
-          git commit -m 'fix(data): fingerprint TPEx institutional table schema'
-          git push origin HEAD:assistant/tw-official-bulk-source
+          $base = 'https://raw.githubusercontent.com/notofonts/noto-cjk/f8d157532fbfaeda587e826d4cd5b21a49186f7c'
+          Invoke-WebRequest "$base/Sans/Variable/TTF/Subset/NotoSansTC-VF.ttf" -OutFile 'C:\Windows\Fonts\NotoSansTC-VF.ttf'
+          Invoke-WebRequest "$base/Serif/Variable/TTF/Subset/NotoSerifTC-VF.ttf" -OutFile 'C:\Windows\Fonts\NotoSerifTC-VF.ttf'
+      - name: Focused official-source tests
+        shell: pwsh
+        run: |
+          python -m unittest tests.test_tw_official_bulk tests.test_tw_official_historical tests.test_tw_incremental tests.test_tw_official_post_close_cli tests.test_pipeline_scheduler -v
+      - name: Full suite
+        shell: pwsh
+        run: python -m unittest discover -s tests -v
+      - name: Static checks
+        shell: pwsh
+        run: |
+          python -m compileall -q reporting stock_papi tests
+          python -m py_compile local_quant.py
+          node --check static/app.js
+          git diff --check origin/main...HEAD
+          if (git status --porcelain) { throw 'verification changed the tree' }
+      - name: PowerShell 5.1 parser
+        shell: powershell
+        run: |
+          $paths = @(
+            'scripts/python_runtime.ps1',
+            'scripts/run_tw_post_close_pipeline.ps1',
+            'scripts/run_tw_pre_market_pipeline.ps1',
+            'scripts/invoke_pipeline_task.ps1',
+            'scripts/native_process.ps1'
+          )
+          foreach ($path in $paths) {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $path), [ref]$tokens, [ref]$errors) | Out-Null
+            if ($errors.Count -gt 0) { $errors | Format-List *; throw "parser failure: $path" }
+          }
+      - name: Governance invariants
+        shell: pwsh
+        run: |
+          foreach ($name in @(
+            'PRODUCTION_REGRESSION_SOURCE_ADAPTER_READY',
+            'PRODUCTION_REGRESSION_INPUT_READY',
+            'PRODUCTION_REGRESSION_ARTIFACT_AVAILABLE',
+            'AGGREGATE_MANIFEST_INTERVAL_VALIDATION_READY'
+          )) {
+            $paths = Get-ChildItem -Recurse -File -Include *.py | Select-Object -ExpandProperty FullName
+            $matches = Select-String -Path $paths -Pattern "$name\s*=\s*True" -ErrorAction SilentlyContinue
+            if ($matches) { throw "$name was enabled" }
+          }
+          if (Test-Path 'backtests/v1/latest-TW.json') { throw 'forbidden backtest pointer exists' }
