@@ -8,7 +8,7 @@ permissions:
   contents: write
 
 jobs:
-  harden-official-contracts:
+  green-official-hardening:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -19,37 +19,120 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-      - name: Replay fixed guarded patch
+      - name: Apply guarded GREEN implementation
         shell: bash
         run: |
-          test "$(git rev-parse HEAD)" = "1fdb3fa23f8eb63958cc8fdba43ce134dadc2c04"
-          git fetch origin 2d4dd0dedeee980e3399a10d3850ef1e400fe881
+          test "$(git rev-parse HEAD)" = "ad5e7283b16e312283583eaf9aa7b8a8d6b285e9"
           python - <<'PY'
-          import subprocess
-          import textwrap
+          from pathlib import Path
 
-          previous = subprocess.check_output(
-              [
-                  "git", "show",
-                  "2d4dd0dedeee980e3399a10d3850ef1e400fe881:.github/workflows/tw-official-bulk-ci.yml",
-              ],
-              text=True,
+          path = Path('stock_papi/integrations/market_data/tw_official_historical.py')
+          text = path.read_text(encoding='utf-8')
+
+          replacements = {
+              'SOURCE_SCHEMA_VERSION = "tw-official-historical-v1"':
+              'SOURCE_SCHEMA_VERSION = "tw-official-historical-v2"',
+              'PARSER_VERSION = "tw-official-historical-parser-v1"':
+              'PARSER_VERSION = "tw-official-historical-parser-v2"',
+              '        lambda names, candidate: len(names) == 16 and names[:2] == ["代號", "名稱"] and "股票" in str(candidate.get("title") or ""),':
+              '        lambda names, candidate: tuple(names) == TWSE_MARGIN_FIELDS and "股票" in str(candidate.get("title") or ""),',
+              '        lambda names, candidate: len(names) == 20 and names[:2] == ["代號", "名稱"] and "融資融券餘額" in str(candidate.get("title") or ""),':
+              '        lambda names, candidate: tuple(names) == TPEX_MARGIN_FIELDS and "融資融券餘額" in str(candidate.get("title") or ""),',
+          }
+          for old, new in replacements.items():
+              if text.count(old) != 1:
+                  raise SystemExit(f'marker count is {text.count(old)}: {old}')
+              text = text.replace(old, new, 1)
+
+          marker = 'PARSER_VERSION = "tw-official-historical-parser-v2"\n'
+          constants = '''PARSER_VERSION = "tw-official-historical-parser-v2"
+          TWSE_MARGIN_FIELDS = (
+              "代號", "名稱", "買進", "賣出", "現金償還", "前日餘額", "今日餘額",
+              "次一營業日限額", "買進", "賣出", "現券償還", "前日餘額", "今日餘額",
+              "次一營業日限額", "資券互抵", "註記",
           )
-          block = previous.split("python - <<'PY'\n", 1)[1].split("\n          PY", 1)[0]
-          script = textwrap.dedent(block).replace(
-              "'''.replace('          ', ''), encoding='utf-8')",
-              "''', encoding='utf-8')",
+          TPEX_MARGIN_FIELDS = (
+              "代號", "名稱", "前資餘額(張)", "資買", "資賣", "現償", "資餘額",
+              "資屬證金", "資使用率(%)", "資限額", "前券餘額(張)", "券賣", "券買",
+              "券償", "券餘額", "券屬證金", "券使用率(%)", "券限額",
+              "資券相抵(張)", "備註",
           )
-          exec(compile(script, "official-hardening-patch", "exec"), {})
+          '''
+          if text.count(marker) != 1:
+              raise SystemExit('constant marker is not unique')
+          text = text.replace(marker, constants, 1)
+
+          coverage_old = '\n'.join([
+              '        minimum = minimum_for_source(source_id, definition)',
+              '        symbol_count = _coverage(definition.dataset, rows, int(minimum))',
+              '        results[source_id] = OfficialSourceResult(',
+          ])
+          coverage_new = '\n'.join([
+              '        minimum = minimum_for_source(source_id, definition)',
+              '        try:',
+              '            symbol_count = _coverage(definition.dataset, rows, int(minimum))',
+              '        except ValueError as exc:',
+              '            raise OfficialSourceFailure(',
+              '                source_id,',
+              '                "schema_validation",',
+              '                safe_message=str(exc),',
+              '            ) from None',
+              '        results[source_id] = OfficialSourceResult(',
+          ])
+          if text.count(coverage_old) != 1:
+              raise SystemExit('cache-hit coverage marker is not unique')
+          text = text.replace(coverage_old, coverage_new, 1)
+
+          merge_marker = '\n'.join([
+              '    price: dict[str, dict[str, Any]] = {}',
+              '    institutional: dict[str, list[dict[str, Any]]] = {}',
+              '    margin: dict[str, dict[str, Any]] = {}',
+          ])
+          identity = '''    price_symbols_by_market = {
+              market: {
+                  str(row.get("stock_id"))
+                  for result in results.values()
+                  if result.market == market and result.dataset == "price"
+                  for row in result.rows
+                  if row.get("stock_id")
+              }
+              for market in ("TWSE", "TPEx")
+          }
+          for source_id, result in results.items():
+              if result.dataset == "price":
+                  continue
+              source_symbols = {
+                  str(row.get("stock_id"))
+                  for row in result.rows
+                  if row.get("stock_id")
+              }
+              minimum_overlap = minimum_for_source(
+                  source_id,
+                  HISTORICAL_SOURCE_DEFINITIONS[source_id],
+              )
+              if len(source_symbols & price_symbols_by_market[result.market]) < int(
+                  minimum_overlap
+              ):
+                  raise OfficialSourceFailure(
+                      source_id,
+                      "cross_source_identity",
+                      safe_message="official source overlap is below minimum",
+                  )
+
+          ''' + merge_marker
+          if text.count(merge_marker) != 1:
+              raise SystemExit('merge marker is not unique')
+          text = text.replace(merge_marker, identity, 1)
+          path.write_text(text, encoding='utf-8')
           PY
           git diff --check
-      - name: Run hardening tests
+      - name: Run GREEN focused tests
         run: python -m unittest tests.test_tw_official_historical tests.test_tw_official_hardening -v
       - name: Commit and push
         shell: bash
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add stock_papi/integrations/market_data/tw_official_historical.py tests/test_tw_official_hardening.py
+          git add stock_papi/integrations/market_data/tw_official_historical.py
           git commit -m 'fix(data): harden official margin and identity contracts'
           git push origin HEAD:assistant/tw-official-bulk-source
