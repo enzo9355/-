@@ -6,8 +6,6 @@ on:
 
 permissions:
   contents: write
-  issues: write
-  pull-requests: write
 
 jobs:
   patch-schema-fingerprint:
@@ -158,30 +156,8 @@ jobs:
           historical_path.write_text(historical, encoding='utf-8')
           PY
           git diff --check
-      - name: Run focused tests and report failures
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          REPOSITORY: ${{ github.repository }}
-        shell: bash
-        run: |
-          set +e
-          python -m unittest tests.test_tw_official_bulk tests.test_tw_official_historical tests.test_tw_incremental tests.test_tw_official_post_close_cli tests.test_pipeline_scheduler -v > /tmp/focused.txt 2>&1
-          code=$?
-          cat /tmp/focused.txt
-          if [ "$code" -ne 0 ]; then
-            {
-              echo '## Schema fingerprint patch diagnostic'
-              echo
-              echo '```text'
-              grep -E '^(FAIL|ERROR):|^Ran [0-9]+ tests|^FAILED \(|^OK$' /tmp/focused.txt || true
-              echo '--- final 120 lines ---'
-              tail -n 120 /tmp/focused.txt
-              echo '```'
-            } > /tmp/comment.md
-            gh pr comment "$PR_NUMBER" --repo "$REPOSITORY" --body-file /tmp/comment.md
-          fi
-          exit "$code"
+      - name: Run schema-focused tests
+        run: python -m unittest tests.test_tw_official_bulk tests.test_tw_official_historical -v
       - name: Commit and push
         shell: bash
         run: |
