@@ -36,6 +36,12 @@ PARSER_VERSION = "tw-official-historical-parser-v1"
 DEFAULT_TIMEOUT_SECONDS = 30
 DEFAULT_RETRY_ATTEMPTS = 2
 MAX_CATCHUP_SESSIONS = 10
+DEFAULT_MINIMUM_SOURCE_SYMBOLS = MappingProxyType({
+    "twse_institutional": 500,
+    "twse_margin": 400,
+    "tpex_institutional": 300,
+    "tpex_margin": 300,
+})
 
 
 @dataclass(frozen=True)
@@ -339,7 +345,7 @@ def build_historical_daily_snapshot(
     retry_attempts: int = DEFAULT_RETRY_ATTEMPTS,
     sleep_fn: Callable[[float], None] = time.sleep,
     minimum_price_symbols: Mapping[str, int] | None = None,
-    minimum_chip_symbols: int = 1,
+    minimum_chip_symbols: int | None = None,
 ) -> OfficialDailySnapshot:
     if not isinstance(target_date, _datetime.date) or isinstance(target_date, _datetime.datetime):
         raise TypeError("target_date must be a date")
@@ -348,6 +354,25 @@ def build_historical_daily_snapshot(
         session = requests.Session()
     checked_at = now or _datetime.datetime.now(_datetime.timezone.utc)
     minimum_price_symbols = dict(minimum_price_symbols or {"TWSE": 500, "TPEx": 500})
+    if (
+        minimum_chip_symbols is not None
+        and (
+            isinstance(minimum_chip_symbols, bool)
+            or not isinstance(minimum_chip_symbols, int)
+            or minimum_chip_symbols < 1
+        )
+    ):
+        raise ValueError("minimum chip symbol count is invalid")
+
+    def minimum_for_source(
+        source_id: str,
+        definition: OfficialSourceDefinition,
+    ) -> int:
+        if definition.dataset == "price":
+            return int(minimum_price_symbols.get(definition.market, 1))
+        if minimum_chip_symbols is not None:
+            return minimum_chip_symbols
+        return int(DEFAULT_MINIMUM_SOURCE_SYMBOLS[source_id])
     results: dict[str, OfficialSourceResult] = {}
     request_count = 0
     cold_sources = 0
@@ -370,7 +395,7 @@ def build_historical_daily_snapshot(
             request_count += attempts
             try:
                 rows = HISTORICAL_PARSERS[source_id](payload, target_date)
-                minimum = minimum_price_symbols.get(definition.market, 1) if definition.dataset == "price" else minimum_chip_symbols
+                minimum = minimum_for_source(source_id, definition)
                 symbol_count = _coverage(definition.dataset, rows, int(minimum))
             except (KeyError, TypeError, ValueError) as exc:
                 raise OfficialSourceFailure(source_id, "schema_validation", safe_message=str(exc)) from None
@@ -390,7 +415,7 @@ def build_historical_daily_snapshot(
             rows = cached.rows
             response_size = cached.compressed_size
             cache_hit = True
-        minimum = minimum_price_symbols.get(definition.market, 1) if definition.dataset == "price" else minimum_chip_symbols
+        minimum = minimum_for_source(source_id, definition)
         symbol_count = _coverage(definition.dataset, rows, int(minimum))
         results[source_id] = OfficialSourceResult(
             source_id=source_id,

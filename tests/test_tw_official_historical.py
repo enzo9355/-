@@ -4,7 +4,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from stock_papi.integrations.market_data.tw_official_bulk import TPEX_INSTITUTIONAL_FIELDS
+from stock_papi.integrations.market_data.tw_official_bulk import (
+    OfficialSourceFailure,
+    TPEX_INSTITUTIONAL_FIELDS,
+)
 from stock_papi.integrations.market_data.tw_official_historical import (
     HISTORICAL_SOURCE_DEFINITIONS,
     MAX_CATCHUP_SESSIONS,
@@ -204,6 +207,18 @@ class HistoricalSeriesTests(unittest.TestCase):
             self.assertEqual(warm.calls, [])
             self.assertEqual(second.request_count, 0)
             self.assertEqual(second.manifest_sha256, series.manifest_sha256)
+
+    def test_default_chip_coverage_rejects_truncated_source(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaises(OfficialSourceFailure) as context:
+                build_historical_daily_snapshot(
+                    Path(temporary),
+                    TARGET,
+                    session=Session(),
+                    minimum_price_symbols={"TWSE": 2, "TPEx": 2},
+                )
+        self.assertEqual(context.exception.source_id, "twse_institutional")
+        self.assertEqual(context.exception.category, "schema_validation")
 
     def test_series_rejects_more_than_bounded_catchup(self):
         start = datetime.date(2026, 7, 1)
