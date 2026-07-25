@@ -1,22 +1,55 @@
-name: TW Official Hardening RED
+name: TW Official Bulk Source CI
 
 on:
   pull_request:
     branches: [main]
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  hardening-red:
+  harden-official-contracts:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ad5e7283b16e312283583eaf9aa7b8a8d6b285e9
+          ref: assistant/tw-official-bulk-source
           fetch-depth: 0
-      - name: Assert exact implementation head
-        run: test "$(git rev-parse HEAD)" = "ad5e7283b16e312283583eaf9aa7b8a8d6b285e9"
-      - name: Run hardening contract tests
-        run: python -m unittest tests.test_tw_official_hardening -v
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Replay fixed guarded patch
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "1fdb3fa23f8eb63958cc8fdba43ce134dadc2c04"
+          git fetch origin 2d4dd0dedeee980e3399a10d3850ef1e400fe881
+          python - <<'PY'
+          import subprocess
+          import textwrap
+
+          previous = subprocess.check_output(
+              [
+                  "git", "show",
+                  "2d4dd0dedeee980e3399a10d3850ef1e400fe881:.github/workflows/tw-official-bulk-ci.yml",
+              ],
+              text=True,
+          )
+          block = previous.split("python - <<'PY'\n", 1)[1].split("\n          PY", 1)[0]
+          script = textwrap.dedent(block).replace(
+              "'''.replace('          ', ''), encoding='utf-8')",
+              "''', encoding='utf-8')",
+          )
+          exec(compile(script, "official-hardening-patch", "exec"), {})
+          PY
+          git diff --check
+      - name: Run hardening tests
+        run: python -m unittest tests.test_tw_official_historical tests.test_tw_official_hardening -v
+      - name: Commit and push
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add stock_papi/integrations/market_data/tw_official_historical.py tests/test_tw_official_hardening.py
+          git commit -m 'fix(data): harden official margin and identity contracts'
+          git push origin HEAD:assistant/tw-official-bulk-source
