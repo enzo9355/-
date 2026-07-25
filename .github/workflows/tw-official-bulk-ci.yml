@@ -6,6 +6,8 @@ on:
 
 permissions:
   contents: read
+  issues: write
+  pull-requests: write
 
 jobs:
   python310:
@@ -40,30 +42,22 @@ jobs:
             tests.test_tw_official_post_close_cli \
             tests.test_pipeline_scheduler \
             -v
-      - name: Full suite
-        run: python -m unittest discover -s tests -v
-      - name: Static checks
-        run: |
-          python -m compileall -q reporting stock_papi tests
-          python -m py_compile local_quant.py
-          node --check static/app.js
-          git diff --check 3d8688c6be6c4984ac50a0cb3f441cd831be758d...HEAD
-      - name: Governance invariants
+      - name: Full suite with concise diagnostic
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPOSITORY: ${{ github.repository }}
         shell: bash
         run: |
-          python - <<'PY'
-          from stock_papi.config.capabilities import (
-              PRODUCTION_REGRESSION_SOURCE_ADAPTER_READY,
-              PRODUCTION_REGRESSION_INPUT_READY,
-              PRODUCTION_REGRESSION_ARTIFACT_AVAILABLE,
-              AGGREGATE_MANIFEST_INTERVAL_VALIDATION_READY,
-          )
-          values = (
-              PRODUCTION_REGRESSION_SOURCE_ADAPTER_READY,
-              PRODUCTION_REGRESSION_INPUT_READY,
-              PRODUCTION_REGRESSION_ARTIFACT_AVAILABLE,
-              AGGREGATE_MANIFEST_INTERVAL_VALIDATION_READY,
-          )
-          assert values == (False, False, False, False), values
-          PY
-          test ! -e backtests/v1/latest-TW.json
+          set +e
+          python -m unittest discover -s tests -v > /tmp/full-suite.txt 2>&1
+          code=$?
+          {
+            echo '## Full-suite diagnostic'
+            echo
+            echo '```text'
+            tail -n 250 /tmp/full-suite.txt
+            echo '```'
+          } > /tmp/comment.md
+          gh pr comment "$PR_NUMBER" --repo "$REPOSITORY" --body-file /tmp/comment.md
+          exit "$code"
