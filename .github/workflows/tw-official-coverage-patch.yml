@@ -1,0 +1,137 @@
+name: TW Official Coverage Patch
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  patch-coverage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: assistant/tw-official-bulk-source
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Apply guarded coverage patch
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "d62b557d6f7e9c99a6ac73735d0a0e320b7408d5"
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('stock_papi/integrations/market_data/tw_official_historical.py')
+          text = path.read_text(encoding='utf-8')
+
+          marker = 'MAX_CATCHUP_SESSIONS = 10\n'
+          replacement = '''MAX_CATCHUP_SESSIONS = 10
+          DEFAULT_MINIMUM_SOURCE_SYMBOLS = MappingProxyType({
+              "twse_institutional": 500,
+              "twse_margin": 400,
+              "tpex_institutional": 300,
+              "tpex_margin": 300,
+          })
+          '''
+          if text.count(marker) != 1:
+              raise SystemExit('coverage constant marker count is not one')
+          text = text.replace(marker, replacement, 1)
+
+          signature = '    minimum_chip_symbols: int = 1,\n'
+          if text.count(signature) != 1:
+              raise SystemExit('chip signature marker count is not one')
+          text = text.replace(
+              signature,
+              '    minimum_chip_symbols: int | None = None,\n',
+              1,
+          )
+
+          setup_marker = '    minimum_price_symbols = dict(minimum_price_symbols or {"TWSE": 500, "TPEx": 500})\n'
+          setup = '''    minimum_price_symbols = dict(minimum_price_symbols or {"TWSE": 500, "TPEx": 500})
+              if (
+                  minimum_chip_symbols is not None
+                  and (
+                      isinstance(minimum_chip_symbols, bool)
+                      or not isinstance(minimum_chip_symbols, int)
+                      or minimum_chip_symbols < 1
+                  )
+              ):
+                  raise ValueError("minimum chip symbol count is invalid")
+
+              def minimum_for_source(
+                  source_id: str,
+                  definition: OfficialSourceDefinition,
+              ) -> int:
+                  if definition.dataset == "price":
+                      return int(minimum_price_symbols.get(definition.market, 1))
+                  if minimum_chip_symbols is not None:
+                      return minimum_chip_symbols
+                  return int(DEFAULT_MINIMUM_SOURCE_SYMBOLS[source_id])
+          '''
+          if text.count(setup_marker) != 1:
+              raise SystemExit('coverage setup marker count is not one')
+          text = text.replace(setup_marker, setup, 1)
+
+          inner = '                minimum = minimum_price_symbols.get(definition.market, 1) if definition.dataset == "price" else minimum_chip_symbols\n'
+          outer = '        minimum = minimum_price_symbols.get(definition.market, 1) if definition.dataset == "price" else minimum_chip_symbols\n'
+          if text.count(inner) != 1 or text.count(outer) != 1:
+              raise SystemExit('coverage call-site markers are not unique')
+          text = text.replace(
+              inner,
+              '                minimum = minimum_for_source(source_id, definition)\n',
+              1,
+          )
+          text = text.replace(
+              outer,
+              '        minimum = minimum_for_source(source_id, definition)\n',
+              1,
+          )
+          path.write_text(text, encoding='utf-8')
+
+          test_path = Path('tests/test_tw_official_historical.py')
+          tests = test_path.read_text(encoding='utf-8')
+          import_line = 'from stock_papi.integrations.market_data.tw_official_bulk import TPEX_INSTITUTIONAL_FIELDS\n'
+          replacement_import = '''from stock_papi.integrations.market_data.tw_official_bulk import (
+              OfficialSourceFailure,
+              TPEX_INSTITUTIONAL_FIELDS,
+          )
+          '''
+          if tests.count(import_line) != 1:
+              raise SystemExit('coverage import marker count is not one')
+          tests = tests.replace(import_line, replacement_import, 1)
+
+          test_marker = '    def test_series_rejects_more_than_bounded_catchup(self):\n'
+          test_case = '''    def test_default_chip_coverage_rejects_truncated_source(self):
+                  with tempfile.TemporaryDirectory() as temporary:
+                      with self.assertRaises(OfficialSourceFailure) as context:
+                          build_historical_daily_snapshot(
+                              Path(temporary),
+                              TARGET,
+                              session=Session(),
+                              minimum_price_symbols={"TWSE": 2, "TPEx": 2},
+                          )
+                  self.assertEqual(context.exception.source_id, "twse_institutional")
+                  self.assertEqual(context.exception.category, "schema_validation")
+
+          '''
+          if tests.count(test_marker) != 1:
+              raise SystemExit('coverage test marker count is not one')
+          tests = tests.replace(test_marker, test_case + test_marker, 1)
+          test_path.write_text(tests, encoding='utf-8')
+          PY
+          git diff --check
+      - name: Run coverage tests
+        run: python -m unittest tests.test_tw_official_historical -v
+      - name: Commit and push
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add stock_papi/integrations/market_data/tw_official_historical.py tests/test_tw_official_historical.py
+          git commit -m 'fix(data): require meaningful official chip coverage'
+          git push origin HEAD:assistant/tw-official-bulk-source
