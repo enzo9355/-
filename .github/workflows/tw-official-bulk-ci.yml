@@ -1,0 +1,69 @@
+name: TW Official Bulk Source CI
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  python310:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Checkout exact implementation head
+        uses: actions/checkout@v4
+        with:
+          ref: b5f8e073baafa53876c9a1e275ab5db0a8def171
+          fetch-depth: 0
+      - name: Assert exact head
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "b5f8e073baafa53876c9a1e275ab5db0a8def171"
+          test ! -e .github/workflows/tw-official-bulk-ci.yml
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: pip
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install -r requirements-report.txt
+          python -m pip check
+      - name: Focused official-source tests
+        run: |
+          python -m unittest \
+            tests.test_tw_official_bulk \
+            tests.test_tw_incremental \
+            tests.test_tw_official_post_close_cli \
+            tests.test_pipeline_scheduler \
+            -v
+      - name: Full suite
+        run: python -m unittest discover -s tests -v
+      - name: Static checks
+        run: |
+          python -m compileall -q reporting stock_papi tests
+          python -m py_compile local_quant.py
+          node --check static/app.js
+          git diff --check 3d8688c6be6c4984ac50a0cb3f441cd831be758d...HEAD
+      - name: Governance invariants
+        shell: bash
+        run: |
+          python - <<'PY'
+          from stock_papi.config.capabilities import (
+              PRODUCTION_REGRESSION_SOURCE_ADAPTER_READY,
+              PRODUCTION_REGRESSION_INPUT_READY,
+              PRODUCTION_REGRESSION_ARTIFACT_AVAILABLE,
+              AGGREGATE_MANIFEST_INTERVAL_VALIDATION_READY,
+          )
+          values = (
+              PRODUCTION_REGRESSION_SOURCE_ADAPTER_READY,
+              PRODUCTION_REGRESSION_INPUT_READY,
+              PRODUCTION_REGRESSION_ARTIFACT_AVAILABLE,
+              AGGREGATE_MANIFEST_INTERVAL_VALIDATION_READY,
+          )
+          assert values == (False, False, False, False), values
+          PY
+          test ! -e backtests/v1/latest-TW.json
