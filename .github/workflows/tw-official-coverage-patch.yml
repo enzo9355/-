@@ -79,13 +79,15 @@ jobs:
 
           inner = '                minimum = minimum_price_symbols.get(definition.market, 1) if definition.dataset == "price" else minimum_chip_symbols\n'
           outer = '        minimum = minimum_price_symbols.get(definition.market, 1) if definition.dataset == "price" else minimum_chip_symbols\n'
-          if text.count(inner) != 1 or text.count(outer) != 1:
-              raise SystemExit('coverage call-site markers are not unique')
+          if text.count(inner) != 1:
+              raise SystemExit('inner coverage call-site marker is not unique')
           text = text.replace(
               inner,
               '                minimum = minimum_for_source(source_id, definition)\n',
               1,
           )
+          if text.count(outer) != 1:
+              raise SystemExit('outer coverage call-site marker is not unique')
           text = text.replace(
               outer,
               '        minimum = minimum_for_source(source_id, definition)\n',
