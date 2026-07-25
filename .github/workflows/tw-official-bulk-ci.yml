@@ -5,237 +5,53 @@ on:
     branches: [main]
 
 permissions:
-  contents: write
+  contents: read
+  issues: write
+  pull-requests: write
 
 jobs:
-  harden-official-contracts:
+  diagnose-hardening-markers:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 8
     steps:
       - uses: actions/checkout@v4
         with:
           ref: assistant/tw-official-bulk-source
           fetch-depth: 0
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
-      - name: Apply guarded margin, cache, and identity hardening
+      - name: Report hardening marker counts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPOSITORY: ${{ github.repository }}
         shell: bash
         run: |
-          test "$(git rev-parse HEAD)" = "290923a410fb6e0b0f7ed01e3bdfc63d98c37a76"
-          python - <<'PY'
+          python3 - <<'PY' > /tmp/markers.md
           from pathlib import Path
+          import subprocess
 
-          source_path = Path('stock_papi/integrations/market_data/tw_official_historical.py')
-          source = source_path.read_text(encoding='utf-8')
-
-          one_line_replacements = {
-              'SOURCE_SCHEMA_VERSION = "tw-official-historical-v1"':
-              'SOURCE_SCHEMA_VERSION = "tw-official-historical-v2"',
-              'PARSER_VERSION = "tw-official-historical-parser-v1"':
-              'PARSER_VERSION = "tw-official-historical-parser-v2"',
-              '        lambda names, candidate: len(names) == 16 and names[:2] == ["代號", "名稱"] and "股票" in str(candidate.get("title") or ""),':
-              '        lambda names, candidate: tuple(names) == TWSE_MARGIN_FIELDS and "股票" in str(candidate.get("title") or ""),',
-              '        lambda names, candidate: len(names) == 20 and names[:2] == ["代號", "名稱"] and "融資融券餘額" in str(candidate.get("title") or ""),':
-              '        lambda names, candidate: tuple(names) == TPEX_MARGIN_FIELDS and "融資融券餘額" in str(candidate.get("title") or ""),',
+          source = Path('stock_papi/integrations/market_data/tw_official_historical.py').read_text(encoding='utf-8')
+          tests = Path('tests/test_tw_official_historical.py').read_text(encoding='utf-8')
+          source_markers = {
+              'schema_v1': 'SOURCE_SCHEMA_VERSION = "tw-official-historical-v1"',
+              'parser_v1': 'PARSER_VERSION = "tw-official-historical-parser-v1"',
+              'twse_predicate': '        lambda names, candidate: len(names) == 16 and names[:2] == ["代號", "名稱"] and "股票" in str(candidate.get("title") or ""),',
+              'tpex_predicate': '        lambda names, candidate: len(names) == 20 and names[:2] == ["代號", "名稱"] and "融資融券餘額" in str(candidate.get("title") or ""),',
+              'coverage_block': '\n'.join(['        minimum = minimum_for_source(source_id, definition)','        symbol_count = _coverage(definition.dataset, rows, int(minimum))','        results[source_id] = OfficialSourceResult(']),
+              'merge_block': '\n'.join(['    price: dict[str, dict[str, Any]] = {}','    institutional: dict[str, list[dict[str, Any]]] = {}','    margin: dict[str, dict[str, Any]] = {}']),
           }
-          for old, new in one_line_replacements.items():
-              if source.count(old) != 1:
-                  raise SystemExit(f'source marker count is {source.count(old)}: {old}')
-              source = source.replace(old, new, 1)
-
-          constants_marker = 'PARSER_VERSION = "tw-official-historical-parser-v2"\n'
-          constants = '''PARSER_VERSION = "tw-official-historical-parser-v2"
-          TWSE_MARGIN_FIELDS = (
-              "代號", "名稱", "買進", "賣出", "現金償還", "前日餘額", "今日餘額",
-              "次一營業日限額", "買進", "賣出", "現券償還", "前日餘額", "今日餘額",
-              "次一營業日限額", "資券互抵", "註記",
-          )
-          TPEX_MARGIN_FIELDS = (
-              "代號", "名稱", "前資餘額(張)", "資買", "資賣", "現償", "資餘額",
-              "資屬證金", "資使用率(%)", "資限額", "前券餘額(張)", "券賣", "券買",
-              "券償", "券餘額", "券屬證金", "券使用率(%)", "券限額",
-              "資券相抵(張)", "備註",
-          )
-          '''
-          if source.count(constants_marker) != 1:
-              raise SystemExit('constant insertion marker is not unique')
-          source = source.replace(constants_marker, constants, 1)
-
-          coverage_old = '\n'.join([
-              '        minimum = minimum_for_source(source_id, definition)',
-              '        symbol_count = _coverage(definition.dataset, rows, int(minimum))',
-              '        results[source_id] = OfficialSourceResult(',
-          ])
-          coverage_new = '\n'.join([
-              '        minimum = minimum_for_source(source_id, definition)',
-              '        try:',
-              '            symbol_count = _coverage(definition.dataset, rows, int(minimum))',
-              '        except ValueError as exc:',
-              '            raise OfficialSourceFailure(',
-              '                source_id,',
-              '                "schema_validation",',
-              '                safe_message=str(exc),',
-              '            ) from None',
-              '        results[source_id] = OfficialSourceResult(',
-          ])
-          if source.count(coverage_old) != 1:
-              raise SystemExit('final coverage block is not unique')
-          source = source.replace(coverage_old, coverage_new, 1)
-
-          merge_marker = '\n'.join([
-              '    price: dict[str, dict[str, Any]] = {}',
-              '    institutional: dict[str, list[dict[str, Any]]] = {}',
-              '    margin: dict[str, dict[str, Any]] = {}',
-          ])
-          identity_block = '''    price_symbols_by_market = {
-              market: {
-                  str(row.get("stock_id"))
-                  for result in results.values()
-                  if result.market == market and result.dataset == "price"
-                  for row in result.rows
-                  if row.get("stock_id")
-              }
-              for market in ("TWSE", "TPEx")
+          test_markers = {
+              'import': '\n'.join(['    MAX_CATCHUP_SESSIONS,','    build_historical_daily_snapshot,']),
+              'twse_fixture': '    twse_margin_fields = [',
+              'tpex_fixture': '    tpex_margin_fields = [',
+              'parser_test': '    def test_every_nested_report_requires_exact_target_date(self):\n',
+              'series_class': 'class HistoricalSeriesTests(unittest.TestCase):\n',
+              'series_test': '    def test_default_chip_coverage_rejects_truncated_source(self):\n',
           }
-          for source_id, result in results.items():
-              if result.dataset == "price":
-                  continue
-              source_symbols = {
-                  str(row.get("stock_id"))
-                  for row in result.rows
-                  if row.get("stock_id")
-              }
-              minimum_overlap = minimum_for_source(
-                  source_id,
-                  HISTORICAL_SOURCE_DEFINITIONS[source_id],
-              )
-              overlap = source_symbols & price_symbols_by_market[result.market]
-              if len(overlap) < int(minimum_overlap):
-                  raise OfficialSourceFailure(
-                      source_id,
-                      "cross_source_identity",
-                      safe_message="official source overlap is below minimum",
-                  )
-
-          ''' + merge_marker
-          if source.count(merge_marker) != 1:
-              raise SystemExit('merge marker is not unique')
-          source = source.replace(merge_marker, identity_block, 1)
-          source_path.write_text(source, encoding='utf-8')
-
-          test_path = Path('tests/test_tw_official_historical.py')
-          tests = test_path.read_text(encoding='utf-8')
-          import_old = '\n'.join([
-              '    MAX_CATCHUP_SESSIONS,',
-              '    build_historical_daily_snapshot,',
-          ])
-          import_new = '\n'.join([
-              '    MAX_CATCHUP_SESSIONS,',
-              '    SOURCE_SCHEMA_VERSION,',
-              '    TPEX_MARGIN_FIELDS,',
-              '    TWSE_MARGIN_FIELDS,',
-              '    build_historical_daily_snapshot,',
-          ])
-          if tests.count(import_old) != 1:
-              raise SystemExit('test import marker is not unique')
-          tests = tests.replace(import_old, import_new, 1)
-
-          twse_fixture_start = tests.index('    twse_margin_fields = [')
-          twse_fixture_end = tests.index('    tpex_price_fields = [', twse_fixture_start)
-          tests = tests[:twse_fixture_start] + '    twse_margin_fields = list(TWSE_MARGIN_FIELDS)\n' + tests[twse_fixture_end:]
-          tpex_fixture_start = tests.index('    tpex_margin_fields = [')
-          tpex_fixture_end = tests.index('    tpex_institutional = ', tpex_fixture_start)
-          tests = tests[:tpex_fixture_start] + '    tpex_margin_fields = list(TPEX_MARGIN_FIELDS)\n' + tests[tpex_fixture_end:]
-
-          parser_marker = '    def test_every_nested_report_requires_exact_target_date(self):\n'
-          parser_tests = '''    def test_margin_reports_require_exact_field_fingerprints(self):
-              data = payloads(TARGET)
-              fields = data["twse_margin"]["tables"][1]["fields"]
-              fields[6], fields[12] = fields[12], fields[6]
-              with self.assertRaisesRegex(ValueError, "target table"):
-                  parse_twse_margin_report(data["twse_margin"], TARGET)
-
-              data = payloads(TARGET)
-              fields = data["tpex_margin"]["tables"][0]["fields"]
-              fields[6], fields[14] = fields[14], fields[6]
-              with self.assertRaisesRegex(ValueError, "target table"):
-                  parse_tpex_margin_report(data["tpex_margin"], TARGET)
-
-          '''
-          if tests.count(parser_marker) != 1:
-              raise SystemExit('parser test marker is not unique')
-          tests = tests.replace(parser_marker, parser_tests + parser_marker, 1)
-
-          class_marker = 'class HistoricalSeriesTests(unittest.TestCase):\n'
-          helper = '''class MutatingInstitutionalSession(Session):
-              def get(self, url, *, params, **kwargs):
-                  response = super().get(url, params=params, **kwargs)
-                  source_id = self.calls[-1][0]
-                  if source_id != "tpex_institutional":
-                      return response
-                  document = json.loads(response.content.decode("utf-8"))
-                  document["tables"][0]["data"][0][0] = "9999"
-                  return Response(document)
-
-
-          class HistoricalSeriesTests(unittest.TestCase):
-          '''
-          if tests.count(class_marker) != 1:
-              raise SystemExit('series class marker is not unique')
-          tests = tests.replace(class_marker, helper, 1)
-
-          series_marker = '    def test_default_chip_coverage_rejects_truncated_source(self):\n'
-          series_tests = '''    def test_schema_version_and_cache_hit_failures_are_structured(self):
-              with tempfile.TemporaryDirectory() as temporary:
-                  root = Path(temporary)
-                  first = build_historical_daily_snapshot(
-                      root,
-                      TARGET,
-                      session=Session(),
-                      minimum_price_symbols={"TWSE": 2, "TPEx": 2},
-                      minimum_chip_symbols=1,
-                  )
-                  self.assertEqual(first.source_schema_version, SOURCE_SCHEMA_VERSION)
-                  warm = Session()
-                  with self.assertRaises(OfficialSourceFailure) as context:
-                      build_historical_daily_snapshot(
-                          root,
-                          TARGET,
-                          session=warm,
-                          minimum_price_symbols={"TWSE": 2, "TPEx": 2},
-                      )
-                  self.assertEqual(warm.calls, [])
-                  self.assertEqual(context.exception.source_id, "twse_institutional")
-                  self.assertEqual(context.exception.category, "schema_validation")
-
-              def test_chip_sources_must_overlap_same_market_prices(self):
-                  with tempfile.TemporaryDirectory() as temporary:
-                      with self.assertRaises(OfficialSourceFailure) as context:
-                          build_historical_daily_snapshot(
-                              Path(temporary),
-                              TARGET,
-                              session=MutatingInstitutionalSession(),
-                              minimum_price_symbols={"TWSE": 2, "TPEx": 2},
-                              minimum_chip_symbols=1,
-                          )
-                  self.assertEqual(context.exception.source_id, "tpex_institutional")
-                  self.assertEqual(context.exception.category, "cross_source_identity")
-
-          '''
-          if tests.count(series_marker) != 1:
-              raise SystemExit('series test marker is not unique')
-          tests = tests.replace(series_marker, series_tests + series_marker, 1)
-          test_path.write_text(tests, encoding='utf-8')
+          print('## Final hardening marker diagnostic')
+          print(f'- head: `{subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()}`')
+          for name, marker in source_markers.items():
+              print(f'- source {name}: `{source.count(marker)}`')
+          for name, marker in test_markers.items():
+              print(f'- test {name}: `{tests.count(marker)}`')
           PY
-          git diff --check
-      - name: Run focused hardening tests
-        run: python -m unittest tests.test_tw_official_historical -v
-      - name: Commit and push
-        shell: bash
-        run: |
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add stock_papi/integrations/market_data/tw_official_historical.py tests/test_tw_official_historical.py
-          git commit -m 'fix(data): harden official margin and identity contracts'
-          git push origin HEAD:assistant/tw-official-bulk-source
+          gh pr comment "$PR_NUMBER" --repo "$REPOSITORY" --body-file /tmp/markers.md
