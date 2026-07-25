@@ -1,4 +1,4 @@
-"""Serve existing TW history plus one verified official target-day row."""
+"""Serve validated TW history plus a bounded series of official trading-day rows."""
 
 from __future__ import annotations
 
@@ -9,13 +9,14 @@ import io
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from types import MappingProxyType
+from typing import Any, Iterable, Mapping
 
 from stock_papi.integrations.market_data.tw_official_bulk import OfficialDailySnapshot
 
 MAX_COMPRESSED_BYTES = 5 * 1024 * 1024
 MAX_UNCOMPRESSED_BYTES = 20 * 1024 * 1024
-SOURCE_MODE = "tw_official_bulk_v1"
+SOURCE_MODE = "tw_official_bulk_v2"
 
 
 class IncrementalHistoryError(RuntimeError):
@@ -27,10 +28,117 @@ class IncrementalArtifact:
     symbol: str
     document: dict[str, Any]
     compressed_sha256: str
+    latest_date: _datetime.date
+
+
+@dataclass(frozen=True)
+class ArtifactDateAudit:
+    latest_by_symbol: Mapping[str, _datetime.date]
+    unavailable_symbols: tuple[str, ...]
+    earliest_latest_date: _datetime.date | None
+    latest_date_counts: Mapping[str, int]
+
+    @property
+    def available_count(self) -> int:
+        return len(self.latest_by_symbol)
+
+
+def _parse_date(value: Any) -> _datetime.date:
+    try:
+        return _datetime.datetime.fromisoformat(str(value).replace("Z", "+00:00")).date()
+    except ValueError:
+        try:
+            return _datetime.date.fromisoformat(str(value)[:10])
+        except ValueError as exc:
+            raise IncrementalHistoryError("historical row date is invalid") from exc
+
+
+def _artifact_path(root: Path, symbol: str) -> Path:
+    return Path(root) / "artifacts" / "stocks" / "TW" / f"{symbol}.json.gz"
+
+
+def load_incremental_artifact(root: Path, symbol: str) -> IncrementalArtifact:
+    path = _artifact_path(Path(root), symbol)
+    try:
+        compressed_size = path.stat().st_size
+        if not 0 < compressed_size <= MAX_COMPRESSED_BYTES:
+            raise ValueError("compressed artifact size")
+        compressed = path.read_bytes()
+        if len(compressed) != compressed_size:
+            raise ValueError("compressed artifact changed")
+        with gzip.GzipFile(fileobj=io.BytesIO(compressed), mode="rb") as stream:
+            decoded = stream.read(MAX_UNCOMPRESSED_BYTES + 1)
+        if not decoded or len(decoded) > MAX_UNCOMPRESSED_BYTES:
+            raise ValueError("artifact expansion")
+        document = json.loads(decoded.decode("utf-8"))
+        if (
+            not isinstance(document, dict)
+            or document.get("schema_version") != 1
+            or document.get("market") != "TW"
+            or document.get("symbol") != symbol
+            or not isinstance(document.get("daily"), list)
+            or not document["daily"]
+        ):
+            raise ValueError("artifact schema")
+        declared_as_of = _datetime.date.fromisoformat(str(document["as_of"]))
+        dates = []
+        for row in document["daily"]:
+            if not isinstance(row, dict):
+                raise ValueError("artifact row")
+            dates.append(_parse_date(row.get("Date")))
+        if len(dates) != len(set(dates)):
+            raise ValueError("artifact duplicate dates")
+        latest_date = max(dates)
+        if declared_as_of != latest_date:
+            raise ValueError("artifact as_of mismatch")
+    except (KeyError, OSError, TypeError, UnicodeError, ValueError, gzip.BadGzipFile) as exc:
+        raise IncrementalHistoryError(
+            f"historical artifact is unavailable for TW:{symbol}"
+        ) from exc
+    return IncrementalArtifact(
+        symbol=symbol,
+        document=document,
+        compressed_sha256=hashlib.sha256(compressed).hexdigest(),
+        latest_date=latest_date,
+    )
+
+
+def audit_artifact_dates(
+    root: Path,
+    symbols: Iterable[str],
+    *,
+    target_date: _datetime.date,
+) -> ArtifactDateAudit:
+    if not isinstance(target_date, _datetime.date) or isinstance(target_date, _datetime.datetime):
+        raise TypeError("target_date must be a date")
+    latest_by_symbol: dict[str, _datetime.date] = {}
+    unavailable = []
+    counts: dict[str, int] = {}
+    for raw_symbol in symbols:
+        symbol = str(raw_symbol)
+        try:
+            artifact = load_incremental_artifact(root, symbol)
+            if artifact.latest_date > target_date:
+                raise IncrementalHistoryError(
+                    f"historical artifact is newer than target for TW:{symbol}"
+                )
+        except IncrementalHistoryError:
+            unavailable.append(symbol)
+            continue
+        latest_by_symbol[symbol] = artifact.latest_date
+        key = artifact.latest_date.isoformat()
+        counts[key] = counts.get(key, 0) + 1
+    earliest = min(latest_by_symbol.values()) if latest_by_symbol else None
+    return ArtifactDateAudit(
+        latest_by_symbol=MappingProxyType(latest_by_symbol),
+        unavailable_symbols=tuple(sorted(set(unavailable))),
+        earliest_latest_date=earliest,
+        latest_date_counts=MappingProxyType(dict(sorted(counts.items()))),
+    )
 
 
 class OfficialCompatFetcher:
-    """FinMind-compatible callable backed only by local history and official bulk data."""
+    """FinMind-compatible callable backed only by local history and official snapshots."""
 
     SUPPORTED_DATASETS = {
         "TaiwanStockPrice",
@@ -38,59 +146,48 @@ class OfficialCompatFetcher:
         "TaiwanStockMarginPurchaseShortSale",
     }
 
-    def __init__(self, root: Path, snapshot: OfficialDailySnapshot, *, pd: Any):
+    def __init__(self, root: Path, source: Any, *, pd: Any):
         self.root = Path(root)
-        self.snapshot = snapshot
+        if isinstance(source, OfficialDailySnapshot):
+            self.snapshots = MappingProxyType({source.target_date: source})
+            self.target_date = source.target_date
+            self.series_manifest_sha256 = source.manifest_sha256
+            self.source_schema_version = source.source_schema_version
+            self.source_mode = getattr(source, "source_mode", SOURCE_MODE)
+        else:
+            snapshots = getattr(source, "snapshots", None)
+            if not isinstance(snapshots, Mapping) or not snapshots:
+                raise TypeError("official snapshot series is invalid")
+            normalized = dict(sorted(snapshots.items()))
+            if any(
+                not isinstance(value, _datetime.date)
+                or isinstance(value, _datetime.datetime)
+                or not isinstance(snapshot, OfficialDailySnapshot)
+                or snapshot.target_date != value
+                for value, snapshot in normalized.items()
+            ):
+                raise TypeError("official snapshot series is invalid")
+            self.snapshots = MappingProxyType(normalized)
+            self.target_date = max(normalized)
+            if getattr(source, "target_date", None) != self.target_date:
+                raise TypeError("official snapshot series target is invalid")
+            self.series_manifest_sha256 = str(getattr(source, "manifest_sha256", ""))
+            self.source_schema_version = str(getattr(source, "source_schema_version", ""))
+            self.source_mode = str(getattr(source, "source_mode", SOURCE_MODE))
+        if len(self.series_manifest_sha256) != 64:
+            raise ValueError("official series manifest is invalid")
         self.pd = pd
         self._artifacts: dict[str, IncrementalArtifact] = {}
 
-    def _artifact_path(self, symbol: str) -> Path:
-        return self.root / "artifacts" / "stocks" / "TW" / f"{symbol}.json.gz"
-
     def _load_artifact(self, symbol: str) -> IncrementalArtifact:
-        if symbol in self._artifacts:
-            return self._artifacts[symbol]
-        path = self._artifact_path(symbol)
-        try:
-            compressed_size = path.stat().st_size
-            if not 0 < compressed_size <= MAX_COMPRESSED_BYTES:
-                raise ValueError("compressed artifact size")
-            compressed = path.read_bytes()
-            if len(compressed) != compressed_size:
-                raise ValueError("compressed artifact changed")
-            with gzip.GzipFile(fileobj=io.BytesIO(compressed), mode="rb") as stream:
-                decoded = stream.read(MAX_UNCOMPRESSED_BYTES + 1)
-            if not decoded or len(decoded) > MAX_UNCOMPRESSED_BYTES:
-                raise ValueError("artifact expansion")
-            document = json.loads(decoded.decode("utf-8"))
-            if (
-                not isinstance(document, dict)
-                or document.get("schema_version") != 1
-                or document.get("market") != "TW"
-                or document.get("symbol") != symbol
-                or not isinstance(document.get("daily"), list)
-            ):
-                raise ValueError("artifact schema")
-            _datetime.date.fromisoformat(str(document["as_of"]))
-        except (KeyError, OSError, TypeError, UnicodeError, ValueError, gzip.BadGzipFile) as exc:
-            raise IncrementalHistoryError(f"historical artifact is unavailable for TW:{symbol}") from exc
-        artifact = IncrementalArtifact(
-            symbol=symbol,
-            document=document,
-            compressed_sha256=hashlib.sha256(compressed).hexdigest(),
-        )
-        self._artifacts[symbol] = artifact
+        if symbol not in self._artifacts:
+            self._artifacts[symbol] = load_incremental_artifact(self.root, symbol)
+        artifact = self._artifacts[symbol]
+        if artifact.latest_date > self.target_date:
+            raise IncrementalHistoryError(
+                f"historical artifact is newer than target for TW:{symbol}"
+            )
         return artifact
-
-    @staticmethod
-    def _date(value: Any) -> _datetime.date:
-        try:
-            return _datetime.datetime.fromisoformat(str(value).replace("Z", "+00:00")).date()
-        except ValueError:
-            try:
-                return _datetime.date.fromisoformat(str(value)[:10])
-            except ValueError as exc:
-                raise IncrementalHistoryError("historical row date is invalid") from exc
 
     @staticmethod
     def _number(row: dict[str, Any], name: str, default: float | None = None) -> float:
@@ -105,91 +202,120 @@ class OfficialCompatFetcher:
             raise IncrementalHistoryError(f"historical field is invalid: {name}")
         return number
 
-    def _daily_rows(self, symbol: str, start: _datetime.date, end: _datetime.date) -> list[dict[str, Any]]:
+    def _daily_rows(
+        self,
+        symbol: str,
+        start: _datetime.date,
+        end: _datetime.date,
+    ) -> list[dict[str, Any]]:
         artifact = self._load_artifact(symbol)
         rows = []
-        seen = set()
-        latest = None
         for item in artifact.document["daily"]:
-            if not isinstance(item, dict):
-                raise IncrementalHistoryError(f"historical row is invalid for TW:{symbol}")
-            row_date = self._date(item.get("Date"))
-            if row_date in seen:
-                raise IncrementalHistoryError(f"historical dates are duplicated for TW:{symbol}")
-            seen.add(row_date)
-            latest = row_date if latest is None or row_date > latest else latest
+            row_date = _parse_date(item.get("Date"))
             if start <= row_date <= end:
                 rows.append(dict(item, _date=row_date))
-        if latest is None:
-            raise IncrementalHistoryError(f"historical rows are empty for TW:{symbol}")
-        if latest > self.snapshot.target_date:
-            raise IncrementalHistoryError(f"historical artifact is newer than target for TW:{symbol}")
         return sorted(rows, key=lambda row: row["_date"])
 
-    def _official_price(self, symbol: str) -> dict[str, Any] | None:
-        row = self.snapshot.price_by_symbol.get(symbol)
-        return dict(row) if row is not None else None
-
-    def _official_institutional(self, symbol: str) -> list[dict[str, Any]]:
-        return [dict(row) for row in self.snapshot.institutional_by_symbol.get(symbol, ())]
-
-    def _official_margin(self, symbol: str) -> dict[str, Any] | None:
-        row = self.snapshot.margin_by_symbol.get(symbol)
-        return dict(row) if row is not None else None
-
     @staticmethod
-    def _net_rows(date_text: str, symbol: str, total: float, foreign: float) -> list[dict[str, Any]]:
+    def _net_rows(
+        date_text: str,
+        symbol: str,
+        total: float,
+        foreign: float,
+    ) -> list[dict[str, Any]]:
         remainder = total - foreign
-        result = []
-        for name, net in (("Foreign", foreign), ("InvestmentTrust", remainder), ("Dealer", 0.0)):
-            result.append({
+        return [
+            {
                 "date": date_text,
                 "stock_id": symbol,
                 "name": name,
                 "buy": max(net, 0.0),
                 "sell": max(-net, 0.0),
-            })
-        return result
+            }
+            for name, net in (
+                ("Foreign", foreign),
+                ("InvestmentTrust", remainder),
+                ("Dealer", 0.0),
+            )
+        ]
 
-    def _verify_existing_target(self, symbol: str, row: dict[str, Any]) -> None:
-        official_price = self._official_price(symbol)
+    @staticmethod
+    def _official_price(snapshot: OfficialDailySnapshot, symbol: str) -> dict[str, Any] | None:
+        row = snapshot.price_by_symbol.get(symbol)
+        return dict(row) if row is not None else None
+
+    @staticmethod
+    def _official_institutional(snapshot: OfficialDailySnapshot, symbol: str) -> list[dict[str, Any]]:
+        return [dict(row) for row in snapshot.institutional_by_symbol.get(symbol, ())]
+
+    @staticmethod
+    def _official_margin(snapshot: OfficialDailySnapshot, symbol: str) -> dict[str, Any] | None:
+        row = snapshot.margin_by_symbol.get(symbol)
+        return dict(row) if row is not None else None
+
+    def _verify_existing(
+        self,
+        symbol: str,
+        historical: dict[str, Any],
+        snapshot: OfficialDailySnapshot,
+    ) -> None:
+        official_price = self._official_price(snapshot, symbol)
         if official_price is None:
-            raise IncrementalHistoryError(f"official target price is missing for TW:{symbol}")
-        comparisons = {
-            "Open": official_price["open"],
-            "High": official_price["max"],
-            "Low": official_price["min"],
-            "Close": official_price["close"],
-            "Volume": official_price["Trading_Volume"],
-        }
-        for historical_name, official_value in comparisons.items():
-            if self._number(row, historical_name) != float(official_value):
-                raise IncrementalHistoryError(f"existing target row conflicts with official source for TW:{symbol}")
-        institutional = self._official_institutional(symbol)
-        expected_total = sum(float(item["buy"]) - float(item["sell"]) for item in institutional)
-        expected_foreign = sum(float(item["buy"]) - float(item["sell"]) for item in institutional if item["name"] == "Foreign")
+            return
+        for historical_name, official_name in (
+            ("Open", "open"),
+            ("High", "max"),
+            ("Low", "min"),
+            ("Close", "close"),
+            ("Volume", "Trading_Volume"),
+        ):
+            if self._number(historical, historical_name) != float(official_price[official_name]):
+                raise IncrementalHistoryError(
+                    f"existing row conflicts with official source for TW:{symbol}"
+                )
+        institutional = self._official_institutional(snapshot, symbol)
         if institutional:
-            if self._number(row, "InstitutionalNet", 0.0) != expected_total or self._number(row, "ForeignNet", 0.0) != expected_foreign:
-                raise IncrementalHistoryError(f"existing target chip row conflicts with official source for TW:{symbol}")
-        margin = self._official_margin(symbol)
-        if margin is not None:
+            expected_total = sum(
+                float(item["buy"]) - float(item["sell"])
+                for item in institutional
+            )
+            expected_foreign = sum(
+                float(item["buy"]) - float(item["sell"])
+                for item in institutional
+                if item["name"] == "Foreign"
+            )
             if (
-                self._number(row, "MarginBalance", 0.0) != float(margin["MarginPurchaseTodayBalance"])
-                or self._number(row, "ShortBalance", 0.0) != float(margin["ShortSaleTodayBalance"])
+                self._number(historical, "InstitutionalNet", 0.0) != expected_total
+                or self._number(historical, "ForeignNet", 0.0) != expected_foreign
             ):
-                raise IncrementalHistoryError(f"existing target margin row conflicts with official source for TW:{symbol}")
+                raise IncrementalHistoryError(
+                    f"existing chip row conflicts with official source for TW:{symbol}"
+                )
+        margin = self._official_margin(snapshot, symbol)
+        if margin is not None and (
+            self._number(historical, "MarginBalance", 0.0)
+            != float(margin["MarginPurchaseTodayBalance"])
+            or self._number(historical, "ShortBalance", 0.0)
+            != float(margin["ShortSaleTodayBalance"])
+        ):
+            raise IncrementalHistoryError(
+                f"existing margin row conflicts with official source for TW:{symbol}"
+            )
 
     def __call__(self, dataset: str, code: str, start_date: str, end_date: str):
         if dataset not in self.SUPPORTED_DATASETS:
-            raise IncrementalHistoryError(f"unsupported official compatibility dataset: {dataset}")
+            raise IncrementalHistoryError(
+                f"unsupported official compatibility dataset: {dataset}"
+            )
         symbol = str(code)
         start = _datetime.date.fromisoformat(start_date)
         end = _datetime.date.fromisoformat(end_date)
-        target = self.snapshot.target_date
         historical = self._daily_rows(symbol, start, end)
-        target_history = next((row for row in historical if row["_date"] == target), None)
-        if target_history is not None:
-            self._verify_existing_target(symbol, target_history)
+        historical_by_date = {row["_date"]: row for row in historical}
+        for value, snapshot in self.snapshots.items():
+            existing = historical_by_date.get(value)
+            if existing is not None:
+                self._verify_existing(symbol, existing, snapshot)
 
         rows: list[dict[str, Any]] = []
         if dataset == "TaiwanStockPrice":
@@ -203,46 +329,84 @@ class OfficialCompatFetcher:
                     "close": self._number(row, "Close"),
                     "Trading_Volume": self._number(row, "Volume", 0.0),
                 })
-            if start <= target <= end and target_history is None:
-                official = self._official_price(symbol)
-                if official is None:
-                    raise IncrementalHistoryError(f"official target price is missing for TW:{symbol}")
-                rows.append(official)
+            for value, snapshot in self.snapshots.items():
+                if start <= value <= end and value not in historical_by_date:
+                    official = self._official_price(snapshot, symbol)
+                    if official is not None:
+                        rows.append(official)
         elif dataset == "TaiwanStockInstitutionalInvestorsBuySell":
             for row in historical:
-                rows.extend(self._net_rows(
-                    row["_date"].isoformat(), symbol,
-                    self._number(row, "InstitutionalNet", 0.0),
-                    self._number(row, "ForeignNet", 0.0),
-                ))
-            if start <= target <= end and target_history is None:
-                rows.extend(self._official_institutional(symbol))
+                rows.extend(
+                    self._net_rows(
+                        row["_date"].isoformat(),
+                        symbol,
+                        self._number(row, "InstitutionalNet", 0.0),
+                        self._number(row, "ForeignNet", 0.0),
+                    )
+                )
+            for value, snapshot in self.snapshots.items():
+                if (
+                    start <= value <= end
+                    and value not in historical_by_date
+                    and self._official_price(snapshot, symbol) is not None
+                ):
+                    rows.extend(self._official_institutional(snapshot, symbol))
         else:
             for row in historical:
                 rows.append({
                     "date": row["_date"].isoformat(),
                     "stock_id": symbol,
-                    "MarginPurchaseTodayBalance": self._number(row, "MarginBalance", 0.0),
-                    "ShortSaleTodayBalance": self._number(row, "ShortBalance", 0.0),
+                    "MarginPurchaseTodayBalance": self._number(
+                        row, "MarginBalance", 0.0
+                    ),
+                    "ShortSaleTodayBalance": self._number(
+                        row, "ShortBalance", 0.0
+                    ),
                 })
-            if start <= target <= end and target_history is None:
-                official = self._official_margin(symbol)
-                if official is not None:
-                    rows.append(official)
+            for value, snapshot in self.snapshots.items():
+                if (
+                    start <= value <= end
+                    and value not in historical_by_date
+                    and self._official_price(snapshot, symbol) is not None
+                ):
+                    official = self._official_margin(snapshot, symbol)
+                    if official is not None:
+                        rows.append(official)
         if not rows:
             return self.pd.DataFrame()
-        return self.pd.DataFrame(rows).sort_values("date").reset_index(drop=True)
+        return (
+            self.pd.DataFrame(rows)
+            .sort_values("date")
+            .drop_duplicates(
+                subset=[
+                    column
+                    for column in ("date", "stock_id", "name")
+                    if column in rows[0]
+                ],
+                keep="last",
+            )
+            .reset_index(drop=True)
+        )
 
     def lineage_for(self, symbol: str) -> dict[str, Any]:
         artifact = self._load_artifact(symbol)
         return {
-            "source_mode": SOURCE_MODE,
-            "source_schema_version": self.snapshot.source_schema_version,
-            "target_market_date": self.snapshot.target_date.isoformat(),
-            "official_manifest_sha256": self.snapshot.manifest_sha256,
+            "source_mode": self.source_mode,
+            "source_schema_version": self.source_schema_version,
+            "target_market_date": self.target_date.isoformat(),
+            "official_series_manifest_sha256": self.series_manifest_sha256,
+            "official_snapshot_dates": [value.isoformat() for value in self.snapshots],
+            "official_snapshot_manifests": [
+                {
+                    "date": value.isoformat(),
+                    "manifest_sha256": snapshot.manifest_sha256,
+                }
+                for value, snapshot in self.snapshots.items()
+            ],
             "historical_artifact_sha256": artifact.compressed_sha256,
+            "historical_as_of": artifact.latest_date.isoformat(),
             "symbol": symbol,
-            "official_price_available": symbol in self.snapshot.price_by_symbol,
-            "official_institutional_available": symbol in self.snapshot.institutional_by_symbol,
-            "official_margin_available": symbol in self.snapshot.margin_by_symbol,
+            "official_target_price_available": (
+                symbol in self.snapshots[self.target_date].price_by_symbol
+            ),
         }
