@@ -22,11 +22,8 @@ $CalendarExitCode = $LASTEXITCODE
 if ($CalendarExitCode -eq 3) { Write-Output "$TargetDate is not a TW trading session; skipped"; exit 0 }
 if ($CalendarExitCode -ne 0) { exit $CalendarExitCode }
 $QuantArguments = @(
-    (Join-Path $RepoRoot 'local_quant.py'),
+    '-m', 'stock_papi.batch.tw_official_post_close_cli',
     '--root', $DataRoot,
-    '--post-close',
-    '--observation-only',
-    '--market', 'TW',
     '--target-market-date', $TargetDate,
     '--limit', '5000',
     '--delay', '0.5'
