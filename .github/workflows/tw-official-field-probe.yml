@@ -10,101 +10,71 @@ permissions:
   pull-requests: write
 
 jobs:
-  probe:
+  probe-margin-fields:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Probe official row counts and TPEx institutional fields
+      - name: Probe exact margin table field sequences
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           REPOSITORY: ${{ github.repository }}
         shell: bash
         run: |
-          python3 - <<'PY' > /tmp/probe.md
+          python3 - <<'PY' > /tmp/margin-fields.md
           import json
-          import re
           import urllib.parse
           import urllib.request
 
-          target_ymd = '20260724'
-          target_roc = '115/07/24'
-          sources = {
-              'twse_price': (
-                  'https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX',
-                  {'date': target_ymd, 'type': 'ALLBUT0999', 'response': 'json'},
-              ),
-              'twse_institutional': (
-                  'https://www.twse.com.tw/rwd/zh/fund/T86',
-                  {'date': target_ymd, 'selectType': 'ALLBUT0999', 'response': 'json'},
-              ),
+          requests = {
               'twse_margin': (
                   'https://www.twse.com.tw/rwd/zh/marginTrading/MI_MARGN',
-                  {'date': target_ymd, 'selectType': 'STOCK', 'response': 'json'},
-              ),
-              'tpex_price': (
-                  'https://www.tpex.org.tw/web/stock/aftertrading/daily_close_quotes/stk_quote_result.php',
-                  {'l': 'zh-tw', 'o': 'json', 'd': target_roc, 's': '0,asc,0'},
-              ),
-              'tpex_institutional': (
-                  'https://www.tpex.org.tw/web/stock/3insti/daily_trade/3itrade_hedge_result.php',
-                  {'l': 'zh-tw', 'o': 'json', 'se': 'EW', 't': 'D', 'd': target_roc, 's': '0,asc'},
+                  {'date': '20260724', 'selectType': 'STOCK', 'response': 'json'},
               ),
               'tpex_margin': (
                   'https://www.tpex.org.tw/web/stock/margin_trading/margin_balance/margin_bal_result.php',
-                  {'l': 'zh-tw', 'o': 'json', 'd': target_roc, 's': '0,asc'},
+                  {'l': 'zh-tw', 'o': 'json', 'd': '115/07/24', 's': '0,asc'},
               ),
           }
 
           def fetch(base, params):
               url = base + '?' + urllib.parse.urlencode(params)
-              request = urllib.request.Request(url, headers={'User-Agent': 'ABSORB-contract-probe/1.0'})
-              with urllib.request.urlopen(request, timeout=60) as response:
-                  body = response.read(30 * 1024 * 1024 + 1)
-                  if len(body) > 30 * 1024 * 1024:
+              req = urllib.request.Request(url, headers={'User-Agent': 'ABSORB-contract-probe/1.0'})
+              with urllib.request.urlopen(req, timeout=60) as response:
+                  body = response.read(20 * 1024 * 1024 + 1)
+                  if len(body) > 20 * 1024 * 1024:
                       raise RuntimeError('response too large')
-                  return response.status, len(body), json.loads(body.decode('utf-8-sig'))
+                  return response.status, json.loads(body.decode('utf-8-sig'))
 
-          def clean(value):
-              return re.sub(r'<[^>]*>', '', str(value or '')).replace('&nbsp;', ' ').strip()
-
-          print('## Official source coverage metadata')
-          for source_id, (base, params) in sources.items():
-              status, size, payload = fetch(base, params)
-              tables = payload.get('tables') if isinstance(payload, dict) else None
-              selected = None
-              if source_id == 'twse_price':
-                  selected = next((t for t in tables or [] if isinstance(t, dict) and (t.get('fields') or [])[:2] == ['證券代號', '證券名稱']), None)
-              elif source_id == 'twse_margin':
-                  selected = next((t for t in tables or [] if isinstance(t, dict) and len(t.get('fields') or []) == 16 and (t.get('fields') or [])[:2] == ['代號', '名稱']), None)
-              elif source_id == 'tpex_price':
-                  selected = next((t for t in tables or [] if isinstance(t, dict) and (t.get('fields') or [])[:2] == ['代號', '名稱'] and '上櫃股票行情' in str(t.get('title') or '')), None)
-              elif source_id == 'tpex_institutional':
-                  selected = next((t for t in tables or [] if isinstance(t, dict) and '三大法人買賣明細資訊' in str(t.get('title') or '')), None)
-              elif source_id == 'tpex_margin':
-                  selected = next((t for t in tables or [] if isinstance(t, dict) and (t.get('fields') or [])[:2] == ['代號', '名稱'] and '融資融券餘額' in str(t.get('title') or '')), None)
-
-              if source_id == 'twse_institutional':
-                  fields = payload.get('fields') or []
-                  rows = payload.get('data') or []
-                  date_value = payload.get('date')
+          print('## Exact official margin field sequences')
+          for source_id, (base, params) in requests.items():
+              status, payload = fetch(base, params)
+              tables = payload.get('tables') or []
+              if source_id == 'twse_margin':
+                  matches = [
+                      table for table in tables
+                      if isinstance(table, dict)
+                      and len(table.get('fields') or []) == 16
+                      and (table.get('fields') or [])[:2] == ['代號', '名稱']
+                      and '股票' in str(table.get('title') or '')
+                  ]
               else:
-                  fields = selected.get('fields') if isinstance(selected, dict) else []
-                  rows = selected.get('data') if isinstance(selected, dict) else []
-                  date_value = (selected or {}).get('date') or (payload.get('date') if isinstance(payload, dict) else None)
-              symbols = {
-                  clean(row[0]) for row in rows
-                  if isinstance(row, list) and row and re.fullmatch(r'\d{4,6}', clean(row[0]))
-              }
+                  matches = [
+                      table for table in tables
+                      if isinstance(table, dict)
+                      and len(table.get('fields') or []) == 20
+                      and (table.get('fields') or [])[:2] == ['代號', '名稱']
+                      and '融資融券餘額' in str(table.get('title') or '')
+                  ]
+              if len(matches) != 1:
+                  raise RuntimeError(f'{source_id} target table count={len(matches)}')
+              table = matches[0]
               print(f'\n### {source_id}')
               print(f'- HTTP: `{status}`')
-              print(f'- bytes: `{size}`')
-              print(f'- date: `{date_value}`')
-              print(f'- rows: `{len(rows)}`')
-              print(f'- numeric symbols: `{len(symbols)}`')
-              print(f'- field count: `{len(fields)}`')
-              if source_id == 'tpex_institutional':
-                  print('- title: `' + str((selected or {}).get('title')) + '`')
-                  print('- fields JSON: `' + json.dumps(fields, ensure_ascii=True, separators=(',', ':')) + '`')
+              print(f'- response date: `{payload.get("date")}`')
+              print(f'- table date: `{table.get("date")}`')
+              print(f'- title: `{table.get("title")}`')
+              print(f'- columnNum: `{table.get("columnNum")}`')
+              print('- fields JSON: `' + json.dumps(table.get('fields'), ensure_ascii=True, separators=(',', ':')) + '`')
           PY
-          gh pr comment "$PR_NUMBER" --repo "$REPOSITORY" --body-file /tmp/probe.md
+          gh pr comment "$PR_NUMBER" --repo "$REPOSITORY" --body-file /tmp/margin-fields.md
