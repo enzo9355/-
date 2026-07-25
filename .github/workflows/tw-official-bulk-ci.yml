@@ -1,4 +1,4 @@
-name: TW Official Bulk Source CI
+name: TW Official Guard Diagnostic
 
 on:
   pull_request:
@@ -6,52 +6,17 @@ on:
 
 permissions:
   contents: read
-  issues: write
-  pull-requests: write
 
 jobs:
-  diagnose-hardening-markers:
+  guard-tests:
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: assistant/tw-official-bulk-source
+          ref: 3948aa638a068f1494972244e7012a69380b5672
           fetch-depth: 0
-      - name: Report hardening marker counts
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          REPOSITORY: ${{ github.repository }}
-        shell: bash
-        run: |
-          python3 - <<'PY' > /tmp/markers.md
-          from pathlib import Path
-          import subprocess
-
-          source = Path('stock_papi/integrations/market_data/tw_official_historical.py').read_text(encoding='utf-8')
-          tests = Path('tests/test_tw_official_historical.py').read_text(encoding='utf-8')
-          source_markers = {
-              'schema_v1': 'SOURCE_SCHEMA_VERSION = "tw-official-historical-v1"',
-              'parser_v1': 'PARSER_VERSION = "tw-official-historical-parser-v1"',
-              'twse_predicate': '        lambda names, candidate: len(names) == 16 and names[:2] == ["代號", "名稱"] and "股票" in str(candidate.get("title") or ""),',
-              'tpex_predicate': '        lambda names, candidate: len(names) == 20 and names[:2] == ["代號", "名稱"] and "融資融券餘額" in str(candidate.get("title") or ""),',
-              'coverage_block': '\n'.join(['        minimum = minimum_for_source(source_id, definition)','        symbol_count = _coverage(definition.dataset, rows, int(minimum))','        results[source_id] = OfficialSourceResult(']),
-              'merge_block': '\n'.join(['    price: dict[str, dict[str, Any]] = {}','    institutional: dict[str, list[dict[str, Any]]] = {}','    margin: dict[str, dict[str, Any]] = {}']),
-          }
-          test_markers = {
-              'import': '\n'.join(['    MAX_CATCHUP_SESSIONS,','    build_historical_daily_snapshot,']),
-              'twse_fixture': '    twse_margin_fields = [',
-              'tpex_fixture': '    tpex_margin_fields = [',
-              'parser_test': '    def test_every_nested_report_requires_exact_target_date(self):\n',
-              'series_class': 'class HistoricalSeriesTests(unittest.TestCase):\n',
-              'series_test': '    def test_default_chip_coverage_rejects_truncated_source(self):\n',
-          }
-          print('## Final hardening marker diagnostic')
-          print(f'- head: `{subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()}`')
-          for name, marker in source_markers.items():
-              print(f'- source {name}: `{source.count(marker)}`')
-          for name, marker in test_markers.items():
-              print(f'- test {name}: `{tests.count(marker)}`')
-          PY
-          gh pr comment "$PR_NUMBER" --repo "$REPOSITORY" --body-file /tmp/markers.md
+      - name: Assert exact head
+        run: test "$(git rev-parse HEAD)" = "3948aa638a068f1494972244e7012a69380b5672"
+      - name: Run guard tests
+        run: python -m unittest tests.test_tw_official_historical_guarded -v
