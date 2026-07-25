@@ -6,6 +6,7 @@ from pathlib import Path
 
 from stock_papi.integrations.market_data.tw_official_bulk import (
     OfficialSourceFailure,
+    TPEX_INSTITUTIONAL_FIELDS,
     normalize_market_date,
     normalize_symbol,
     parse_number,
@@ -49,8 +50,10 @@ def tpex_payload():
         "stat": "ok",
         "date": "20260724",
         "tables": [{
+            "title": "三大法人買賣明細資訊",
+            "columnNum": 25,
             "date": "115/07/24",
-            "fields": [f"f{index}" for index in range(24)],
+            "fields": list(TPEX_INSTITUTIONAL_FIELDS),
             "data": [["6488", "環球晶"] + [str(index) for index in range(2, 24)]],
         }],
     }
@@ -125,6 +128,19 @@ class TWOfficialInstitutionalParserTests(unittest.TestCase):
         dealer = next(row for row in rows if row["name"] == "Dealer")
         self.assertEqual((foreign["buy"], foreign["sell"]), (8.0, 9.0))
         self.assertEqual((dealer["buy"], dealer["sell"]), (20.0, 21.0))
+
+    def test_tpex_reordered_or_unlabelled_schema_fails_closed(self):
+        payload = tpex_payload()
+        payload["tables"][0]["fields"][2], payload["tables"][0]["fields"][3] = (
+            payload["tables"][0]["fields"][3],
+            payload["tables"][0]["fields"][2],
+        )
+        with self.assertRaisesRegex(ValueError, "schema fingerprint"):
+            parse_tpex_institutional(payload, TARGET)
+        payload = tpex_payload()
+        payload["tables"][0]["title"] = "unknown"
+        with self.assertRaisesRegex(ValueError, "schema fingerprint"):
+            parse_tpex_institutional(payload, TARGET)
 
     def test_date_mismatch_fails_closed(self):
         with self.assertRaises(ValueError):

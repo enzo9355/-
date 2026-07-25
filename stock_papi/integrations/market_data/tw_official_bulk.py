@@ -97,6 +97,17 @@ _EMPTY_MARKERS = {
     "暫停交易",
 }
 _SYMBOL_RE = re.compile(r"\d{4,6}")
+TPEX_INSTITUTIONAL_FIELDS = (
+    "代號", "名稱",
+    "買進股數", "賣出股數", "買賣超股數",
+    "買進股數", "賣出股數", "買賣超股數",
+    "買進股數", "賣出股數", "買賣超股數",
+    "買進股數", "賣出股數", "買賣超股數",
+    "買進股數", "賣出股數", "買賣超股數",
+    "買進股數", "賣出股數", "買賣超股數",
+    "買進股數", "賣出股數", "買賣超股數",
+    "三大法人買賣超股數合計",
+)
 
 
 def normalize_symbol(value: Any) -> str:
@@ -293,25 +304,30 @@ def _strip_html(value: Any) -> str:
 
 def _find_tpex_table_rows(
     payload: Mapping[str, Any],
-) -> tuple[list[Any], _datetime.date]:
+) -> tuple[Mapping[str, Any], _datetime.date]:
     actual_date = normalize_market_date(payload.get("date"))
     tables = payload.get("tables")
     if not isinstance(tables, list):
         raise ValueError("TPEx institutional tables are missing")
-    candidates: list[Any] = []
+    matches = []
     for table in tables:
         if not isinstance(table, dict):
             continue
         table_date = table.get("date")
         if table_date is not None and normalize_market_date(table_date) != actual_date:
             raise ValueError("TPEx institutional table date mismatch")
-        for key in ("data", "aaData", "rows"):
-            value = table.get(key)
-            if isinstance(value, list) and value:
-                candidates.extend(value)
-    if not candidates:
-        raise ValueError("TPEx institutional rows are missing")
-    return candidates, actual_date
+        if (
+            table.get("title") == "三大法人買賣明細資訊"
+            and table.get("columnNum") == 25
+            and tuple(str(item) for item in table.get("fields") or ())
+            == TPEX_INSTITUTIONAL_FIELDS
+            and isinstance(table.get("data"), list)
+            and table.get("data")
+        ):
+            matches.append(table)
+    if len(matches) != 1:
+        raise ValueError("TPEx institutional schema fingerprint is invalid")
+    return matches[0], actual_date
 
 
 def parse_tpex_institutional(
@@ -322,7 +338,8 @@ def parse_tpex_institutional(
         or str(payload.get("stat") or "OK").upper() not in {"OK", "0"}
     ):
         raise ValueError("TPEx institutional status is invalid")
-    data, actual_date = _find_tpex_table_rows(payload)
+    table, actual_date = _find_tpex_table_rows(payload)
+    data = table["data"]
     if actual_date != target_date:
         raise ValueError("TPEx institutional target date mismatch")
     rows = []
@@ -372,7 +389,10 @@ def parse_tpex_institutional(
                 float(parse_number(known(aliases["dealer_buy"]))),
                 float(parse_number(known(aliases["dealer_sell"]))),
             )
-        elif isinstance(source, list) and len(source) >= 24:
+        elif (
+            isinstance(source, list)
+            and len(source) == len(TPEX_INSTITUTIONAL_FIELDS)
+        ):
             try:
                 symbol = normalize_symbol(_strip_html(source[0]))
             except ValueError:

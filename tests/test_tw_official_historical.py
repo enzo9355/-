@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from stock_papi.integrations.market_data.tw_official_bulk import TPEX_INSTITUTIONAL_FIELDS
 from stock_papi.integrations.market_data.tw_official_historical import (
     HISTORICAL_SOURCE_DEFINITIONS,
     MAX_CATCHUP_SESSIONS,
@@ -107,7 +108,13 @@ def payloads(value):
         },
         "tpex_institutional": {
             "stat": "ok", "date": date_text,
-            "tables": [{"date": roc_text, "fields": [f"f{i}" for i in range(24)], "data": [tpex_institutional]}],
+            "tables": [{
+    "title": "三大法人買賣明細資訊",
+    "columnNum": 25,
+    "date": roc_text,
+    "fields": list(TPEX_INSTITUTIONAL_FIELDS),
+    "data": [tpex_institutional],
+}],
         },
         "tpex_margin": {
             "stat": "ok", "date": date_text,
