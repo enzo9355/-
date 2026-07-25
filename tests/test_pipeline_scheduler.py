@@ -66,13 +66,30 @@ class PipelineSchedulerTests(unittest.TestCase):
         post_close = (scripts / "run_tw_post_close_pipeline.ps1").read_text(
             encoding="utf-8"
         )
-        self.assertLess(post_close.index("calendar-check"), post_close.index("--post-close"))
+        self.assertLess(
+            post_close.index("calendar-check"),
+            post_close.index("stock_papi.batch.tw_official_post_close_cli"),
+        )
         self.assertIn("stock_papi.batch.observation_products_cli", post_close)
+        self.assertIn("stock_papi.batch.tw_official_post_close_cli", post_close)
         self.assertIn("[switch]$PublishObservation", post_close)
         self.assertIn("if (-not $PublishObservation) { exit 0 }", post_close)
-        self.assertIn("'--observation-only'", post_close)
+        self.assertNotIn("local_quant.py", post_close)
+        self.assertNotIn("'--observation-only'", post_close)
         self.assertNotIn("AllowDegradedBootstrap", post_close)
         self.assertIn("-RequireDashboard", post_close)
+        self.assertIn("$ParsedTargetDate.Year", post_close)
+        self.assertIn("$Year - 1", post_close)
+        self.assertIn("$Year + 1", post_close)
+        self.assertGreaterEqual(post_close.count("'--calendar-artifact'"), 2)
+        self.assertLess(
+            post_close.index("$CalendarArguments"),
+            post_close.index("$QuantArguments"),
+        )
+        self.assertLess(
+            post_close.index("$QuantArguments"),
+            post_close.index("$CandidateArguments"),
+        )
         pre_market = (scripts / "run_tw_pre_market_pipeline.ps1").read_text(
             encoding="utf-8"
         )
