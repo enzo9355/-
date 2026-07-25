@@ -17,12 +17,12 @@ jobs:
       - name: Checkout exact implementation head
         uses: actions/checkout@v4
         with:
-          ref: 79ffd2a254b8b981b20262f8c2413bf33fc64f75
+          ref: 286f91b0676de11f0a68dc19a668f8848e2e9579
           fetch-depth: 0
       - name: Assert exact head
         shell: bash
         run: |
-          test "$(git rev-parse HEAD)" = "79ffd2a254b8b981b20262f8c2413bf33fc64f75"
+          test "$(git rev-parse HEAD)" = "286f91b0676de11f0a68dc19a668f8848e2e9579"
           test ! -e .github/workflows/tw-official-bulk-ci.yml
       - uses: actions/setup-python@v5
         with:
