@@ -14,7 +14,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 8
     steps:
-      - name: Inspect nested TPEx institutional table
+      - name: Inspect nested TPEx institutional field names
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
@@ -34,29 +34,14 @@ jobs:
           request = urllib.request.Request(url, headers={"User-Agent": "ABSORB-contract-probe/1.0"})
           with urllib.request.urlopen(request, timeout=60) as response:
               payload = json.loads(response.read(15 * 1024 * 1024).decode("utf-8-sig"))
-          print("## TPEx institutional nested table contract")
+          tables = payload.get("tables") or []
+          table = tables[0] if tables else {}
+          fields = table.get("fields") or []
+          print("## TPEx institutional field names")
           print(f"- date: `{payload.get('date')}`")
-          tables = payload.get("tables")
-          print(f"- tables type: `{type(tables).__name__}`")
-          print(f"- table count: `{len(tables) if isinstance(tables, list) else 0}`")
-          if isinstance(tables, list) and tables:
-              table = tables[0]
-              print("- first table keys: `" + "`, `".join(sorted(table.keys())) + "`")
-              for key in ("title", "subtitle", "date", "columnNum"):
-                  if key in table and isinstance(table[key], (str, int, float, bool)):
-                      print(f"- table {key}: `{table[key]}`")
-              for key in ("fields", "columns", "headers", "data", "aaData"):
-                  value = table.get(key)
-                  if isinstance(value, list):
-                      print(f"- {key} length: `{len(value)}`")
-                      if value:
-                          first = value[0]
-                          print(f"- {key} first type: `{type(first).__name__}`")
-                          if isinstance(first, list):
-                              print(f"- {key} first row length: `{len(first)}`")
-                              print("- first row cell types: `" + "`, `".join(type(item).__name__ for item in first) + "`")
-                          elif isinstance(first, dict):
-                              print("- first row keys: `" + "`, `".join(sorted(first.keys())) + "`")
-              print("- first table compact shape: `" + json.dumps({k: type(v).__name__ for k, v in table.items()}, ensure_ascii=True, sort_keys=True) + "`")
+          print(f"- row count: `{len(table.get('data') or [])}`")
+          print("- fields:")
+          for index, field in enumerate(fields):
+              print(f"  - {index}: `{field}`")
           PY
           gh pr comment "$PR_NUMBER" --repo "$REPOSITORY" --body-file /tmp/probe.md
