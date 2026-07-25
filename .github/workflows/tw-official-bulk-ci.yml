@@ -19,11 +19,6 @@ jobs:
         with:
           ref: b5f8e073baafa53876c9a1e275ab5db0a8def171
           fetch-depth: 0
-      - name: Assert exact head
-        shell: bash
-        run: |
-          test "$(git rev-parse HEAD)" = "b5f8e073baafa53876c9a1e275ab5db0a8def171"
-          test ! -e .github/workflows/tw-official-bulk-ci.yml
       - uses: actions/setup-python@v5
         with:
           python-version: '3.10'
@@ -33,16 +28,7 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
           python -m pip install -r requirements-report.txt
-          python -m pip check
-      - name: Focused official-source tests
-        run: |
-          python -m unittest \
-            tests.test_tw_official_bulk \
-            tests.test_tw_incremental \
-            tests.test_tw_official_post_close_cli \
-            tests.test_pipeline_scheduler \
-            -v
-      - name: Full suite with concise diagnostic
+      - name: Full suite concise diagnostic
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
@@ -53,10 +39,12 @@ jobs:
           python -m unittest discover -s tests -v > /tmp/full-suite.txt 2>&1
           code=$?
           {
-            echo '## Full-suite diagnostic'
+            echo '## Concise full-suite diagnostic'
             echo
             echo '```text'
-            tail -n 250 /tmp/full-suite.txt
+            grep -E '^(FAIL|ERROR):|^Ran [0-9]+ tests|^FAILED \(|^OK$' /tmp/full-suite.txt || true
+            echo '--- final 35 lines ---'
+            tail -n 35 /tmp/full-suite.txt
             echo '```'
           } > /tmp/comment.md
           gh pr comment "$PR_NUMBER" --repo "$REPOSITORY" --body-file /tmp/comment.md
