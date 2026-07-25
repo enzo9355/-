@@ -1,4 +1,4 @@
-name: TW Official Guard Diagnostic
+name: TW Official Focused Diagnostic
 
 on:
   pull_request:
@@ -8,9 +8,9 @@ permissions:
   contents: read
 
 jobs:
-  guard-tests:
+  focused-contracts:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
         with:
@@ -18,5 +18,27 @@ jobs:
           fetch-depth: 0
       - name: Assert exact head
         run: test "$(git rev-parse HEAD)" = "3948aa638a068f1494972244e7012a69380b5672"
-      - name: Run guard tests
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-report.txt
+      - name: Install dependencies
+        run: |
+          python -m pip install -r requirements.txt
+          python -m pip install -r requirements-report.txt
+          python -m pip check
+      - name: Bulk contracts
+        run: python -m unittest tests.test_tw_official_bulk -v
+      - name: Historical contracts
+        run: python -m unittest tests.test_tw_official_historical -v
+      - name: Guard contracts
         run: python -m unittest tests.test_tw_official_historical_guarded -v
+      - name: Incremental contracts
+        run: python -m unittest tests.test_tw_incremental -v
+      - name: Post-close CLI contracts
+        run: python -m unittest tests.test_tw_official_post_close_cli -v
+      - name: Scheduler contracts
+        run: python -m unittest tests.test_pipeline_scheduler -v
