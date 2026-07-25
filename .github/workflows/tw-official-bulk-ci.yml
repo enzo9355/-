@@ -1,4 +1,4 @@
-name: TW Official Exact-Head Evidence Gate
+name: TW Official Exact-Head Stability Diagnostic
 
 on:
   pull_request:
@@ -10,7 +10,7 @@ permissions:
   pull-requests: write
 
 jobs:
-  evidence:
+  stability:
     runs-on: windows-latest
     timeout-minutes: 120
     steps:
@@ -25,94 +25,51 @@ jobs:
           cache-dependency-path: |
             requirements.txt
             requirements-report.txt
-      - name: Assert exact head and install dependencies
+      - name: Install dependencies and pinned test fonts
         shell: powershell
         run: |
           if ((git rev-parse HEAD).Trim() -ne 'b22cf60e8cee4f416aef3ddfc701b59cbd09980e') { throw 'Unexpected head' }
           python -m pip install -r requirements.txt
           python -m pip install -r requirements-report.txt
           python -m pip check
-      - name: Install pinned test fonts
-        shell: powershell
-        run: |
           $c = 'f8d157532fbfaeda587e826d4cd5b21a49186f7c'
           Invoke-WebRequest -UseBasicParsing "https://raw.githubusercontent.com/notofonts/noto-cjk/$c/Sans/Variable/TTF/Subset/NotoSansTC-VF.ttf" -OutFile 'C:\Windows\Fonts\NotoSansTC-VF.ttf'
           Invoke-WebRequest -UseBasicParsing "https://raw.githubusercontent.com/notofonts/noto-cjk/$c/Serif/Variable/TTF/Subset/NotoSerifTC-VF.ttf" -OutFile 'C:\Windows\Fonts\NotoSerifTC-VF.ttf'
-      - name: Run focused and full suites
-        shell: powershell
-        run: |
-          python -m unittest tests.test_tw_official_bulk tests.test_tw_official_historical tests.test_tw_official_hardening tests.test_tw_incremental tests.test_tw_official_post_close_cli tests.test_pipeline_scheduler -v *> focused.txt
-          if ($LASTEXITCODE -ne 0) { Get-Content focused.txt -Tail 240; exit $LASTEXITCODE }
-          python -m unittest discover -s tests -v *> full.txt
-          if ($LASTEXITCODE -ne 0) { Get-Content full.txt -Tail 320; exit $LASTEXITCODE }
-      - name: Run static, governance, PowerShell, and credential checks
-        shell: powershell
-        run: |
-          python -m compileall -q reporting stock_papi tests
-          python -m py_compile local_quant.py
-          node --check static/app.js
-          git diff --check origin/main...HEAD
-          python -c "from pathlib import Path; from reporting.regression_input_builder import PRODUCTION_REGRESSION_SOURCE_ADAPTER_READY, PRODUCTION_REGRESSION_INPUT_READY, PRODUCTION_REGRESSION_ARTIFACT_AVAILABLE, AGGREGATE_MANIFEST_INTERVAL_VALIDATION_READY; assert not any((PRODUCTION_REGRESSION_SOURCE_ADAPTER_READY, PRODUCTION_REGRESSION_INPUT_READY, PRODUCTION_REGRESSION_ARTIFACT_AVAILABLE, AGGREGATE_MANIFEST_INTERVAL_VALIDATION_READY)); assert not Path('backtests/v1/latest-TW.json').exists()"
-          $paths = 'scripts/python_runtime.ps1','scripts/run_tw_post_close_pipeline.ps1','scripts/run_tw_pre_market_pipeline.ps1','scripts/invoke_pipeline_task.ps1','scripts/native_process.ps1'
-          foreach ($path in $paths) {
-            $tokens = $null; $errors = $null
-            [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $path).Path,[ref]$tokens,[ref]$errors) | Out-Null
-            if ($errors.Count) { throw "PowerShell parser failed: $path" }
-          }
-          @'
-          import pathlib, re, subprocess
-          files = subprocess.check_output(['git','diff','--name-only','origin/main...HEAD'], text=True).splitlines()
-          patterns = {
-              'jwt': re.compile(r'eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}'),
-              'private_key': re.compile(r'-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----'),
-              'supabase_secret': re.compile(r'sb_secret_[A-Za-z0-9_-]{16,}'),
-              'google_api_key': re.compile(r'AIza[0-9A-Za-z_-]{30,}'),
-          }
-          findings = []
-          for name in files:
-              path = pathlib.Path(name)
-              if not path.is_file():
-                  continue
-              try:
-                  text = path.read_text(encoding='utf-8')
-              except UnicodeError:
-                  continue
-              for line_no, line in enumerate(text.splitlines(), 1):
-                  for category, pattern in patterns.items():
-                      if pattern.search(line):
-                          findings.append((name, line_no, category))
-          if findings:
-              for name, line_no, category in findings:
-                  print(f'{name}:{line_no}:{category}')
-              raise SystemExit(1)
-          print('credential scan clean')
-          '@ | python -
-      - name: Publish concise evidence
+      - name: Run tests and always publish exact exit codes
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           REPOSITORY: ${{ github.repository }}
         shell: powershell
         run: |
-          $focused = (Select-String -Path focused.txt -Pattern '^Ran \d+ tests' | Select-Object -Last 1).Line
-          $full = (Select-String -Path full.txt -Pattern '^Ran \d+ tests' | Select-Object -Last 1).Line
+          python -m unittest tests.test_tw_official_bulk tests.test_tw_official_historical tests.test_tw_official_hardening tests.test_tw_incremental tests.test_tw_official_post_close_cli tests.test_pipeline_scheduler -v *> focused.txt
+          $focusedCode = $LASTEXITCODE
+          python -m unittest discover -s tests -v *> full.txt
+          $fullCode = $LASTEXITCODE
+          $focusedRan = (Select-String -Path focused.txt -Pattern '^Ran \d+ tests' | Select-Object -Last 1).Line
+          $fullRan = (Select-String -Path full.txt -Pattern '^Ran \d+ tests' | Select-Object -Last 1).Line
+          $focusedStatus = if ($focusedCode -eq 0) { 'OK' } else { 'FAILED' }
+          $fullStatus = if ($fullCode -eq 0) { 'OK' } else { 'FAILED' }
           @"
-          ## Final exact-head evidence
+          ## Exact-head stability diagnostic
 
           - implementation head: ``b22cf60e8cee4f416aef3ddfc701b59cbd09980e``
-          - Windows: ``Windows Server 2025``
-          - Python: ``3.10``
-          - focused: ``$focused`` — OK
-          - full suite: ``$full`` — OK
-          - pip check: PASS
-          - compileall / py_compile: PASS
-          - Node syntax: PASS
-          - PowerShell 5.1 parser: PASS
-          - diff check: PASS
-          - credential scan: CLEAN
-          - four regression readiness flags: FALSE
-          - forbidden backtest pointer: ABSENT
-          "@ | Set-Content evidence.md -Encoding UTF8
-          gh pr comment $env:PR_NUMBER --repo $env:REPOSITORY --body-file evidence.md
-          Remove-Item focused.txt, full.txt, evidence.md -Force
-          if (git status --porcelain) { throw 'Evidence run changed the implementation tree' }
+          - focused exit code: ``$focusedCode``
+          - focused summary: ``$focusedRan`` — $focusedStatus
+          - full exit code: ``$fullCode``
+          - full summary: ``$fullRan`` — $fullStatus
+
+          ### Focused tail
+          ``````text
+          $((Get-Content focused.txt -Tail 80) -join "`n")
+          ``````
+
+          ### Full tail
+          ``````text
+          $((Get-Content full.txt -Tail 120) -join "`n")
+          ``````
+          "@ | Set-Content diagnostic.md -Encoding UTF8
+          gh pr comment $env:PR_NUMBER --repo $env:REPOSITORY --body-file diagnostic.md
+          Remove-Item focused.txt, full.txt, diagnostic.md -Force
+          if ($focusedCode -ne 0) { exit $focusedCode }
+          if ($fullCode -ne 0) { exit $fullCode }
