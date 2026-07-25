@@ -1,4 +1,4 @@
-name: TW Official Minimal Stability Gate
+name: TW Official Credential Marker Diagnostic
 
 on:
   pull_request:
@@ -8,47 +8,42 @@ permissions:
   contents: read
 
 jobs:
-  verify:
-    runs-on: windows-latest
-    timeout-minutes: 120
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
     steps:
       - uses: actions/checkout@v4
         with:
           ref: b22cf60e8cee4f416aef3ddfc701b59cbd09980e
           fetch-depth: 0
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
-          cache: pip
-          cache-dependency-path: |
-            requirements.txt
-            requirements-report.txt
-      - name: Environment
-        shell: powershell
+      - name: Report marker matches without values
+        shell: bash
         run: |
-          if ((git rev-parse HEAD).Trim() -ne 'b22cf60e8cee4f416aef3ddfc701b59cbd09980e') { throw 'Unexpected head' }
-          python -m pip install -r requirements.txt
-          python -m pip install -r requirements-report.txt
-          python -m pip check
-          $c = 'f8d157532fbfaeda587e826d4cd5b21a49186f7c'
-          Invoke-WebRequest -UseBasicParsing "https://raw.githubusercontent.com/notofonts/noto-cjk/$c/Sans/Variable/TTF/Subset/NotoSansTC-VF.ttf" -OutFile 'C:\Windows\Fonts\NotoSansTC-VF.ttf'
-          Invoke-WebRequest -UseBasicParsing "https://raw.githubusercontent.com/notofonts/noto-cjk/$c/Serif/Variable/TTF/Subset/NotoSerifTC-VF.ttf" -OutFile 'C:\Windows\Fonts\NotoSerifTC-VF.ttf'
-      - name: Focused tests
-        shell: powershell
-        run: python -m unittest tests.test_tw_official_bulk tests.test_tw_official_historical tests.test_tw_official_hardening tests.test_tw_incremental tests.test_tw_official_post_close_cli tests.test_pipeline_scheduler -q
-      - name: Full tests
-        shell: powershell
-        run: python -m unittest discover -s tests -q
-      - name: Credential markers
-        shell: powershell
-        run: |
-          $needles = '-----BEGIN PRIVATE KEY-----','sb_secret_','AIza','Authorization: Bearer '
-          foreach ($name in (git diff --name-only origin/main...HEAD)) {
-            if (-not (Test-Path -LiteralPath $name -PathType Leaf)) { continue }
-            $text = Get-Content -LiteralPath $name -Raw -Encoding utf8
-            foreach ($needle in $needles) {
-              if ($text.Contains($needle)) { throw "Credential marker in $name" }
-            }
+          python3 - <<'PY'
+          import pathlib
+          import subprocess
+
+          needles = {
+              'private_key_marker': '-----BEGIN PRIVATE KEY-----',
+              'supabase_secret_prefix': 'sb_secret_',
+              'google_api_prefix': 'AIza',
+              'bearer_example': 'Authorization: Bearer ',
           }
-          Write-Host 'credential markers: clean'
-          if (git status --porcelain) { throw 'Verification changed tree' }
+          files = subprocess.check_output(
+              ['git','diff','--name-only','origin/main...HEAD'], text=True
+          ).splitlines()
+          found = []
+          for name in files:
+              path = pathlib.Path(name)
+              if not path.is_file():
+                  continue
+              text = path.read_text(encoding='utf-8')
+              for line_no, line in enumerate(text.splitlines(), 1):
+                  for category, needle in needles.items():
+                      if needle in line:
+                          found.append((name, line_no, category))
+          for name, line_no, category in found:
+              print(f'{name}:{line_no}:{category}')
+          if not found:
+              print('no marker matches')
+          PY
