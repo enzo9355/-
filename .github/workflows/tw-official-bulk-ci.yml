@@ -1,4 +1,4 @@
-name: TW Official Exact-Head Focused CI
+name: TW Official Exact-Head Windows Gate
 
 on:
   pull_request:
@@ -8,50 +8,65 @@ permissions:
   contents: read
 
 jobs:
-  focused:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+  verify:
+    runs-on: windows-latest
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
         with:
           ref: b22cf60e8cee4f416aef3ddfc701b59cbd09980e
           fetch-depth: 0
+      - name: Assert exact clean head
+        shell: powershell
+        run: |
+          if ((git rev-parse HEAD).Trim() -ne 'b22cf60e8cee4f416aef3ddfc701b59cbd09980e') { throw 'Unexpected head' }
+          if (Test-Path '.github/workflows/tw-official-bulk-ci.yml') { throw 'Diagnostic workflow leaked' }
+          if (git status --porcelain) { throw 'Dirty checkout' }
       - uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-      - name: Assert exact clean head
-        shell: bash
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-report.txt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Install dependencies
+        shell: powershell
         run: |
-          test "$(git rev-parse HEAD)" = "b22cf60e8cee4f416aef3ddfc701b59cbd09980e"
-          test -z "$(git status --porcelain)"
-      - name: Run hardening and official-source focused tests
-        shell: bash
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install -r requirements-report.txt
+          python -m pip check
+      - name: Install test fonts
+        shell: powershell
         run: |
-          python -m unittest \
-            tests.test_tw_official_bulk \
-            tests.test_tw_official_historical \
-            tests.test_tw_official_hardening \
-            tests.test_tw_incremental \
-            tests.test_tw_official_post_close_cli \
-            tests.test_pipeline_scheduler \
-            -v
-      - name: Check diff and governance
-        shell: bash
+          $c = 'f8d157532fbfaeda587e826d4cd5b21a49186f7c'
+          Invoke-WebRequest -UseBasicParsing "https://raw.githubusercontent.com/notofonts/noto-cjk/$c/Sans/Variable/TTF/Subset/NotoSansTC-VF.ttf" -OutFile 'C:\Windows\Fonts\NotoSansTC-VF.ttf'
+          Invoke-WebRequest -UseBasicParsing "https://raw.githubusercontent.com/notofonts/noto-cjk/$c/Serif/Variable/TTF/Subset/NotoSerifTC-VF.ttf" -OutFile 'C:\Windows\Fonts\NotoSerifTC-VF.ttf'
+      - name: Focused tests
+        shell: powershell
         run: |
+          python -m unittest tests.test_tw_official_bulk tests.test_tw_official_historical tests.test_tw_official_hardening tests.test_tw_incremental tests.test_tw_official_post_close_cli tests.test_pipeline_scheduler -v
+      - name: Full suite
+        shell: powershell
+        run: python -m unittest discover -s tests -v
+      - name: Static and governance checks
+        shell: powershell
+        run: |
+          python -m compileall -q reporting stock_papi tests
+          python -m py_compile local_quant.py
+          node --check static/app.js
           git diff --check origin/main...HEAD
-          python - <<'PY'
-          from pathlib import Path
-          from reporting.regression_input_builder import (
-              PRODUCTION_REGRESSION_SOURCE_ADAPTER_READY,
-              PRODUCTION_REGRESSION_INPUT_READY,
-              PRODUCTION_REGRESSION_ARTIFACT_AVAILABLE,
-              AGGREGATE_MANIFEST_INTERVAL_VALIDATION_READY,
-          )
-          assert not any((
-              PRODUCTION_REGRESSION_SOURCE_ADAPTER_READY,
-              PRODUCTION_REGRESSION_INPUT_READY,
-              PRODUCTION_REGRESSION_ARTIFACT_AVAILABLE,
-              AGGREGATE_MANIFEST_INTERVAL_VALIDATION_READY,
-          ))
-          assert not Path('backtests/v1/latest-TW.json').exists()
-          PY
+          python -c "from pathlib import Path; from reporting.regression_input_builder import PRODUCTION_REGRESSION_SOURCE_ADAPTER_READY, PRODUCTION_REGRESSION_INPUT_READY, PRODUCTION_REGRESSION_ARTIFACT_AVAILABLE, AGGREGATE_MANIFEST_INTERVAL_VALIDATION_READY; assert not any((PRODUCTION_REGRESSION_SOURCE_ADAPTER_READY, PRODUCTION_REGRESSION_INPUT_READY, PRODUCTION_REGRESSION_ARTIFACT_AVAILABLE, AGGREGATE_MANIFEST_INTERVAL_VALIDATION_READY)); assert not Path('backtests/v1/latest-TW.json').exists()"
+          if (git status --porcelain) { throw 'Verification changed tree' }
+      - name: PowerShell 5.1 parser
+        shell: powershell
+        run: |
+          $paths = 'scripts/python_runtime.ps1','scripts/run_tw_post_close_pipeline.ps1','scripts/run_tw_pre_market_pipeline.ps1','scripts/invoke_pipeline_task.ps1','scripts/native_process.ps1'
+          foreach ($path in $paths) {
+            $tokens = $null; $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $path).Path,[ref]$tokens,[ref]$errors) | Out-Null
+            if ($errors.Count) { throw "PowerShell parser failed: $path" }
+          }
