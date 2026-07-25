@@ -6,46 +6,86 @@ on:
 
 permissions:
   contents: read
-  issues: write
-  pull-requests: write
 
 jobs:
-  python310:
-    runs-on: ubuntu-latest
-    timeout-minutes: 40
+  windows-python310:
+    runs-on: windows-2025
+    timeout-minutes: 60
     steps:
       - name: Checkout exact implementation head
         uses: actions/checkout@v4
         with:
           ref: b5f8e073baafa53876c9a1e275ab5db0a8def171
           fetch-depth: 0
+      - name: Assert exact head and clean implementation tree
+        shell: pwsh
+        run: |
+          if ((git rev-parse HEAD).Trim() -ne 'b5f8e073baafa53876c9a1e275ab5db0a8def171') { throw 'unexpected implementation head' }
+          if (Test-Path '.github/workflows/tw-official-bulk-ci.yml') { throw 'diagnostic workflow leaked into implementation head' }
       - uses: actions/setup-python@v5
         with:
           python-version: '3.10'
           cache: pip
       - name: Install dependencies
+        shell: pwsh
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
           python -m pip install -r requirements-report.txt
-      - name: Full suite concise diagnostic
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          REPOSITORY: ${{ github.repository }}
-        shell: bash
+          python -m pip check
+      - name: Install pinned Noto test fonts on disposable runner
+        shell: pwsh
         run: |
-          set +e
-          python -m unittest discover -s tests -v > /tmp/full-suite.txt 2>&1
-          code=$?
-          {
-            echo '## Concise full-suite diagnostic'
-            echo
-            echo '```text'
-            grep -E '^(FAIL|ERROR):|^Ran [0-9]+ tests|^FAILED \(|^OK$' /tmp/full-suite.txt || true
-            echo '--- final 35 lines ---'
-            tail -n 35 /tmp/full-suite.txt
-            echo '```'
-          } > /tmp/comment.md
-          gh pr comment "$PR_NUMBER" --repo "$REPOSITORY" --body-file /tmp/comment.md
-          exit "$code"
+          $Commit = 'f8d157532fbfaeda587e826d4cd5b21a49186f7c'
+          $Sans = "https://raw.githubusercontent.com/notofonts/noto-cjk/$Commit/Sans/Variable/TTF/Subset/NotoSansTC-VF.ttf"
+          $Serif = "https://raw.githubusercontent.com/notofonts/noto-cjk/$Commit/Serif/Variable/TTF/Subset/NotoSerifTC-VF.ttf"
+          Invoke-WebRequest -Uri $Sans -OutFile 'C:\Windows\Fonts\NotoSansTC-VF.ttf'
+          Invoke-WebRequest -Uri $Serif -OutFile 'C:\Windows\Fonts\NotoSerifTC-VF.ttf'
+          foreach ($Path in @('C:\Windows\Fonts\NotoSansTC-VF.ttf', 'C:\Windows\Fonts\NotoSerifTC-VF.ttf')) {
+            $Item = Get-Item -LiteralPath $Path
+            if ($Item.Length -lt 1MB) { throw "font file is unexpectedly small: $Path" }
+            Get-FileHash -LiteralPath $Path -Algorithm SHA256 | Format-Table -AutoSize
+          }
+      - name: Focused official-source tests
+        shell: pwsh
+        run: |
+          python -m unittest tests.test_tw_official_bulk tests.test_tw_incremental tests.test_tw_official_post_close_cli tests.test_pipeline_scheduler -v
+      - name: Full suite
+        shell: pwsh
+        run: python -m unittest discover -s tests -v
+      - name: Python and JavaScript static checks
+        shell: pwsh
+        run: |
+          python -m compileall -q reporting stock_papi tests
+          python -m py_compile local_quant.py
+          node --check static/app.js
+          git diff --check 3d8688c6be6c4984ac50a0cb3f441cd831be758d...HEAD
+      - name: Windows PowerShell 5.1 parser gate
+        shell: powershell
+        run: |
+          $Paths = @(
+            'scripts\python_runtime.ps1',
+            'scripts\run_tw_post_close_pipeline.ps1',
+            'scripts\run_tw_pre_market_pipeline.ps1',
+            'scripts\invoke_pipeline_task.ps1',
+            'scripts\native_process.ps1'
+          )
+          foreach ($Path in $Paths) {
+            $Tokens = $null
+            $Errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              (Resolve-Path $Path).Path,
+              [ref]$Tokens,
+              [ref]$Errors
+            ) | Out-Null
+            if ($Errors.Count -gt 0) {
+              $Errors | Format-List *
+              throw "PowerShell parser failure: $Path"
+            }
+          }
+      - name: Governance invariants
+        shell: pwsh
+        run: |
+          python -c "from stock_papi.config.capabilities import PRODUCTION_REGRESSION_SOURCE_ADAPTER_READY as a, PRODUCTION_REGRESSION_INPUT_READY as b, PRODUCTION_REGRESSION_ARTIFACT_AVAILABLE as c, AGGREGATE_MANIFEST_INTERVAL_VALIDATION_READY as d; assert (a,b,c,d)==(False,False,False,False)"
+          if (Test-Path 'backtests\v1\latest-TW.json') { throw 'forbidden backtest pointer exists' }
+          if ((git status --short) -ne $null) { git status --short; throw 'working tree changed during verification' }
