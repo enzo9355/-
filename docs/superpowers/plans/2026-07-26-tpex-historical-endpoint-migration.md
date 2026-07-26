@@ -12,7 +12,7 @@
 
 - Work only in `C:\Users\enzo\Documents\absorb-phase1e-tpex` on `codex/tw-tpex-historical-endpoint-migration`, created from `0a3d78916b9a751b6c7d9b6a7aa8e00491d95edf`.
 - Do not modify, stage, move, delete, or copy any user-owned untracked file from `C:\Users\enzo\Documents\line bot`.
-- Production code changes are limited to `stock_papi/integrations/market_data/tw_official_historical.py`; tests are limited to `tests/test_tw_official_historical.py`.
+- Production code changes are limited to `stock_papi/integrations/market_data/tw_official_historical.py`; test changes are limited to `tests/test_tw_official_historical.py` plus one compatibility-only repair in `tests/test_tw_official_hardening.py` that changes the `Session.calls` recording from a tuple to a dict. The hardening repair must not expand production scope.
 - Change only `tpex_price` and `tpex_margin` URLs, parameters, and the required price request header. `tpex_institutional` URL, parameters, and parser remain unchanged.
 - Keep `PARSER_VERSION = "tw-official-historical-parser-v2"`, `MAX_CATCHUP_SESSIONS = 10`, source ordering, retry attempts, timeouts, size limits, coverage thresholds, parser dispatch, canonical rows, manifest schema, and cache directory schema unchanged.
 - Do not add dependencies, browser automation, Cookie, Referer, Authorization, Token, fallback providers, or live-network unit tests.
@@ -25,6 +25,7 @@
 
 - `stock_papi/integrations/market_data/tw_official_historical.py`: owns the six source definitions, source-specific parameters, request headers, transport boundary, parser dispatch, coverage, and snapshot-series assembly.
 - `tests/test_tw_official_historical.py`: owns sanitized six-source payloads, the recording session, request-contract assertions, parser compatibility and fail-closed regressions, institutional preservation, cache reuse, and bounded catch-up tests.
+- `tests/test_tw_official_hardening.py`: one allowed test-helper compatibility repair only, changing the `Session.calls` recording from a tuple to a dict; no new production behavior or broader hardening scope.
 - `docs/superpowers/specs/2026-07-26-tpex-historical-endpoint-migration-design.md`: approved architecture and safety boundary.
 - `docs/superpowers/plans/2026-07-26-tpex-historical-endpoint-migration.md`: this execution and evidence plan.
 
@@ -510,7 +511,7 @@ No commit is expected because this is a preservation-only gate. If a fixture-onl
 **Files:**
 
 - Verify only: entire repository
-- Changed-file allowlist: the two docs, `stock_papi/integrations/market_data/tw_official_historical.py`, and `tests/test_tw_official_historical.py`
+- Changed-file allowlist: these five files only: the two docs, `stock_papi/integrations/market_data/tw_official_historical.py`, `tests/test_tw_official_historical.py`, and `tests/test_tw_official_hardening.py`. The fifth file is restricted to the single `Session.calls` tuple-to-dict compatibility repair and does not expand production scope.
 
 **Interfaces:**
 
@@ -558,7 +559,7 @@ Get-ScheduledTask -TaskName ABSORB-TW-PostClose | Select-Object TaskName,State
 Get-ScheduledTask -TaskName ABSORB-TW-PreMarket | Select-Object TaskName,State
 ```
 
-Expected: only the four allowlisted files; worktree clean; both tasks Disabled. Confirm no `D:\AbsorbData`, cache, quarantine, publication, GCS, Cloud Run, LINE, FinMind, Supabase, or `latest-TW.json` mutation occurred.
+Expected: only the five allowlisted files; worktree clean; both tasks Disabled. Confirm no `D:\AbsorbData`, cache, quarantine, publication, GCS, Cloud Run, LINE, FinMind, Supabase, or `latest-TW.json` mutation occurred.
 
 - [ ] **Step 5: Commit boundary**
 
