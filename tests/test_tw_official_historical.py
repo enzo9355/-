@@ -11,6 +11,7 @@ from stock_papi.integrations.market_data.tw_official_bulk import (
 from stock_papi.integrations.market_data.tw_official_historical import (
     HISTORICAL_SOURCE_DEFINITIONS,
     MAX_CATCHUP_SESSIONS,
+    _params,
     build_historical_daily_snapshot,
     build_official_snapshot_series,
     parse_tpex_margin_report,
@@ -20,6 +21,7 @@ from stock_papi.integrations.market_data.tw_official_historical import (
 )
 
 TARGET = datetime.date(2026, 7, 24)
+CONTRACT_TARGET = datetime.date(2026, 7, 16)
 
 
 TWSE_T86_FIELDS = [
@@ -181,6 +183,38 @@ class HistoricalParserTests(unittest.TestCase):
         ):
             with self.subTest(source=name), self.assertRaises(ValueError):
                 parser(data[name], TARGET - datetime.timedelta(days=1))
+
+
+class HistoricalRequestContractTests(unittest.TestCase):
+    def test_tpex_price_contract_is_modern(self):
+        self.assertEqual(
+            HISTORICAL_SOURCE_DEFINITIONS["tpex_price"].url,
+            "https://www.tpex.org.tw/www/zh-tw/afterTrading/dailyQuotes",
+        )
+        self.assertEqual(
+            _params("tpex_price", CONTRACT_TARGET),
+            {"date": "2026/07/16", "response": "json"},
+        )
+
+    def test_tpex_margin_contract_is_modern(self):
+        self.assertEqual(
+            HISTORICAL_SOURCE_DEFINITIONS["tpex_margin"].url,
+            "https://www.tpex.org.tw/www/zh-tw/margin/balance",
+        )
+        self.assertEqual(
+            _params("tpex_margin", CONTRACT_TARGET),
+            {"date": "2026/07/16", "response": "json"},
+        )
+
+    def test_tpex_institutional_contract_is_unchanged(self):
+        self.assertEqual(
+            HISTORICAL_SOURCE_DEFINITIONS["tpex_institutional"].url,
+            "https://www.tpex.org.tw/web/stock/3insti/daily_trade/3itrade_hedge_result.php",
+        )
+        self.assertEqual(_params("tpex_institutional", CONTRACT_TARGET), {
+            "l": "zh-tw", "o": "json", "se": "EW", "t": "D",
+            "d": "115/07/16", "s": "0,asc",
+        })
 
 
 class HistoricalSeriesTests(unittest.TestCase):
