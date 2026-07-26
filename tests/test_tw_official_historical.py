@@ -143,17 +143,25 @@ class Session:
     def __init__(self):
         self.calls = []
 
-    def get(self, url, *, params, **_kwargs):
+    def get(self, url, *, params, headers, **_kwargs):
         source_id = next(
             key for key, definition in HISTORICAL_SOURCE_DEFINITIONS.items()
             if definition.url == url
         )
         if source_id.startswith("twse"):
             value = datetime.datetime.strptime(params["date"], "%Y%m%d").date()
+        elif source_id in {"tpex_price", "tpex_margin"}:
+            value = datetime.datetime.strptime(params["date"], "%Y/%m/%d").date()
         else:
             year, month, day = map(int, params["d"].split("/"))
             value = datetime.date(year + 1911, month, day)
-        self.calls.append((source_id, value, dict(params)))
+        self.calls.append({
+            "source_id": source_id,
+            "url": url,
+            "date": value,
+            "params": dict(params),
+            "headers": dict(headers),
+        })
         return Response(payloads(value)[source_id])
 
 
@@ -215,6 +223,41 @@ class HistoricalRequestContractTests(unittest.TestCase):
             "l": "zh-tw", "o": "json", "se": "EW", "t": "D",
             "d": "115/07/16", "s": "0,asc",
         })
+
+    def test_request_headers_are_source_specific(self):
+        session = Session()
+        with tempfile.TemporaryDirectory() as temporary:
+            build_historical_daily_snapshot(
+                Path(temporary),
+                CONTRACT_TARGET,
+                session=session,
+                minimum_price_symbols={"TWSE": 2, "TPEx": 2},
+                minimum_chip_symbols=1,
+            )
+
+        self.assertEqual(
+            {call["source_id"] for call in session.calls},
+            set(HISTORICAL_SOURCE_DEFINITIONS),
+        )
+        for call in session.calls:
+            source_id = call["source_id"]
+            self.assertEqual(call["url"], HISTORICAL_SOURCE_DEFINITIONS[source_id].url)
+            self.assertEqual(call["date"], CONTRACT_TARGET)
+            self.assertEqual(call["params"], _params(source_id, CONTRACT_TARGET))
+            self.assertEqual(call["headers"]["User-Agent"], "ABSORB/1.0")
+            if source_id == "tpex_price":
+                self.assertEqual(
+                    call["headers"]["X-Requested-With"],
+                    "XMLHttpRequest",
+                )
+            else:
+                self.assertNotIn("X-Requested-With", call["headers"])
+
+        institutional = next(
+            call for call in session.calls if call["source_id"] == "tpex_institutional"
+        )
+        for forbidden in ("Cookie", "Authorization", "Token"):
+            self.assertNotIn(forbidden, institutional["headers"])
 
 
 class HistoricalSeriesTests(unittest.TestCase):

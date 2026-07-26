@@ -300,6 +300,13 @@ HISTORICAL_PARSERS: Mapping[str, Callable[[Any, _datetime.date], tuple[dict[str,
 })
 
 
+def _request_headers(source_id: str) -> dict[str, str]:
+    headers = {"User-Agent": "ABSORB/1.0"}
+    if source_id == "tpex_price":
+        headers["X-Requested-With"] = "XMLHttpRequest"
+    return headers
+
+
 def _request_payload(definition: OfficialSourceDefinition, target_date: _datetime.date, *, session: Any, timeout: int, retry_attempts: int, sleep_fn: Callable[[float], None]) -> tuple[Any, int, int]:
     attempts = 0
     for attempt in range(retry_attempts):
@@ -308,7 +315,7 @@ def _request_payload(definition: OfficialSourceDefinition, target_date: _datetim
             response = session.get(
                 definition.url,
                 params=_params(definition.source_id, target_date),
-                headers={"User-Agent": "ABSORB/1.0"},
+                headers=_request_headers(definition.source_id),
                 timeout=timeout,
             )
         except Exception as exc:
