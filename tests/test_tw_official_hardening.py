@@ -16,7 +16,7 @@ from stock_papi.integrations.market_data.tw_official_historical import (
 class MutatingInstitutionalSession(Session):
     def get(self, url, *, params, **kwargs):
         response = super().get(url, params=params, **kwargs)
-        source_id = self.calls[-1][0]
+        source_id = self.calls[-1]["source_id"]
         if source_id != "tpex_institutional":
             return response
         document = json.loads(response.content.decode("utf-8"))
