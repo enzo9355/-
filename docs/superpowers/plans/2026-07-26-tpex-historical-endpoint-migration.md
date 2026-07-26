@@ -12,7 +12,7 @@
 
 - Work only in `C:\Users\enzo\Documents\absorb-phase1e-tpex` on `codex/tw-tpex-historical-endpoint-migration`, created from `0a3d78916b9a751b6c7d9b6a7aa8e00491d95edf`.
 - Do not modify, stage, move, delete, or copy any user-owned untracked file from `C:\Users\enzo\Documents\line bot`.
-- Production code changes are limited to `stock_papi/integrations/market_data/tw_official_historical.py`; test changes are limited to `tests/test_tw_official_historical.py` plus one compatibility-only repair in `tests/test_tw_official_hardening.py` that changes the `Session.calls` recording from a tuple to a dict. The hardening repair must not expand production scope.
+- Production code changes are limited to `stock_papi/integrations/market_data/tw_official_historical.py`; test changes are limited to `tests/test_tw_official_historical.py` plus one compatibility-only repair in `tests/test_tw_official_hardening.py`: a single stale `Session.calls` reader compatibility repair from tuple indexing to dict `source_id` access. The hardening repair must not expand production scope.
 - Change only `tpex_price` and `tpex_margin` URLs, parameters, and the required price request header. `tpex_institutional` URL, parameters, and parser remain unchanged.
 - Keep `PARSER_VERSION = "tw-official-historical-parser-v2"`, `MAX_CATCHUP_SESSIONS = 10`, source ordering, retry attempts, timeouts, size limits, coverage thresholds, parser dispatch, canonical rows, manifest schema, and cache directory schema unchanged.
 - Do not add dependencies, browser automation, Cookie, Referer, Authorization, Token, fallback providers, or live-network unit tests.
@@ -25,7 +25,7 @@
 
 - `stock_papi/integrations/market_data/tw_official_historical.py`: owns the six source definitions, source-specific parameters, request headers, transport boundary, parser dispatch, coverage, and snapshot-series assembly.
 - `tests/test_tw_official_historical.py`: owns sanitized six-source payloads, the recording session, request-contract assertions, parser compatibility and fail-closed regressions, institutional preservation, cache reuse, and bounded catch-up tests.
-- `tests/test_tw_official_hardening.py`: one allowed test-helper compatibility repair only, changing the `Session.calls` recording from a tuple to a dict; no new production behavior or broader hardening scope.
+- `tests/test_tw_official_hardening.py`: one allowed test-helper compatibility repair only, changing a stale `Session.calls` reader from tuple indexing to dict `source_id` access; no new production behavior or broader hardening scope.
 - `docs/superpowers/specs/2026-07-26-tpex-historical-endpoint-migration-design.md`: approved architecture and safety boundary.
 - `docs/superpowers/plans/2026-07-26-tpex-historical-endpoint-migration.md`: this execution and evidence plan.
 
@@ -511,7 +511,7 @@ No commit is expected because this is a preservation-only gate. If a fixture-onl
 **Files:**
 
 - Verify only: entire repository
-- Changed-file allowlist: these five files only: the two docs, `stock_papi/integrations/market_data/tw_official_historical.py`, `tests/test_tw_official_historical.py`, and `tests/test_tw_official_hardening.py`. The fifth file is restricted to the single `Session.calls` tuple-to-dict compatibility repair and does not expand production scope.
+- Changed-file allowlist: these five files only: the two docs, `stock_papi/integrations/market_data/tw_official_historical.py`, `tests/test_tw_official_historical.py`, and `tests/test_tw_official_hardening.py`. The fifth file is restricted to the single stale `Session.calls` reader compatibility repair from tuple indexing to dict `source_id` access and does not expand production scope.
 
 **Interfaces:**
 
