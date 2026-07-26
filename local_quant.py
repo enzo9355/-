@@ -917,6 +917,7 @@ def run_market_batch(
     sleep_fn=time.sleep,
     enforce_window=True,
     batch_identity=None,
+    mutate_exclusions=True,
 ):
     if (
         market not in ("TW", "US")
@@ -924,6 +925,7 @@ def run_market_batch(
         or delay < 0
         or type(enforce_window) is not bool
         or (batch_identity is not None and not isinstance(batch_identity, dict))
+        or type(mutate_exclusions) is not bool
     ):
         raise ValueError("invalid market batch settings")
     checkpoint = load_checkpoint(root, market=market)
@@ -965,8 +967,10 @@ def run_market_batch(
             pass
 
     pending_symbols, excluded_symbols, exclusion_rows, invalid_actions = load_exclusion_list(root, market)
-    csv_write_status = "SUCCESS"
-    if exclusion_rows:
+    if not mutate_exclusions and any(row.get("OperatorAction", "").strip() for row in exclusion_rows):
+        raise RuntimeError("observation-only refuses pending exclusion operator actions")
+    csv_write_status = "SKIPPED" if not mutate_exclusions else "SUCCESS"
+    if mutate_exclusions and exclusion_rows:
         csv_write_status = save_exclusion_list(root, market, exclusion_rows)
         pending_symbols, excluded_symbols, exclusion_rows, invalid_actions = load_exclusion_list(root, market)
 
@@ -1087,7 +1091,7 @@ def run_market_batch(
 
             if err_type == "delisted":
                 consecutive_failures[symbol] = consecutive_failures.get(symbol, 0) + 1
-                if consecutive_failures[symbol] >= 5:
+                if mutate_exclusions and consecutive_failures[symbol] >= 5:
                     if symbol not in pending_symbols and symbol not in excluded_symbols:
                         new_row = {
                             "Symbol": symbol,
@@ -1152,7 +1156,7 @@ def run_market_batch(
 
             if err_type == "delisted":
                 consecutive_failures[symbol] = consecutive_failures.get(symbol, 0) + 1
-                if consecutive_failures[symbol] >= 5:
+                if mutate_exclusions and consecutive_failures[symbol] >= 5:
                     if symbol not in pending_symbols and symbol not in excluded_symbols:
                         new_row = {
                             "Symbol": symbol,
@@ -1175,6 +1179,7 @@ def run_market_batch(
         save_state()
         if delay:
             sleep_fn(delay)
+
 
     save_consecutive_failures(root, market, consecutive_failures)
     return {
@@ -1653,7 +1658,17 @@ def main(argv=None, now=None, free_bytes=None):
                         now=checked_at,
                     )
             with daily_lock, acquire_lock(root, now=checked_at):
-                status["cleanup"] = cleanup_expired_data(root, now=checked_at)
+                if args.observation_only:
+                    status["cleanup"] = {
+                        "deleted_files": 0,
+                        "reclaimed_bytes": 0,
+                        "failed": 0,
+                        "skipped_reparse_points": 0,
+                        "skipped": True,
+                        "reason": "observation_only",
+                    }
+                else:
+                    status["cleanup"] = cleanup_expired_data(root, now=checked_at)
                 _write_json_atomic(status_path, status)
                 pipeline = load_stock_pipeline(root)
                 now_fn = (
@@ -1695,6 +1710,7 @@ def main(argv=None, now=None, free_bytes=None):
                         delay=args.delay,
                         enforce_window=not args.post_close,
                         batch_identity=batch_identity,
+                        mutate_exclusions=not args.observation_only,
                     )
                     if summary.get("next_index", 0) >= len(symbols):
                         failed_symbols = (
