@@ -475,7 +475,7 @@ Commit boundary: sanitized fixtures and regression tests only; no production par
 
 ```powershell
 .\.venv\Scripts\python.exe -m unittest tests.test_tw_official_historical.HistoricalSeriesTests.test_two_dates_use_twelve_cold_requests_then_zero_warm_requests -v
-.\.venv\Scripts\python.exe -m unittest tests.test_tw_official_cache -v
+.\.venv\Scripts\python.exe -m unittest tests.test_tw_official_bulk.TWOfficialCacheTests -v
 ```
 
 Expected RED reason: not applicable by design. This task introduces no production behavior; both commands must already be GREEN after Task 5. A failure means the migration changed canonical/cache semantics and blocks implementation rather than authorizing a parser-version bump.
@@ -493,7 +493,7 @@ Expected: parser version is exactly `tw-official-historical-parser-v2`, catch-up
 
 ```powershell
 .\.venv\Scripts\python.exe -m unittest tests.test_tw_official_historical.HistoricalSeriesTests.test_two_dates_use_twelve_cold_requests_then_zero_warm_requests tests.test_tw_official_historical.HistoricalSeriesTests.test_series_rejects_more_than_bounded_catchup -v
-.\.venv\Scripts\python.exe -m unittest tests.test_tw_official_cache -v
+.\.venv\Scripts\python.exe -m unittest tests.test_tw_official_bulk.TWOfficialCacheTests -v
 git diff --check
 ```
 
@@ -521,7 +521,7 @@ No commit is expected because this is a preservation-only gate. If a fixture-onl
 
 ```powershell
 .\.venv\Scripts\python.exe -m unittest tests.test_tw_official_historical -v
-.\.venv\Scripts\python.exe -m unittest tests.test_tw_official_cache -v
+.\.venv\Scripts\python.exe -m unittest tests.test_tw_official_bulk.TWOfficialCacheTests -v
 .\.venv\Scripts\python.exe -m unittest tests.test_tw_official_post_close_cli -v
 .\.venv\Scripts\python.exe -m unittest tests.test_tw_official_bulk -v
 ```
