@@ -593,6 +593,55 @@ class LocalQuantTests(unittest.TestCase):
             )
             self.assertEqual(status["phase"], "closed")
 
+    def test_observation_only_post_close_skips_market_publish(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            ensure_layout(root)
+            pipeline = type("Pipeline", (), {"industry_map": {"全市場": ["2330"]}})()
+            with (
+                patch("local_quant.validate_data_root", return_value=root),
+                patch("local_quant.cleanup_expired_data", return_value={}),
+                patch("local_quant.load_stock_pipeline", return_value=pipeline),
+                patch(
+                    "local_quant.run_market_batch",
+                    return_value={
+                        "attempted": 1,
+                        "completed": 1,
+                        "failed": [],
+                        "pending": [],
+                        "excluded": [],
+                        "next_index": 1,
+                    },
+                ),
+                patch("local_quant.publish_market_snapshot") as publish,
+            ):
+                result = main(
+                    [
+                        "--root",
+                        str(root),
+                        "--post-close",
+                        "--observation-only",
+                        "--market",
+                        "TW",
+                        "--target-market-date",
+                        "2026-07-24",
+                        "--delay",
+                        "0",
+                    ],
+                    now=at(17, 0),
+                    free_bytes=200 * 1024**3,
+                )
+
+            self.assertEqual(result, 0)
+            publish.assert_not_called()
+            latest_path = root / "publish" / "quant" / "v1" / "latest-TW.json"
+            self.assertFalse(latest_path.exists())
+            checkpoint = load_checkpoint(root, market="TW")
+            self.assertNotIn("published_at", checkpoint)
+            self.assertNotIn("published_cycle_on", checkpoint)
+            self.assertNotIn("published_failure_count", checkpoint)
+
 
 if __name__ == "__main__":
     unittest.main()
+
