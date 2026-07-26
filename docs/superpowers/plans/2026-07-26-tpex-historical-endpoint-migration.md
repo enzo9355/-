@@ -463,7 +463,7 @@ Commit boundary: sanitized fixtures and regression tests only; no production par
 **Files:**
 
 - Verify: `tests/test_tw_official_historical.py:HistoricalSeriesTests.test_two_dates_use_twelve_cold_requests_then_zero_warm_requests`
-- Verify: `tests/test_tw_official_cache.py`
+- Verify: `tests/test_tw_official_bulk.py:TWOfficialCacheTests`
 - Verify unchanged: `stock_papi/integrations/market_data/tw_official_historical.py:35,388-424`
 
 **Interfaces:**
