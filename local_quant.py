@@ -1702,27 +1702,32 @@ def main(argv=None, now=None, free_bytes=None):
                             + summary.get("pending", [])
                             + summary.get("excluded", [])
                         )
-                        try:
-                            publish_market_snapshot(
-                                root,
-                                market,
-                                symbols,
-                                generated_at=market_now,
-                                failed_symbols=failed_symbols,
-                            )
-                        except RuntimeError as exc:
+                        if args.observation_only:
                             summary["published"] = False
-                            summary["publish_error"] = str(exc)
+                            summary["publish_skipped_reason"] = "observation_only"
                         else:
-                            checkpoint = load_checkpoint(root, market=market)
-                            checkpoint["published_cycle_on"] = (
-                                checkpoint.get("cycle_completed_on")
-                                or market_now.date().isoformat()
-                            )
-                            checkpoint["published_at"] = market_now.isoformat()
-                            checkpoint["published_failure_count"] = len(failed_symbols)
-                            save_checkpoint(root, checkpoint, market=market)
-                            summary["published"] = True
+                            try:
+                                publish_market_snapshot(
+                                    root,
+                                    market,
+                                    symbols,
+                                    generated_at=market_now,
+                                    failed_symbols=failed_symbols,
+                                )
+                            except RuntimeError as exc:
+                                summary["published"] = False
+                                summary["publish_error"] = str(exc)
+                            else:
+                                checkpoint = load_checkpoint(root, market=market)
+                                checkpoint["published_cycle_on"] = (
+                                    checkpoint.get("cycle_completed_on")
+                                    or market_now.date().isoformat()
+                                )
+                                checkpoint["published_at"] = market_now.isoformat()
+                                checkpoint["published_failure_count"] = len(failed_symbols)
+                                save_checkpoint(root, checkpoint, market=market)
+                                summary["published"] = True
+
 
                     published_count = len(symbols) - len(failed_symbols) if summary.get("published", False) else 0
                     stale_count = 0
