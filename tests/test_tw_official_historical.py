@@ -167,6 +167,24 @@ class Session:
 
 
 class HistoricalParserTests(unittest.TestCase):
+    def test_twse_price_and_margin_tables_map_exact_indices(self):
+        data = payloads(TARGET)
+        twse_price = parse_twse_price_report(data["twse_price"], TARGET)
+        self.assertEqual(len(twse_price), 2)
+        self.assertEqual(twse_price[1]["Trading_Volume"], 1000.0)
+        twse_margin = parse_twse_margin_report(data["twse_margin"], TARGET)
+        self.assertEqual(twse_margin[0]["MarginPurchaseTodayBalance"], 5000.0)
+        self.assertEqual(twse_margin[0]["ShortSaleTodayBalance"], 200.0)
+
+    def test_twse_price_and_margin_reject_mismatched_target_date(self):
+        data = payloads(TARGET)
+        for name, parser in (
+            ("twse_price", parse_twse_price_report),
+            ("twse_margin", parse_twse_margin_report),
+        ):
+            with self.subTest(source=name), self.assertRaises(ValueError):
+                parser(data[name], TARGET - datetime.timedelta(days=1))
+
     def test_sanitized_modern_price_and_margin_reports_canonicalize_exact_values(self):
         data = payloads(CONTRACT_TARGET)
         self.assertEqual(parse_tpex_price_report(data["tpex_price"], CONTRACT_TARGET), (
