@@ -7,10 +7,12 @@ from pathlib import Path
 from stock_papi.integrations.market_data.tw_official_bulk import (
     OfficialSourceFailure,
     TPEX_INSTITUTIONAL_FIELDS,
+    parse_tpex_institutional,
 )
 from stock_papi.integrations.market_data.tw_official_historical import (
     HISTORICAL_SOURCE_DEFINITIONS,
     MAX_CATCHUP_SESSIONS,
+    _params,
     build_historical_daily_snapshot,
     build_official_snapshot_series,
     parse_tpex_margin_report,
@@ -20,6 +22,7 @@ from stock_papi.integrations.market_data.tw_official_historical import (
 )
 
 TARGET = datetime.date(2026, 7, 24)
+CONTRACT_TARGET = datetime.date(2026, 7, 16)
 
 
 TWSE_T86_FIELDS = [
@@ -141,22 +144,30 @@ class Session:
     def __init__(self):
         self.calls = []
 
-    def get(self, url, *, params, **_kwargs):
+    def get(self, url, *, params, headers, **_kwargs):
         source_id = next(
             key for key, definition in HISTORICAL_SOURCE_DEFINITIONS.items()
             if definition.url == url
         )
         if source_id.startswith("twse"):
             value = datetime.datetime.strptime(params["date"], "%Y%m%d").date()
+        elif source_id in {"tpex_price", "tpex_margin"}:
+            value = datetime.datetime.strptime(params["date"], "%Y/%m/%d").date()
         else:
             year, month, day = map(int, params["d"].split("/"))
             value = datetime.date(year + 1911, month, day)
-        self.calls.append((source_id, value, dict(params)))
+        self.calls.append({
+            "source_id": source_id,
+            "url": url,
+            "date": value,
+            "params": dict(params),
+            "headers": dict(headers),
+        })
         return Response(payloads(value)[source_id])
 
 
 class HistoricalParserTests(unittest.TestCase):
-    def test_nested_price_and_margin_tables_map_exact_indices(self):
+    def test_twse_price_and_margin_tables_map_exact_indices(self):
         data = payloads(TARGET)
         twse_price = parse_twse_price_report(data["twse_price"], TARGET)
         self.assertEqual(len(twse_price), 2)
@@ -164,23 +175,117 @@ class HistoricalParserTests(unittest.TestCase):
         twse_margin = parse_twse_margin_report(data["twse_margin"], TARGET)
         self.assertEqual(twse_margin[0]["MarginPurchaseTodayBalance"], 5000.0)
         self.assertEqual(twse_margin[0]["ShortSaleTodayBalance"], 200.0)
-        tpex_price = parse_tpex_price_report(data["tpex_price"], TARGET)
-        self.assertEqual(tpex_price[0]["close"], 405.0)
-        self.assertEqual(tpex_price[0]["Trading_Volume"], 3000.0)
-        tpex_margin = parse_tpex_margin_report(data["tpex_margin"], TARGET)
-        self.assertEqual(tpex_margin[0]["MarginPurchaseTodayBalance"], 1000.0)
-        self.assertEqual(tpex_margin[0]["ShortSaleTodayBalance"], 50.0)
 
-    def test_every_nested_report_requires_exact_target_date(self):
+    def test_twse_price_and_margin_reject_mismatched_target_date(self):
         data = payloads(TARGET)
         for name, parser in (
             ("twse_price", parse_twse_price_report),
             ("twse_margin", parse_twse_margin_report),
-            ("tpex_price", parse_tpex_price_report),
-            ("tpex_margin", parse_tpex_margin_report),
         ):
             with self.subTest(source=name), self.assertRaises(ValueError):
                 parser(data[name], TARGET - datetime.timedelta(days=1))
+
+    def test_sanitized_modern_price_and_margin_reports_canonicalize_exact_values(self):
+        data = payloads(CONTRACT_TARGET)
+        self.assertEqual(parse_tpex_price_report(data["tpex_price"], CONTRACT_TARGET), (
+            {"date": "2026-07-16", "stock_id": "6488", "open": 400.0, "max": 410.0,
+             "min": 395.0, "close": 405.0, "Trading_Volume": 3000.0},
+            {"date": "2026-07-16", "stock_id": "8069", "open": 100.0, "max": 102.0,
+             "min": 99.0, "close": 101.0, "Trading_Volume": 4000.0},
+        ))
+        self.assertEqual(parse_tpex_margin_report(data["tpex_margin"], CONTRACT_TARGET), (
+            {"date": "2026-07-16", "stock_id": "6488",
+             "MarginPurchaseTodayBalance": 1000.0, "ShortSaleTodayBalance": 50.0},
+        ))
+
+    def test_tpex_price_rejects_mismatched_top_level_date(self):
+        data = payloads(CONTRACT_TARGET)["tpex_price"]
+        data["date"] = "20260724"
+        with self.assertRaises(ValueError):
+            parse_tpex_price_report(data, CONTRACT_TARGET)
+
+    def test_tpex_price_rejects_mismatched_table_date(self):
+        data = payloads(CONTRACT_TARGET)["tpex_price"]
+        data["tables"][0]["date"] = "115/07/24"
+        with self.assertRaises(ValueError):
+            parse_tpex_price_report(data, CONTRACT_TARGET)
+
+    def test_tpex_margin_rejects_mismatched_top_level_date(self):
+        data = payloads(CONTRACT_TARGET)["tpex_margin"]
+        data["date"] = "20260724"
+        with self.assertRaises(ValueError):
+            parse_tpex_margin_report(data, CONTRACT_TARGET)
+
+    def test_tpex_margin_rejects_mismatched_table_date(self):
+        data = payloads(CONTRACT_TARGET)["tpex_margin"]
+        data["tables"][0]["date"] = "115/07/24"
+        with self.assertRaises(ValueError):
+            parse_tpex_margin_report(data, CONTRACT_TARGET)
+
+    def test_tpex_institutional_report_canonicalizes_exact_rows(self):
+        data = payloads(CONTRACT_TARGET)
+        self.assertEqual(parse_tpex_institutional(data["tpex_institutional"], CONTRACT_TARGET), (
+            {"date": "2026-07-16", "stock_id": "6488", "name": "Dealer", "buy": 20.0, "sell": 21.0},
+            {"date": "2026-07-16", "stock_id": "6488", "name": "Foreign", "buy": 8.0, "sell": 9.0},
+            {"date": "2026-07-16", "stock_id": "6488", "name": "InvestmentTrust", "buy": 11.0, "sell": 12.0},
+        ))
+
+
+class HistoricalRequestContractTests(unittest.TestCase):
+    def test_tpex_price_contract_is_modern(self):
+        self.assertEqual(
+            HISTORICAL_SOURCE_DEFINITIONS["tpex_price"].url,
+            "https://www.tpex.org.tw/www/zh-tw/afterTrading/dailyQuotes",
+        )
+        self.assertEqual(
+            _params("tpex_price", CONTRACT_TARGET),
+            {"date": "2026/07/16", "response": "json"},
+        )
+
+    def test_tpex_margin_contract_is_modern(self):
+        self.assertEqual(
+            HISTORICAL_SOURCE_DEFINITIONS["tpex_margin"].url,
+            "https://www.tpex.org.tw/www/zh-tw/margin/balance",
+        )
+        self.assertEqual(
+            _params("tpex_margin", CONTRACT_TARGET),
+            {"date": "2026/07/16", "response": "json"},
+        )
+
+    def test_tpex_institutional_contract_is_unchanged(self):
+        self.assertEqual(
+            HISTORICAL_SOURCE_DEFINITIONS["tpex_institutional"].url,
+            "https://www.tpex.org.tw/web/stock/3insti/daily_trade/3itrade_hedge_result.php",
+        )
+        self.assertEqual(_params("tpex_institutional", CONTRACT_TARGET), {
+            "l": "zh-tw", "o": "json", "se": "EW", "t": "D",
+            "d": "115/07/16", "s": "0,asc",
+        })
+
+    def test_request_headers_are_source_specific(self):
+        session = Session()
+        with tempfile.TemporaryDirectory() as temporary:
+            build_historical_daily_snapshot(
+                Path(temporary),
+                CONTRACT_TARGET,
+                session=session,
+                minimum_price_symbols={"TWSE": 2, "TPEx": 2},
+                minimum_chip_symbols=1,
+            )
+
+        self.assertEqual(
+            {call["source_id"] for call in session.calls},
+            set(HISTORICAL_SOURCE_DEFINITIONS),
+        )
+        for call in session.calls:
+            source_id = call["source_id"]
+            self.assertEqual(call["url"], HISTORICAL_SOURCE_DEFINITIONS[source_id].url)
+            self.assertEqual(call["date"], CONTRACT_TARGET)
+            self.assertEqual(call["params"], _params(source_id, CONTRACT_TARGET))
+            expected_headers = {"User-Agent": "ABSORB/1.0"}
+            if source_id == "tpex_price":
+                expected_headers["X-Requested-With"] = "XMLHttpRequest"
+            self.assertEqual(call["headers"], expected_headers)
 
 
 class HistoricalSeriesTests(unittest.TestCase):

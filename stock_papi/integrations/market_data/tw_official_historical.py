@@ -86,7 +86,7 @@ HISTORICAL_SOURCE_DEFINITIONS: dict[str, OfficialSourceDefinition] = {
     ),
     "tpex_price": OfficialSourceDefinition(
         "tpex_price", "TPEx", "price",
-        "https://www.tpex.org.tw/web/stock/aftertrading/daily_close_quotes/stk_quote_result.php", "tpex_tables",
+        "https://www.tpex.org.tw/www/zh-tw/afterTrading/dailyQuotes", "tpex_tables",
         30 * 1024 * 1024,
     ),
     "tpex_institutional": OfficialSourceDefinition(
@@ -96,7 +96,7 @@ HISTORICAL_SOURCE_DEFINITIONS: dict[str, OfficialSourceDefinition] = {
     ),
     "tpex_margin": OfficialSourceDefinition(
         "tpex_margin", "TPEx", "margin",
-        "https://www.tpex.org.tw/web/stock/margin_trading/margin_balance/margin_bal_result.php", "tpex_tables",
+        "https://www.tpex.org.tw/www/zh-tw/margin/balance", "tpex_tables",
         15 * 1024 * 1024,
     ),
 }
@@ -116,11 +116,11 @@ def _params(source_id: str, target_date: _datetime.date) -> dict[str, str]:
     if source_id == "twse_margin":
         return {"date": ymd, "selectType": "STOCK", "response": "json"}
     if source_id == "tpex_price":
-        return {"l": "zh-tw", "o": "json", "d": roc, "s": "0,asc,0"}
+        return {"date": target_date.strftime("%Y/%m/%d"), "response": "json"}
     if source_id == "tpex_institutional":
         return {"l": "zh-tw", "o": "json", "se": "EW", "t": "D", "d": roc, "s": "0,asc"}
     if source_id == "tpex_margin":
-        return {"l": "zh-tw", "o": "json", "d": roc, "s": "0,asc"}
+        return {"date": target_date.strftime("%Y/%m/%d"), "response": "json"}
     raise ValueError("unknown historical source")
 
 
@@ -300,6 +300,13 @@ HISTORICAL_PARSERS: Mapping[str, Callable[[Any, _datetime.date], tuple[dict[str,
 })
 
 
+def _request_headers(source_id: str) -> dict[str, str]:
+    headers = {"User-Agent": "ABSORB/1.0"}
+    if source_id == "tpex_price":
+        headers["X-Requested-With"] = "XMLHttpRequest"
+    return headers
+
+
 def _request_payload(definition: OfficialSourceDefinition, target_date: _datetime.date, *, session: Any, timeout: int, retry_attempts: int, sleep_fn: Callable[[float], None]) -> tuple[Any, int, int]:
     attempts = 0
     for attempt in range(retry_attempts):
@@ -308,7 +315,7 @@ def _request_payload(definition: OfficialSourceDefinition, target_date: _datetim
             response = session.get(
                 definition.url,
                 params=_params(definition.source_id, target_date),
-                headers={"User-Agent": "ABSORB/1.0"},
+                headers=_request_headers(definition.source_id),
                 timeout=timeout,
             )
         except Exception as exc:
