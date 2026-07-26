@@ -96,7 +96,7 @@ HISTORICAL_SOURCE_DEFINITIONS: dict[str, OfficialSourceDefinition] = {
     ),
     "tpex_margin": OfficialSourceDefinition(
         "tpex_margin", "TPEx", "margin",
-        "https://www.tpex.org.tw/web/stock/margin_trading/margin_balance/margin_bal_result.php", "tpex_tables",
+        "https://www.tpex.org.tw/www/zh-tw/margin/balance", "tpex_tables",
         15 * 1024 * 1024,
     ),
 }
@@ -120,7 +120,7 @@ def _params(source_id: str, target_date: _datetime.date) -> dict[str, str]:
     if source_id == "tpex_institutional":
         return {"l": "zh-tw", "o": "json", "se": "EW", "t": "D", "d": roc, "s": "0,asc"}
     if source_id == "tpex_margin":
-        return {"l": "zh-tw", "o": "json", "d": roc, "s": "0,asc"}
+        return {"date": target_date.strftime("%Y/%m/%d"), "response": "json"}
     raise ValueError("unknown historical source")
 
 
