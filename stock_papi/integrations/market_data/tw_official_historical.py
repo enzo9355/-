@@ -86,7 +86,7 @@ HISTORICAL_SOURCE_DEFINITIONS: dict[str, OfficialSourceDefinition] = {
     ),
     "tpex_price": OfficialSourceDefinition(
         "tpex_price", "TPEx", "price",
-        "https://www.tpex.org.tw/web/stock/aftertrading/daily_close_quotes/stk_quote_result.php", "tpex_tables",
+        "https://www.tpex.org.tw/www/zh-tw/afterTrading/dailyQuotes", "tpex_tables",
         30 * 1024 * 1024,
     ),
     "tpex_institutional": OfficialSourceDefinition(
@@ -116,7 +116,7 @@ def _params(source_id: str, target_date: _datetime.date) -> dict[str, str]:
     if source_id == "twse_margin":
         return {"date": ymd, "selectType": "STOCK", "response": "json"}
     if source_id == "tpex_price":
-        return {"l": "zh-tw", "o": "json", "d": roc, "s": "0,asc,0"}
+        return {"date": target_date.strftime("%Y/%m/%d"), "response": "json"}
     if source_id == "tpex_institutional":
         return {"l": "zh-tw", "o": "json", "se": "EW", "t": "D", "d": roc, "s": "0,asc"}
     if source_id == "tpex_margin":
