@@ -7,6 +7,7 @@ from pathlib import Path
 from stock_papi.integrations.market_data.tw_official_bulk import (
     OfficialSourceFailure,
     TPEX_INSTITUTIONAL_FIELDS,
+    parse_tpex_institutional,
 )
 from stock_papi.integrations.market_data.tw_official_historical import (
     HISTORICAL_SOURCE_DEFINITIONS,
@@ -166,31 +167,50 @@ class Session:
 
 
 class HistoricalParserTests(unittest.TestCase):
-    def test_nested_price_and_margin_tables_map_exact_indices(self):
-        data = payloads(TARGET)
-        twse_price = parse_twse_price_report(data["twse_price"], TARGET)
-        self.assertEqual(len(twse_price), 2)
-        self.assertEqual(twse_price[1]["Trading_Volume"], 1000.0)
-        twse_margin = parse_twse_margin_report(data["twse_margin"], TARGET)
-        self.assertEqual(twse_margin[0]["MarginPurchaseTodayBalance"], 5000.0)
-        self.assertEqual(twse_margin[0]["ShortSaleTodayBalance"], 200.0)
-        tpex_price = parse_tpex_price_report(data["tpex_price"], TARGET)
-        self.assertEqual(tpex_price[0]["close"], 405.0)
-        self.assertEqual(tpex_price[0]["Trading_Volume"], 3000.0)
-        tpex_margin = parse_tpex_margin_report(data["tpex_margin"], TARGET)
-        self.assertEqual(tpex_margin[0]["MarginPurchaseTodayBalance"], 1000.0)
-        self.assertEqual(tpex_margin[0]["ShortSaleTodayBalance"], 50.0)
+    def test_sanitized_modern_price_and_margin_reports_canonicalize_exact_values(self):
+        data = payloads(CONTRACT_TARGET)
+        self.assertEqual(parse_tpex_price_report(data["tpex_price"], CONTRACT_TARGET), (
+            {"date": "2026-07-16", "stock_id": "6488", "open": 400.0, "max": 410.0,
+             "min": 395.0, "close": 405.0, "Trading_Volume": 3000.0},
+            {"date": "2026-07-16", "stock_id": "8069", "open": 100.0, "max": 102.0,
+             "min": 99.0, "close": 101.0, "Trading_Volume": 4000.0},
+        ))
+        self.assertEqual(parse_tpex_margin_report(data["tpex_margin"], CONTRACT_TARGET), (
+            {"date": "2026-07-16", "stock_id": "6488",
+             "MarginPurchaseTodayBalance": 1000.0, "ShortSaleTodayBalance": 50.0},
+        ))
 
-    def test_every_nested_report_requires_exact_target_date(self):
-        data = payloads(TARGET)
-        for name, parser in (
-            ("twse_price", parse_twse_price_report),
-            ("twse_margin", parse_twse_margin_report),
-            ("tpex_price", parse_tpex_price_report),
-            ("tpex_margin", parse_tpex_margin_report),
-        ):
-            with self.subTest(source=name), self.assertRaises(ValueError):
-                parser(data[name], TARGET - datetime.timedelta(days=1))
+    def test_tpex_price_rejects_mismatched_top_level_date(self):
+        data = payloads(CONTRACT_TARGET)["tpex_price"]
+        data["date"] = "20260724"
+        with self.assertRaises(ValueError):
+            parse_tpex_price_report(data, CONTRACT_TARGET)
+
+    def test_tpex_price_rejects_mismatched_table_date(self):
+        data = payloads(CONTRACT_TARGET)["tpex_price"]
+        data["tables"][0]["date"] = "115/07/24"
+        with self.assertRaises(ValueError):
+            parse_tpex_price_report(data, CONTRACT_TARGET)
+
+    def test_tpex_margin_rejects_mismatched_top_level_date(self):
+        data = payloads(CONTRACT_TARGET)["tpex_margin"]
+        data["date"] = "20260724"
+        with self.assertRaises(ValueError):
+            parse_tpex_margin_report(data, CONTRACT_TARGET)
+
+    def test_tpex_margin_rejects_mismatched_table_date(self):
+        data = payloads(CONTRACT_TARGET)["tpex_margin"]
+        data["tables"][0]["date"] = "115/07/24"
+        with self.assertRaises(ValueError):
+            parse_tpex_margin_report(data, CONTRACT_TARGET)
+
+    def test_tpex_institutional_report_canonicalizes_exact_rows(self):
+        data = payloads(CONTRACT_TARGET)
+        self.assertEqual(parse_tpex_institutional(data["tpex_institutional"], CONTRACT_TARGET), (
+            {"date": "2026-07-16", "stock_id": "6488", "name": "Dealer", "buy": 20.0, "sell": 21.0},
+            {"date": "2026-07-16", "stock_id": "6488", "name": "Foreign", "buy": 8.0, "sell": 9.0},
+            {"date": "2026-07-16", "stock_id": "6488", "name": "InvestmentTrust", "buy": 11.0, "sell": 12.0},
+        ))
 
 
 class HistoricalRequestContractTests(unittest.TestCase):
