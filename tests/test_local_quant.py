@@ -593,6 +593,257 @@ class LocalQuantTests(unittest.TestCase):
             )
             self.assertEqual(status["phase"], "closed")
 
+    def test_observation_only_post_close_skips_market_publish(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            ensure_layout(root)
+            pipeline = type("Pipeline", (), {"industry_map": {"全市場": ["2330"]}})()
+            with (
+                patch("local_quant.validate_data_root", return_value=root),
+                patch("local_quant.cleanup_expired_data", return_value={}),
+                patch("local_quant.load_stock_pipeline", return_value=pipeline),
+                patch(
+                    "local_quant.run_market_batch",
+                    return_value={
+                        "attempted": 1,
+                        "completed": 1,
+                        "failed": [],
+                        "pending": [],
+                        "excluded": [],
+                        "next_index": 1,
+                    },
+                ),
+                patch("local_quant.publish_market_snapshot") as publish,
+            ):
+                result = main(
+                    [
+                        "--root",
+                        str(root),
+                        "--post-close",
+                        "--observation-only",
+                        "--market",
+                        "TW",
+                        "--target-market-date",
+                        "2026-07-24",
+                        "--delay",
+                        "0",
+                    ],
+                    now=at(17, 0),
+                    free_bytes=200 * 1024**3,
+                )
+
+            self.assertEqual(result, 0)
+            publish.assert_not_called()
+            latest_path = root / "publish" / "quant" / "v1" / "latest-TW.json"
+            self.assertFalse(latest_path.exists())
+            checkpoint = load_checkpoint(root, market="TW")
+            self.assertNotIn("published_at", checkpoint)
+            self.assertNotIn("published_cycle_on", checkpoint)
+            self.assertNotIn("published_failure_count", checkpoint)
+
+    def test_observation_only_post_close_skips_retention_cleanup(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            ensure_layout(root)
+            pipeline = type("Pipeline", (), {"industry_map": {"全市場": ["2330"]}})()
+            with (
+                patch("local_quant.validate_data_root", return_value=root),
+                patch("local_quant.cleanup_expired_data", return_value={}) as cleanup,
+                patch("local_quant.load_stock_pipeline", return_value=pipeline),
+                patch(
+                    "local_quant.run_market_batch",
+                    return_value={
+                        "attempted": 1,
+                        "completed": 1,
+                        "failed": [],
+                        "pending": [],
+                        "excluded": [],
+                        "next_index": 1,
+                    },
+                ),
+                patch("local_quant.publish_market_snapshot"),
+            ):
+                result = main(
+                    [
+                        "--root",
+                        str(root),
+                        "--post-close",
+                        "--observation-only",
+                        "--market",
+                        "TW",
+                        "--target-market-date",
+                        "2026-07-24",
+                        "--delay",
+                        "0",
+                    ],
+                    now=at(17, 0),
+                    free_bytes=200 * 1024**3,
+                )
+
+            self.assertEqual(result, 0)
+            cleanup.assert_not_called()
+            status = json.loads(
+                (root / "logs" / "runner-status.json").read_text(encoding="utf-8")
+            )
+            self.assertTrue(status.get("cleanup", {}).get("skipped"))
+            self.assertEqual(
+                status.get("cleanup", {}).get("reason"), "observation_only"
+            )
+
+    def test_observation_batch_does_not_rewrite_existing_exclusion_list(self):
+        import hashlib
+        from local_quant import run_market_batch
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            ensure_layout(root)
+            csv_dir = root / "checkpoints"
+            csv_dir.mkdir(parents=True, exist_ok=True)
+            csv_path = csv_dir / "exclusion_list-TW.csv"
+            initial_content = (
+                "Symbol,Name,ExclusionDate,ConsecutiveFailures,State,Type,Reason,OperatorAction\n"
+                "3426,3426,2026-07-26,5,Excluded,delisted,test,\n"
+            )
+            csv_path.write_text(initial_content, encoding="utf-8")
+            stat_before = csv_path.stat()
+            before_bytes = csv_path.read_bytes()
+            before_sha256 = hashlib.sha256(before_bytes).hexdigest()
+
+            result = run_market_batch(
+                root,
+                "TW",
+                ["3426", "2330"],
+                analyze_symbol=lambda s: {"mock": True},
+                delay=0,
+                enforce_window=False,
+                mutate_exclusions=False,
+            )
+
+            after_bytes = csv_path.read_bytes()
+            after_sha256 = hashlib.sha256(after_bytes).hexdigest()
+            stat_after = csv_path.stat()
+
+            self.assertEqual(after_bytes, before_bytes)
+            self.assertEqual(after_sha256, before_sha256)
+            self.assertEqual(stat_after.st_mtime_ns, stat_before.st_mtime_ns)
+            self.assertIn("3426", result["excluded"])
+
+    def test_observation_batch_does_not_add_pending_exclusion(self):
+        from local_quant import save_consecutive_failures, run_market_batch
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            ensure_layout(root)
+            save_consecutive_failures(root, "TW", {"2330": 4})
+            csv_path = root / "checkpoints" / "exclusion_list-TW.csv"
+
+            def failing_analyzer(symbol):
+                raise ValueError("delisted symbol 2330")
+
+            result = run_market_batch(
+                root,
+                "TW",
+                ["2330"],
+                analyze_symbol=failing_analyzer,
+                delay=0,
+                enforce_window=False,
+                mutate_exclusions=False,
+            )
+
+            self.assertFalse(csv_path.exists())
+            self.assertEqual(len(result["failed"]), 1)
+            self.assertEqual(result["failed"][0]["symbol"], "2330")
+
+    def test_observation_batch_refuses_pending_operator_actions(self):
+        import hashlib
+        from unittest.mock import Mock
+        from local_quant import run_market_batch
+        for action in ("Approve", "Reinstate"):
+            with self.subTest(action=action):
+                with tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    ensure_layout(root)
+                    csv_dir = root / "checkpoints"
+                    csv_dir.mkdir(parents=True, exist_ok=True)
+                    csv_path = csv_dir / "exclusion_list-TW.csv"
+                    initial_content = (
+                        "Symbol,Name,ExclusionDate,ConsecutiveFailures,State,Type,Reason,OperatorAction\n"
+                        f"3426,3426,2026-07-26,5,Excluded,delisted,test,{action}\n"
+                    )
+                    csv_path.write_text(initial_content, encoding="utf-8")
+                    stat_before = csv_path.stat()
+                    before_bytes = csv_path.read_bytes()
+                    before_sha256 = hashlib.sha256(before_bytes).hexdigest()
+
+                    analyzer = Mock()
+                    with self.assertRaisesRegex(
+                        RuntimeError,
+                        "observation-only refuses pending exclusion operator actions",
+                    ):
+                        run_market_batch(
+                            root,
+                            "TW",
+                            ["3426"],
+                            analyze_symbol=analyzer,
+                            delay=0,
+                            enforce_window=False,
+                            mutate_exclusions=False,
+                        )
+
+                    analyzer.assert_not_called()
+                    after_bytes = csv_path.read_bytes()
+                    after_sha256 = hashlib.sha256(after_bytes).hexdigest()
+                    stat_after = csv_path.stat()
+
+                    self.assertEqual(after_bytes, before_bytes)
+                    self.assertEqual(after_sha256, before_sha256)
+                    self.assertEqual(stat_after.st_mtime_ns, stat_before.st_mtime_ns)
+                    self.assertFalse((root / "artifacts" / "stocks" / "TW" / "3426.json.gz").exists())
+                    self.assertFalse((root / "checkpoints" / "progress.json").exists())
+
+    def test_observation_batch_refuses_exclusion_schema_without_operator_action(self):
+        import hashlib
+        from unittest.mock import Mock
+        from local_quant import run_market_batch
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            ensure_layout(root)
+            csv_dir = root / "checkpoints"
+            csv_dir.mkdir(parents=True, exist_ok=True)
+            csv_path = csv_dir / "exclusion_list-TW.csv"
+            initial_content = (
+                "Symbol,Name,ExclusionDate,ConsecutiveFailures,State,Type,Reason\n"
+                "3426,3426,2026-07-26,5,Excluded,delisted,test\n"
+            )
+            csv_path.write_text(initial_content, encoding="utf-8")
+            stat_before = csv_path.stat()
+            before_bytes = csv_path.read_bytes()
+            before_sha256 = hashlib.sha256(before_bytes).hexdigest()
+
+            analyzer = Mock()
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "observation-only exclusion preflight failed",
+            ):
+                run_market_batch(
+                    root,
+                    "TW",
+                    ["3426"],
+                    analyze_symbol=analyzer,
+                    delay=0,
+                    enforce_window=False,
+                    mutate_exclusions=False,
+                )
+
+            analyzer.assert_not_called()
+            after_bytes = csv_path.read_bytes()
+            after_sha256 = hashlib.sha256(after_bytes).hexdigest()
+            stat_after = csv_path.stat()
+
+            self.assertEqual(after_bytes, before_bytes)
+            self.assertEqual(after_sha256, before_sha256)
+            self.assertEqual(stat_after.st_mtime_ns, stat_before.st_mtime_ns)
+            self.assertFalse((root / "artifacts" / "stocks" / "TW" / "3426.json.gz").exists())
+            self.assertFalse((root / "checkpoints" / "progress.json").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

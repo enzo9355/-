@@ -906,6 +906,27 @@ def save_consecutive_failures(root, market, data):
     except Exception:
         pass
 
+def _assert_no_pending_exclusion_operator_actions(root, market):
+    csv_path = Path(root) / "checkpoints" / f"exclusion_list-{market}.csv"
+    if not csv_path.is_file():
+        return
+
+    try:
+        with open(csv_path, "r", encoding="utf-8", newline="") as stream:
+            reader = csv.DictReader(stream)
+            if not reader.fieldnames or "OperatorAction" not in reader.fieldnames:
+                raise RuntimeError("observation-only exclusion preflight failed")
+            for row in reader:
+                if str(row.get("OperatorAction") or "").strip():
+                    raise RuntimeError(
+                        "observation-only refuses pending exclusion operator actions"
+                    )
+    except RuntimeError:
+        raise
+    except (OSError, UnicodeError, csv.Error) as exc:
+        raise RuntimeError("observation-only exclusion preflight failed") from exc
+
+
 def run_market_batch(
     root,
     market,
@@ -917,6 +938,7 @@ def run_market_batch(
     sleep_fn=time.sleep,
     enforce_window=True,
     batch_identity=None,
+    mutate_exclusions=True,
 ):
     if (
         market not in ("TW", "US")
@@ -924,8 +946,12 @@ def run_market_batch(
         or delay < 0
         or type(enforce_window) is not bool
         or (batch_identity is not None and not isinstance(batch_identity, dict))
+        or type(mutate_exclusions) is not bool
     ):
         raise ValueError("invalid market batch settings")
+    if not mutate_exclusions:
+        _assert_no_pending_exclusion_operator_actions(root, market)
+
     checkpoint = load_checkpoint(root, market=market)
     checked_at = now_fn()
     same_batch = (
@@ -965,10 +991,11 @@ def run_market_batch(
             pass
 
     pending_symbols, excluded_symbols, exclusion_rows, invalid_actions = load_exclusion_list(root, market)
-    csv_write_status = "SUCCESS"
-    if exclusion_rows:
+    csv_write_status = "SKIPPED" if not mutate_exclusions else "SUCCESS"
+    if mutate_exclusions and exclusion_rows:
         csv_write_status = save_exclusion_list(root, market, exclusion_rows)
         pending_symbols, excluded_symbols, exclusion_rows, invalid_actions = load_exclusion_list(root, market)
+
 
     is_published = (
         checkpoint.get("published_cycle_on") == checkpoint.get("cycle_completed_on")
@@ -1087,7 +1114,7 @@ def run_market_batch(
 
             if err_type == "delisted":
                 consecutive_failures[symbol] = consecutive_failures.get(symbol, 0) + 1
-                if consecutive_failures[symbol] >= 5:
+                if mutate_exclusions and consecutive_failures[symbol] >= 5:
                     if symbol not in pending_symbols and symbol not in excluded_symbols:
                         new_row = {
                             "Symbol": symbol,
@@ -1152,7 +1179,7 @@ def run_market_batch(
 
             if err_type == "delisted":
                 consecutive_failures[symbol] = consecutive_failures.get(symbol, 0) + 1
-                if consecutive_failures[symbol] >= 5:
+                if mutate_exclusions and consecutive_failures[symbol] >= 5:
                     if symbol not in pending_symbols and symbol not in excluded_symbols:
                         new_row = {
                             "Symbol": symbol,
@@ -1175,6 +1202,7 @@ def run_market_batch(
         save_state()
         if delay:
             sleep_fn(delay)
+
 
     save_consecutive_failures(root, market, consecutive_failures)
     return {
@@ -1653,7 +1681,17 @@ def main(argv=None, now=None, free_bytes=None):
                         now=checked_at,
                     )
             with daily_lock, acquire_lock(root, now=checked_at):
-                status["cleanup"] = cleanup_expired_data(root, now=checked_at)
+                if args.observation_only:
+                    status["cleanup"] = {
+                        "deleted_files": 0,
+                        "reclaimed_bytes": 0,
+                        "failed": 0,
+                        "skipped_reparse_points": 0,
+                        "skipped": True,
+                        "reason": "observation_only",
+                    }
+                else:
+                    status["cleanup"] = cleanup_expired_data(root, now=checked_at)
                 _write_json_atomic(status_path, status)
                 pipeline = load_stock_pipeline(root)
                 now_fn = (
@@ -1695,6 +1733,7 @@ def main(argv=None, now=None, free_bytes=None):
                         delay=args.delay,
                         enforce_window=not args.post_close,
                         batch_identity=batch_identity,
+                        mutate_exclusions=not args.observation_only,
                     )
                     if summary.get("next_index", 0) >= len(symbols):
                         failed_symbols = (
@@ -1702,27 +1741,32 @@ def main(argv=None, now=None, free_bytes=None):
                             + summary.get("pending", [])
                             + summary.get("excluded", [])
                         )
-                        try:
-                            publish_market_snapshot(
-                                root,
-                                market,
-                                symbols,
-                                generated_at=market_now,
-                                failed_symbols=failed_symbols,
-                            )
-                        except RuntimeError as exc:
+                        if args.observation_only:
                             summary["published"] = False
-                            summary["publish_error"] = str(exc)
+                            summary["publish_skipped_reason"] = "observation_only"
                         else:
-                            checkpoint = load_checkpoint(root, market=market)
-                            checkpoint["published_cycle_on"] = (
-                                checkpoint.get("cycle_completed_on")
-                                or market_now.date().isoformat()
-                            )
-                            checkpoint["published_at"] = market_now.isoformat()
-                            checkpoint["published_failure_count"] = len(failed_symbols)
-                            save_checkpoint(root, checkpoint, market=market)
-                            summary["published"] = True
+                            try:
+                                publish_market_snapshot(
+                                    root,
+                                    market,
+                                    symbols,
+                                    generated_at=market_now,
+                                    failed_symbols=failed_symbols,
+                                )
+                            except RuntimeError as exc:
+                                summary["published"] = False
+                                summary["publish_error"] = str(exc)
+                            else:
+                                checkpoint = load_checkpoint(root, market=market)
+                                checkpoint["published_cycle_on"] = (
+                                    checkpoint.get("cycle_completed_on")
+                                    or market_now.date().isoformat()
+                                )
+                                checkpoint["published_at"] = market_now.isoformat()
+                                checkpoint["published_failure_count"] = len(failed_symbols)
+                                save_checkpoint(root, checkpoint, market=market)
+                                summary["published"] = True
+
 
                     published_count = len(symbols) - len(failed_symbols) if summary.get("published", False) else 0
                     stale_count = 0
