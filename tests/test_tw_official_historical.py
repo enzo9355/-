@@ -244,20 +244,10 @@ class HistoricalRequestContractTests(unittest.TestCase):
             self.assertEqual(call["url"], HISTORICAL_SOURCE_DEFINITIONS[source_id].url)
             self.assertEqual(call["date"], CONTRACT_TARGET)
             self.assertEqual(call["params"], _params(source_id, CONTRACT_TARGET))
-            self.assertEqual(call["headers"]["User-Agent"], "ABSORB/1.0")
+            expected_headers = {"User-Agent": "ABSORB/1.0"}
             if source_id == "tpex_price":
-                self.assertEqual(
-                    call["headers"]["X-Requested-With"],
-                    "XMLHttpRequest",
-                )
-            else:
-                self.assertNotIn("X-Requested-With", call["headers"])
-
-        institutional = next(
-            call for call in session.calls if call["source_id"] == "tpex_institutional"
-        )
-        for forbidden in ("Cookie", "Authorization", "Token"):
-            self.assertNotIn(forbidden, institutional["headers"])
+                expected_headers["X-Requested-With"] = "XMLHttpRequest"
+            self.assertEqual(call["headers"], expected_headers)
 
 
 class HistoricalSeriesTests(unittest.TestCase):
