@@ -752,9 +752,98 @@ class LocalQuantTests(unittest.TestCase):
             self.assertEqual(len(result["failed"]), 1)
             self.assertEqual(result["failed"][0]["symbol"], "2330")
 
+    def test_observation_batch_refuses_pending_operator_actions(self):
+        import hashlib
+        from unittest.mock import Mock
+        from local_quant import run_market_batch
+        for action in ("Approve", "Reinstate"):
+            with self.subTest(action=action):
+                with tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    ensure_layout(root)
+                    csv_dir = root / "checkpoints"
+                    csv_dir.mkdir(parents=True, exist_ok=True)
+                    csv_path = csv_dir / "exclusion_list-TW.csv"
+                    initial_content = (
+                        "Symbol,Name,ExclusionDate,ConsecutiveFailures,State,Type,Reason,OperatorAction\n"
+                        f"3426,3426,2026-07-26,5,Excluded,delisted,test,{action}\n"
+                    )
+                    csv_path.write_text(initial_content, encoding="utf-8")
+                    stat_before = csv_path.stat()
+                    before_bytes = csv_path.read_bytes()
+                    before_sha256 = hashlib.sha256(before_bytes).hexdigest()
+
+                    analyzer = Mock()
+                    with self.assertRaisesRegex(
+                        RuntimeError,
+                        "observation-only refuses pending exclusion operator actions",
+                    ):
+                        run_market_batch(
+                            root,
+                            "TW",
+                            ["3426"],
+                            analyze_symbol=analyzer,
+                            delay=0,
+                            enforce_window=False,
+                            mutate_exclusions=False,
+                        )
+
+                    analyzer.assert_not_called()
+                    after_bytes = csv_path.read_bytes()
+                    after_sha256 = hashlib.sha256(after_bytes).hexdigest()
+                    stat_after = csv_path.stat()
+
+                    self.assertEqual(after_bytes, before_bytes)
+                    self.assertEqual(after_sha256, before_sha256)
+                    self.assertEqual(stat_after.st_mtime_ns, stat_before.st_mtime_ns)
+                    self.assertFalse((root / "artifacts" / "stocks" / "TW" / "3426.json.gz").exists())
+                    self.assertFalse((root / "checkpoints" / "progress.json").exists())
+
+    def test_observation_batch_refuses_exclusion_schema_without_operator_action(self):
+        import hashlib
+        from unittest.mock import Mock
+        from local_quant import run_market_batch
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            ensure_layout(root)
+            csv_dir = root / "checkpoints"
+            csv_dir.mkdir(parents=True, exist_ok=True)
+            csv_path = csv_dir / "exclusion_list-TW.csv"
+            initial_content = (
+                "Symbol,Name,ExclusionDate,ConsecutiveFailures,State,Type,Reason\n"
+                "3426,3426,2026-07-26,5,Excluded,delisted,test\n"
+            )
+            csv_path.write_text(initial_content, encoding="utf-8")
+            stat_before = csv_path.stat()
+            before_bytes = csv_path.read_bytes()
+            before_sha256 = hashlib.sha256(before_bytes).hexdigest()
+
+            analyzer = Mock()
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "observation-only exclusion preflight failed",
+            ):
+                run_market_batch(
+                    root,
+                    "TW",
+                    ["3426"],
+                    analyze_symbol=analyzer,
+                    delay=0,
+                    enforce_window=False,
+                    mutate_exclusions=False,
+                )
+
+            analyzer.assert_not_called()
+            after_bytes = csv_path.read_bytes()
+            after_sha256 = hashlib.sha256(after_bytes).hexdigest()
+            stat_after = csv_path.stat()
+
+            self.assertEqual(after_bytes, before_bytes)
+            self.assertEqual(after_sha256, before_sha256)
+            self.assertEqual(stat_after.st_mtime_ns, stat_before.st_mtime_ns)
+            self.assertFalse((root / "artifacts" / "stocks" / "TW" / "3426.json.gz").exists())
+            self.assertFalse((root / "checkpoints" / "progress.json").exists())
 
 
 if __name__ == "__main__":
     unittest.main()
-
-
