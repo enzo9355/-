@@ -906,6 +906,27 @@ def save_consecutive_failures(root, market, data):
     except Exception:
         pass
 
+def _assert_no_pending_exclusion_operator_actions(root, market):
+    csv_path = Path(root) / "checkpoints" / f"exclusion_list-{market}.csv"
+    if not csv_path.is_file():
+        return
+
+    try:
+        with open(csv_path, "r", encoding="utf-8", newline="") as stream:
+            reader = csv.DictReader(stream)
+            if not reader.fieldnames or "OperatorAction" not in reader.fieldnames:
+                raise RuntimeError("observation-only exclusion preflight failed")
+            for row in reader:
+                if str(row.get("OperatorAction") or "").strip():
+                    raise RuntimeError(
+                        "observation-only refuses pending exclusion operator actions"
+                    )
+    except RuntimeError:
+        raise
+    except (OSError, UnicodeError, csv.Error) as exc:
+        raise RuntimeError("observation-only exclusion preflight failed") from exc
+
+
 def run_market_batch(
     root,
     market,
@@ -928,6 +949,9 @@ def run_market_batch(
         or type(mutate_exclusions) is not bool
     ):
         raise ValueError("invalid market batch settings")
+    if not mutate_exclusions:
+        _assert_no_pending_exclusion_operator_actions(root, market)
+
     checkpoint = load_checkpoint(root, market=market)
     checked_at = now_fn()
     same_batch = (
@@ -967,12 +991,11 @@ def run_market_batch(
             pass
 
     pending_symbols, excluded_symbols, exclusion_rows, invalid_actions = load_exclusion_list(root, market)
-    if not mutate_exclusions and any(row.get("OperatorAction", "").strip() for row in exclusion_rows):
-        raise RuntimeError("observation-only refuses pending exclusion operator actions")
     csv_write_status = "SKIPPED" if not mutate_exclusions else "SUCCESS"
     if mutate_exclusions and exclusion_rows:
         csv_write_status = save_exclusion_list(root, market, exclusion_rows)
         pending_symbols, excluded_symbols, exclusion_rows, invalid_actions = load_exclusion_list(root, market)
+
 
     is_published = (
         checkpoint.get("published_cycle_on") == checkpoint.get("cycle_completed_on")
