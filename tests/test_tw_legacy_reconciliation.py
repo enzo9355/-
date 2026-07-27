@@ -17,7 +17,7 @@ from stock_papi.quant.tw_legacy_reconciliation import (
 
 TARGET = datetime.date(2026, 7, 24)
 BASELINE = datetime.date(2026, 7, 16)
-SERIES_SHA = "e" * 64
+SERIES_SHA = "56cc6940752cb667e5225ece40685236148cef14dd7e6b3b7c3a50a6079b941a"
 
 
 def artifact_path(root, symbol="2330"):
@@ -105,7 +105,19 @@ def official_document(reconciliation):
         "source_lineage": {
             "source_mode": "tw_official_bulk_v2",
             "source_schema_version": "tw-official-historical-v2",
+            "symbol": "2330",
             "target_market_date": TARGET.isoformat(),
+            "historical_as_of": BASELINE.isoformat(),
+            "historical_artifact_sha256": reconciliation[
+                "legacy_artifact_sha256"
+            ],
+            "official_target_price_available": True,
+            "official_snapshot_dates": copy.deepcopy(
+                reconciliation["official_snapshot_dates"]
+            ),
+            "official_snapshot_manifests": copy.deepcopy(
+                reconciliation["official_snapshot_manifests"]
+            ),
             "official_series_manifest_sha256": SERIES_SHA,
             "legacy_reconciliation": reconciliation,
         },
@@ -244,6 +256,29 @@ class LegacyArtifactBackupStoreTests(unittest.TestCase):
                 evidence=wrong_sha,
             )
 
+    def test_backup_rejects_malformed_reconciliation_evidence(self):
+        mutations = [
+            ("official_source_schema_version", "unknown"),
+            ("official_snapshot_dates", [TARGET.isoformat(), BASELINE.isoformat()]),
+            ("official_snapshot_manifests", []),
+            ("price_replaced_dates", []),
+            ("institutional_replaced_dates", [TARGET.isoformat()]),
+            ("margin_replaced_dates", [TARGET.isoformat()]),
+            ("date_evidence", []),
+        ]
+        for field, invalid in mutations:
+            with self.subTest(field=field):
+                value = copy.deepcopy(self.evidence)
+                value[field] = invalid
+                with self.assertRaisesRegex(
+                    LegacyReconciliationError, "evidence is invalid"
+                ):
+                    self.store.backup_before_write(
+                        symbol="2330",
+                        artifact_path=self.path,
+                        evidence=value,
+                    )
+
     def test_backup_retry_is_idempotent(self):
         self.backup()
         manifest_path, first = read_manifest(self.root)
@@ -324,6 +359,33 @@ class LegacyArtifactBackupStoreTests(unittest.TestCase):
         outside.write_bytes(self.original)
         with self.assertRaises(LegacyReconciliationError):
             self.store.mark_applied(symbol="2330", artifact_path=outside)
+
+    def test_mark_applied_rejects_malformed_full_official_lineage(self):
+        cases = (
+            {"source_schema_version": "unknown-schema"},
+            {"official_snapshot_manifests": [
+                {"date": BASELINE.isoformat(), "manifest_sha256": "c" * 64},
+                {"date": TARGET.isoformat(), "manifest_sha256": "b" * 64},
+            ]},
+        )
+        for changes in cases:
+            with self.subTest(changes=changes), tempfile.TemporaryDirectory() as root:
+                path, _ = write_artifact(root, legacy_document())
+                original_sha = hashlib.sha256(path.read_bytes()).hexdigest()
+                value = evidence(original_sha)
+                store = LegacyArtifactBackupStore(
+                    Path(root),
+                    target_date=TARGET,
+                    series_manifest_sha256=SERIES_SHA,
+                )
+                store.backup_before_write(
+                    symbol="2330", artifact_path=path, evidence=value
+                )
+                document = official_document(value)
+                document["source_lineage"].update(changes)
+                target = write_artifact(root, document)[0]
+                with self.assertRaises(LegacyReconciliationError):
+                    store.mark_applied(symbol="2330", artifact_path=target)
 
     def test_mark_applied_requires_valid_incremental_artifact(self):
         self.backup()
