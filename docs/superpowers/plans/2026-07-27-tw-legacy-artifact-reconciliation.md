@@ -498,10 +498,18 @@ Require PR `OPEN`, `DRAFT`, `UNMERGED`. Inspect available workflow/check evidenc
 | Task | RED commit | GREEN commit | Spec review | Code/security review | Status |
 |---|---|---|---|---|---|
 | Design | n/a | `cdca6e37` | approved | approved | done |
-| Fetcher | pending | pending | pending | pending | pending |
-| Backup store | pending | pending | pending | pending | pending |
-| CLI/gate | pending | pending | pending | pending | pending |
-| Whole branch | n/a | pending | pending | pending | pending |
+| Fetcher | `1cef5979` | `ff7f2a05` | approved | approved | done |
+| Backup store | `d3eb4743` | `93f2f56e` | approved | approved | done |
+| CLI/gate | `f32ab0c1` | `2f4b1605` | approved | approved | done |
+| Whole branch | n/a | `2f4b1605` | approved | approved | done |
+
+## Verification record
+
+- Required focused suite: 143 tests passed, one explicit Windows symlink-capability skip.
+- Full suite: 990 tests passed, one explicit Windows symlink-capability skip.
+- Python compile, Node syntax, PowerShell 5.1 AST, diff, scope, and changed-file secret gates passed.
+- Baseline-to-implementation diff contains exactly the eight planned files.
+- Both TW Scheduled Tasks remained `Disabled`; no Production recovery, live market request, `D:\AbsorbData` mutation, publish, promotion, deployment, upload, or LINE notification was performed.
 
 ## Plan self-review
 
