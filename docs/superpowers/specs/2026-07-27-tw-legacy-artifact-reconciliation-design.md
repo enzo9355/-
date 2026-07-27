@@ -2,7 +2,7 @@
 
 ## Status
 
-Approved implementation scope from the Phase 1L restart brief. This design authorizes code and fixture-only tests in the isolated worktree only. It does not authorize Production execution, `D:` writes, live market-data calls, publication, GCS, Cloud Run, LINE, Scheduled Task mutation, exclusion mutation, model changes, merge, or rollback execution.
+Approved implementation scope from the Phase 1L restart brief, revised by the Phase 1N independent-validation findings. This design authorizes code, fixture-only tests, and the explicitly required read-only warm-cache validation in the isolated worktree only. It does not authorize Production execution, `D:` writes, live market-data calls, publication, GCS, Cloud Run, LINE, Scheduled Task mutation, exclusion mutation, model changes, merge, or rollback execution.
 
 ## Problem
 
@@ -71,8 +71,8 @@ For `strict`, and for every official v2 artifact, behavior is unchanged.
 
 For an eligible legacy artifact in `replace_verified_legacy` mode:
 
-- Every artifact/snapshot overlap date must have an official price row. Missing price fails closed.
-- Price output uses official OHLCV instead of legacy OHLCV for each overlap.
+- Every artifact/snapshot overlap date is reconciled independently for price, institutional, and margin data.
+- When an official price row exists, price output uses its exact OHLCV. When it is absent, price output preserves the exact legacy OHLCV and records `preserved_legacy_no_official_row`; it never synthesizes, fills, rounds, or relabels the legacy values as official.
 - Institutional output uses official rows when present; otherwise it preserves the legacy synthetic rows.
 - Margin output uses the official row when present; otherwise it preserves the legacy margin values.
 - Official dates later than the artifact `as_of` continue to append through the existing incremental path.
@@ -80,11 +80,46 @@ For an eligible legacy artifact in `replace_verified_legacy` mode:
 
 The current strict date planner starts at the trading session after the earliest artifact date, so it cannot provide a snapshot for the baseline overlap itself. Only in reconciliation mode, the CLI prepends `earliest_latest_date` to the planned official dates. The baseline date counts toward `MAX_CATCHUP_SESSIONS`; if baseline plus later sessions exceeds the existing bound, the run refuses before source loading. Strict mode retains the current date plan unchanged. Because the series then spans every trading session from the earliest artifact through the target, artifacts with later `as_of` values also receive their own exact overlap snapshot.
 
-An interrupted retry must retain that same baseline even if the last stale artifact was already written and the fresh audit now reports only the target date. Before planning opt-in dates, the backup store performs a read-only discovery below the fixed target-date directory. No manifest means a first run. Exactly one fully validated series directory may supply its earliest `replaced_dates` value as the prior baseline; multiple series identities, malformed entries, or path/link violations fail closed. The planner uses the earlier of current audit and discovered baseline, rebuilds the bounded dates, and then requires the resulting official series manifest to equal the discovered directory identity. This makes the backup root and checkpoint identity stable across the post-write/pre-apply crash window without trusting mutable checkpoint state.
+An interrupted retry must retain that same baseline even if the last stale artifact was already written and the fresh audit now reports only the target date. Before planning opt-in dates, the backup store performs a read-only discovery below the fixed target-date directory. No manifest means a first run. Exactly one fully validated series directory may supply its earliest `overlap_dates` value as the prior baseline; multiple series identities, malformed entries, invalid current artifacts, or path/link violations fail closed. The planner uses the earlier of current audit and discovered baseline, rebuilds the bounded dates, and then requires the resulting official series manifest to equal the discovered directory identity. This makes the backup root and checkpoint identity stable across the post-write/pre-apply crash window without trusting mutable checkpoint state.
 
-The fetcher accumulates evidence per symbol and exposes `reconciliation_for(symbol)`. Evidence contains schema version, mode, original compressed SHA-256, all overlap dates, price/institutional/margin replaced-date lists, and per-date booleans so absent optional official data is explicitly recorded as not replaced.
+The fetcher accumulates reconciliation schema v2 evidence per symbol and exposes `reconciliation_for(symbol)`. `overlap_dates` is non-empty, sorted, and unique. For each dataset, `*_replaced_dates` and `*_preserved_no_official_row_dates` are disjoint and partition `overlap_dates`. Each `date_evidence` action is exactly `replaced_official` or `preserved_legacy_no_official_row` and agrees with those sets. Empty institutional rows are preservation, not replacement.
+
+```json
+{
+  "schema_version": 2,
+  "mode": "replace_verified_legacy",
+  "legacy_artifact_sha256": "<64 hex>",
+  "legacy_artifact_as_of": "2026-07-16",
+  "official_source_mode": "tw_official_bulk_v2",
+  "official_source_schema_version": "tw-official-historical-v2",
+  "official_series_manifest_sha256": "<64 hex>",
+  "official_snapshot_dates": ["2026-07-16"],
+  "official_snapshot_manifests": [
+    {"date": "2026-07-16", "manifest_sha256": "<64 hex>"}
+  ],
+  "overlap_dates": ["2026-07-16"],
+  "price_replaced_dates": [],
+  "price_preserved_no_official_row_dates": ["2026-07-16"],
+  "institutional_replaced_dates": ["2026-07-16"],
+  "institutional_preserved_no_official_row_dates": [],
+  "margin_replaced_dates": [],
+  "margin_preserved_no_official_row_dates": ["2026-07-16"],
+  "date_evidence": [
+    {
+      "date": "2026-07-16",
+      "price_action": "preserved_legacy_no_official_row",
+      "institutional_action": "replaced_official",
+      "margin_action": "preserved_legacy_no_official_row"
+    }
+  ]
+}
+```
 
 `lineage_for(symbol)` adds this evidence as `legacy_reconciliation` only after reconciliation. A later official run preserves a valid existing reconciliation record so the audit trail is not discarded.
+
+When official lineage contains `legacy_reconciliation`, validation cross-binds every duplicated identity rather than accepting two independently well-formed documents. Outer historical SHA/as-of must equal inner legacy artifact SHA/as-of. Outer source mode, source schema, series SHA, snapshot dates, and snapshot manifests must equal the inner official identities exactly. The backup result validator delegates to this same full lineage validator and then checks the manifest entry identity; it does not maintain a weaker second trust boundary.
+
+When a later official run preserves an earlier reconciliation record, the outer historical SHA/as-of remains the original legacy root identity from that record, rather than being rewritten to the intermediate official artifact. The outer official series and snapshot identities likewise remain the reconciled source identity while the record is preserved. This keeps the required full equality truthful without adding a second relation schema.
 
 ## Backup store
 
@@ -93,7 +128,7 @@ The fetcher accumulates evidence per symbol and exposes `reconciliation_for(symb
 The store uses only the Python standard library and writes under:
 
 ```text
-<root>/quarantine/tw-recovery/legacy-reconciliation/v1/
+<root>/quarantine/tw-recovery/legacy-reconciliation/v2/
   <target-date>/<series-manifest-sha256>/
 ```
 
@@ -116,7 +151,7 @@ The manifest has one immutable original identity per symbol. It records both com
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "target_market_date": "2026-07-24",
   "official_series_manifest_sha256": "<64 hex>",
   "entries": {
@@ -127,14 +162,14 @@ The manifest has one immutable original identity per symbol. It records both com
       "original_size": 1234,
       "original_uncompressed_size": 5678,
       "backup_path": "objects/<sha>.json.gz",
-      "replaced_dates": ["2026-07-16"],
+      "overlap_dates": ["2026-07-16"],
       "new_sha256": null
     }
   }
 }
 ```
 
-Only `backup_complete` to `applied` is a valid transition. `applied` requires the verified current artifact SHA in `new_sha256`. A symbol cannot acquire a second original SHA for the same target/series manifest.
+Only `backup_complete` to `applied` is a valid transition. `applied` requires the verified current artifact SHA in `new_sha256`. A symbol cannot acquire a second original SHA for the same target/series manifest. Draft schema v1 is rejected rather than silently reinterpreted because no Production reconciliation manifest exists.
 
 ## Writer ordering and state machine
 
@@ -146,13 +181,13 @@ For every TW write, the wrapper first checks the manifest entry, including cases
 |---|---|---|
 | no entry, no new evidence | any normal artifact | call original writer unchanged |
 | no entry, new evidence | SHA equals evidence original | write/verify immutable backup, atomically record `backup_complete`, then call original writer |
-| `backup_complete` | SHA equals original and new evidence exactly matches original SHA, replacement dates, target, and series | retry original writer without creating another backup |
+| `backup_complete` | SHA equals original and new evidence exactly matches original SHA, overlap dates, target, and series | retry original writer without creating another backup |
 | `backup_complete` | verified expected official v2 result | atomically repair entry to `applied`, return current path without rewriting |
 | `backup_complete` | anything else | fail state conflict |
-| `applied` | SHA equals `new_sha256` | return current path without rewriting or changing mtime |
+| `applied` | SHA equals `new_sha256` and full expected-result validation passes | return current path without rewriting or changing mtime |
 | `applied` | SHA differs | fail state conflict |
 
-An expected interrupted result must pass the normal artifact loader and prove: official v2 mode, current target date, current series manifest, and a legacy reconciliation original SHA equal to the manifest original SHA.
+Read-only discovery validates every current artifact. An `applied` entry must exist at the exact safe path, match `new_sha256`, pass the normal artifact loader, equal the target date, and pass the fully cross-bound official/reconciliation lineage contract. A `backup_complete` entry allows only the exact original SHA or a fully validated post-write/pre-apply result. Discovery never mutates bytes, status, or mtime.
 
 After an actual write, the wrapper re-reads the artifact, validates the same expected lineage, computes its compressed SHA, and atomically marks the entry `applied`. A writer failure leaves the backup and `backup_complete` entry intact.
 
@@ -180,12 +215,14 @@ Missing artifacts still fail in `load_incremental_artifact()` and never reach ba
 The gate runs only after the official CLI invokes `local_quant.main()`:
 
 1. A nonzero result is returned unchanged.
-2. For zero, load the final TW checkpoint and require `stage == "market_batch"`, `market == "TW"`, and `next_index >= len(universe)`. Require a valid `failed` list with no malformed/unknown item and no failure whose symbol remains active. Failures belonging only to current pending/excluded symbols are not active recovery failures; this resolves the existing retry-checkpoint case where an excluded symbol can remain in a checkpoint that was not rewritten.
-3. Read the raw exclusion CSV directly rather than using `load_exclusion_list()`, which intentionally swallows read errors. Require the canonical headers, unique valid TW symbols, blank `OperatorAction`, and only `Pending`, blank-as-pending, or `Excluded` state. Encoding, CSV, schema, duplicate, action, symbol, or state errors are incomplete.
-4. Compute `active = universe - pending - excluded`.
-5. Require checkpoint batch identity to match the requested target, observation product, official source mode/schema, series manifest, ordered-universe SHA, and reconciliation policy.
-6. Run the existing artifact audit only for `active`.
-7. Require no unavailable active symbols and require every active latest date to equal the requested target. The audit already rejects future artifacts.
+2. In reconciliation mode, require every manifest entry to be `applied`, require the current SHA to equal `new_sha256`, and rerun the complete expected-result validation. Any `backup_complete`, unknown, missing, or mismatched current artifact is incomplete.
+3. Load the final TW checkpoint and require `stage == "market_batch"`, `market == "TW"`, and `next_index >= len(universe)`. Require a valid `failed` list with no malformed/unknown item and no failure whose symbol remains active. Failures belonging only to current pending/excluded symbols are not active recovery failures; this resolves the existing retry-checkpoint case where an excluded symbol can remain in a checkpoint that was not rewritten.
+4. Read the raw exclusion CSV directly rather than using `load_exclusion_list()`, which intentionally swallows read errors. Require the canonical headers, unique valid TW symbols, blank `OperatorAction`, and only `Pending`, blank-as-pending, or `Excluded` state. Encoding, CSV, schema, duplicate, action, symbol, or state errors are incomplete.
+5. Compute `active = universe - pending - excluded`.
+6. Require checkpoint batch identity to match the requested target, observation product, official source mode/schema, series manifest, ordered-universe SHA, and reconciliation policy.
+7. Run the existing artifact audit only for `active`.
+8. Require no unavailable active symbols and require every active latest date to equal the requested target. The audit already rejects future artifacts.
+9. Load every active artifact and require complete official lineage for the requested target and series. If its lineage contains reconciliation evidence, require a matching fully applied manifest entry. Lineage-free or unrelated-series target-date artifacts cannot satisfy the terminal gate.
 
 Any failure raises exactly:
 
@@ -207,18 +244,19 @@ An excluded symbol may remain stale. A pending symbol is also outside the active
 
 ## Test strategy
 
-TDD is split into four bounded groups:
+TDD is split into five bounded groups:
 
-1. Fetcher lineage classification, strict preservation, replacement semantics, evidence, deduplication, and missing-baseline refusal.
-2. Backup ordering, content addressing, immutable objects, manifest transitions, retry/repair/no-op, conflict, and path/reparse rejection.
-3. CLI explicit opt-in, writer patch/restore, before-write backup ordering, and unchanged default path.
+1. Fetcher lineage classification, strict preservation, independent no-price dataset actions, schema v2 evidence partitions, deduplication, cross-binding, and missing-baseline refusal.
+2. Backup ordering, content addressing, immutable objects, schema v2 manifest transitions, current-artifact resume validation, retry/repair/no-op, conflict, and path/reparse rejection.
+3. CLI explicit opt-in, writer patch/restore, before-write backup ordering, post-run manifest completeness, and unchanged default path.
 4. Completeness-gate checkpoint failures, missing/stale/future active artifacts, excluded stale artifacts, and complete active success.
+5. Read-only warm-cache validation for the nine known baseline no-price symbols with a network-denying session and no writer or batch execution.
 
 The final focused suite covers incremental, backup, official CLI, local quant, and local quant batch tests. The full suite, Python/Node/PowerShell static gates, diff check, scope audit, secret scan, task state, network/data counters, and independent whole-branch review remain mandatory before a Draft PR can be reported ready.
 
 ## Rollback evidence contract
 
-This phase records enough evidence for a later separately authorized rollback: immutable original bytes, original SHA/size, current applied SHA, deterministic source/target identity, replacement dates, and unambiguous status. It deliberately does not implement or execute rollback.
+This phase records enough evidence for a later separately authorized rollback: immutable original bytes, original SHA/size, current applied SHA, deterministic source/target identity, overlap dates, per-dataset actions, and unambiguous status. It deliberately does not implement or execute rollback.
 
 ## Success criteria
 

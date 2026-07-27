@@ -503,7 +503,7 @@ Require PR `OPEN`, `DRAFT`, `UNMERGED`. Inspect available workflow/check evidenc
 | CLI/gate | `f32ab0c1` | `2f4b1605` | approved | approved | done |
 | Whole branch | n/a | `2f4b1605` | approved | approved | done |
 
-## Verification record
+## Phase 1L verification record (superseded by Phase 1N revision)
 
 - Required focused suite: 143 tests passed, one explicit Windows symlink-capability skip.
 - Full suite: 990 tests passed, one explicit Windows symlink-capability skip.
@@ -518,3 +518,100 @@ Require PR `OPEN`, `DRAFT`, `UNMERGED`. Inspect available workflow/check evidenc
 - Fetcher, backup store, CLI integration, completeness, retry discovery, and rollback evidence map to explicit tests.
 - The plan does not require `local_quant.py`, Production data, network, publish, deployment, or task mutation.
 - There are no placeholders, deferred implementation decisions, or automatic rollback steps.
+
+## Phase 1N revision execution plan
+
+The Phase 1M independent validation makes the prior verification record insufficient. The existing Draft PR is revised in place from `826617fd65d82147b6d52dce029b87ee797faab2`; the base remains `993fe68634cac228865e6c8e958455ed86bb9e07`. The branch, eight-file scope, Production prohibitions, and fail-closed missing-artifact boundary are unchanged.
+
+### N1: Reproduce independent findings — RED
+
+**Files**
+
+- `tests/test_tw_incremental.py`
+- `tests/test_tw_legacy_reconciliation.py`
+- `tests/test_tw_official_post_close_cli.py`
+
+Add the required current-artifact resume, post-run manifest gate, outer/inner cross-binding, no-price preservation, optional independence, later-session, deduplication, provenance, backup-before-write, idempotent resume, strict-mode, and missing-baseline tests. Fixtures use literal expected OHLCV and temporary roots only. Run the three focused test modules against the unchanged Production implementation and record the failing test names, count, and exit code.
+
+**Commit**
+
+```text
+test: reproduce PR 19 independent validation findings
+```
+
+### N2: Validate current artifacts and successful terminal state — GREEN
+
+**Files**
+
+- `stock_papi/quant/tw_legacy_reconciliation.py`
+- `stock_papi/batch/tw_official_post_close_cli.py`
+
+Bump the backup manifest and deterministic namespace to v2 and rename entry `replaced_dates` to `overlap_dates`. In read-only discovery, validate every exact safe current artifact path and backup object. `applied` requires exact `new_sha256` plus full expected-result validation. `backup_complete` permits only the exact original SHA or a full post-write/pre-apply result. Add `assert_current_state_complete()` and invoke it after `local_quant.main()` returns zero and before `_assert_complete()`; it accepts only fully validated `applied` entries. The final active-artifact gate also requires complete official lineage for the requested series and a matching applied entry whenever reconciliation evidence is present.
+
+Run `tests.test_tw_legacy_reconciliation` and `tests.test_tw_official_post_close_cli` after the fix.
+
+**Commit**
+
+```text
+fix: validate current artifacts during reconciliation resume
+```
+
+### N3: Cross-bind lineage identities — GREEN
+
+**Files**
+
+- `stock_papi/quant/tw_incremental.py`
+- `stock_papi/quant/tw_legacy_reconciliation.py`
+
+Extend the one official-lineage validator so outer historical SHA/as-of and source/schema/series/snapshot identity equal the inner reconciliation values exactly. When preserving prior reconciliation evidence, `lineage_for()` keeps those outer duplicated fields bound to the original legacy/source identity instead of replacing them with an intermediate run identity. The backup result validator reuses that validator and adds only manifest-entry-specific checks. Run the cross-binding tests in `tests.test_tw_incremental` and `tests.test_tw_legacy_reconciliation`.
+
+**Commit**
+
+```text
+fix: cross-bind legacy reconciliation lineage identities
+```
+
+### N4: Preserve legacy values when official overlap rows are absent — GREEN
+
+**Files**
+
+- `stock_papi/quant/tw_incremental.py`
+
+Represent every overlap with independent price, institutional, and margin actions. Missing official price preserves literal legacy OHLCV; available optional rows still replace independently; unavailable optional rows preserve legacy values. Later sessions continue through the existing append path. Emit reconciliation schema v2 with `overlap_dates`, disjoint per-dataset replaced/preserved partitions, and exact action evidence. Do not add a symbol allowlist, synthesize data, or change `_verify_existing()`.
+
+Run `tests.test_tw_incremental`, then the five-module focused suite.
+
+**Commit**
+
+```text
+feat: preserve legacy overlap price when official row is unavailable
+```
+
+### N5: Read-only nine-symbol validation and final gates
+
+Build the seven-date official series from the existing `D:\AbsorbData` warm cache using a `NoNetworkSession` whose `get()` raises. For each of `1589`, `3064`, `3067`, `4183`, `4305`, `4804`, `6236`, `6242`, and `8905`, load the existing artifact read-only, run all three fetcher datasets, build the snapshot in memory, and record SHA, original/final dates, actions, row counts, duplicates, finite-value status, and exception. No batch or writer is called.
+
+Then run:
+
+```powershell
+python -m unittest tests.test_tw_incremental tests.test_tw_legacy_reconciliation tests.test_tw_official_post_close_cli tests.test_local_quant tests.test_local_quant_batch -v
+python -m unittest discover -s tests -p "test_*.py"
+python -m compileall -q reporting stock_papi tests
+python -m py_compile local_quant.py
+node --check static/app.js
+```
+
+Also run PowerShell 5.1 AST parsing, `git diff --check`, exact eight-file inventory, secret/scope/tracked-output checks, Scheduled Task recheck, and protected original-checkout comparison. The full count must exceed 990 with zero failures/errors and at most the existing single symlink-capability skip.
+
+### N6: Independent reviews and existing Draft PR update
+
+Run two independent final-head reviews: security/state-machine and data/provenance. Resolve every Critical or Important finding and rerun affected gates. Update and push only the existing Draft PR #19. It remains `OPEN`, `DRAFT`, and `UNMERGED`; do not claim missing CI evidence passed, complete the active universe, or perform Production recovery.
+
+## Phase 1N plan self-review
+
+- Each Phase 1M finding has an observable RED test before Production code changes.
+- Resume discovery and the first-run success path both validate current artifacts.
+- One official-lineage validator owns all outer/inner identity bindings.
+- Schema v2 distinguishes overlap from per-dataset replacement or preservation without symbol exceptions.
+- The nine-symbol check is read-only, network-denying, writer-free, and batch-free.
+- `00947B` and `00948B` remain fail closed; no bootstrap or exclusion mutation exists.
