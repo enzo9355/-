@@ -34,6 +34,15 @@ from stock_papi.quant.tw_legacy_reconciliation import LegacyArtifactBackupStore
 
 TARGET = datetime.date(2026, 7, 24)
 BASELINE = datetime.date(2026, 7, 16)
+FULL_SERIES_DATES = (
+    BASELINE,
+    datetime.date(2026, 7, 17),
+    datetime.date(2026, 7, 20),
+    datetime.date(2026, 7, 21),
+    datetime.date(2026, 7, 22),
+    datetime.date(2026, 7, 23),
+    TARGET,
+)
 EXCLUSION_FIELDS = [
     "Symbol", "Name", "ExclusionDate", "ConsecutiveFailures",
     "State", "Type", "Reason", "OperatorAction",
@@ -242,6 +251,7 @@ class TWOfficialPostCloseCLITests(unittest.TestCase):
         root = Path(root)
         pipeline = Pipeline()
         module = types.ModuleType("local_quant")
+        module.OBSERVATION_SOURCE_VERSION = "observation-source-v1"
         module.get_taiwan_symbols = lambda _pipeline: list(symbols)
         module.load_stock_pipeline = lambda _root: pipeline
         module.build_stock_snapshot = (
@@ -297,6 +307,7 @@ class TWOfficialPostCloseCLITests(unittest.TestCase):
                 batch_identity={
                     "target_market_date": TARGET.isoformat(),
                     "product_mode": "observation",
+                    "source_version": module.OBSERVATION_SOURCE_VERSION,
                 },
             )
             return 0
@@ -421,7 +432,7 @@ class TWOfficialPostCloseCLITests(unittest.TestCase):
                 self._run_fake(temporary, reconcile=True)
 
     def test_cli_resume_reuses_discovered_baseline_and_series_identity(self):
-        series = snapshot_series((BASELINE, TARGET))
+        series = snapshot_series(FULL_SERIES_DATES)
         with tempfile.TemporaryDirectory() as temporary:
             for symbol in ("2303", "2330"):
                 write_artifact(temporary, symbol, TARGET.isoformat())
@@ -437,7 +448,49 @@ class TWOfficialPostCloseCLITests(unittest.TestCase):
                     final_dates={},
                 )
         self.assertEqual(result, 0)
-        self.assertEqual(builder.call_args.args[1], (BASELINE, TARGET))
+        self.assertEqual(builder.call_args.args[1], FULL_SERIES_DATES)
+
+    def test_cli_resume_uses_earlier_current_audit_baseline(self):
+        series = snapshot_series(FULL_SERIES_DATES)
+        with tempfile.TemporaryDirectory() as temporary:
+            write_artifact(temporary, "2303", BASELINE.isoformat())
+            write_artifact(temporary, "2330", TARGET.isoformat())
+            with patch.object(
+                LegacyArtifactBackupStore,
+                "discover_resume",
+                return_value=(series.manifest_sha256, datetime.date(2026, 7, 20)),
+            ):
+                result, _observed, builder, _module = self._run_fake(
+                    temporary,
+                    reconcile=True,
+                    series=series,
+                    final_dates={
+                        "2303": TARGET.isoformat(),
+                        "2330": TARGET.isoformat(),
+                    },
+                )
+        self.assertEqual(result, 0)
+        self.assertEqual(builder.call_args.args[1], FULL_SERIES_DATES)
+
+    def test_cli_resume_rejects_changed_series_identity(self):
+        series = snapshot_series(FULL_SERIES_DATES)
+        with tempfile.TemporaryDirectory() as temporary:
+            for symbol in ("2303", "2330"):
+                write_artifact(temporary, symbol, TARGET.isoformat())
+            with patch.object(
+                LegacyArtifactBackupStore,
+                "discover_resume",
+                return_value=("f" * 64, BASELINE),
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError, "series does not match resume state"
+                ):
+                    self._run_fake(
+                        temporary,
+                        reconcile=True,
+                        series=series,
+                        final_dates={},
+                    )
 
     def test_cli_reconciliation_patches_and_restores_writer(self):
         events = []
@@ -701,6 +754,27 @@ class TWOfficialPostCloseCLITests(unittest.TestCase):
                         },
                     )
 
+    def test_cli_refuses_unreadable_or_short_raw_exclusion_rows(self):
+        payloads = (
+            b"\xff\xfe\x00",
+            (",".join(EXCLUSION_FIELDS) + "\n2330\n").encode(),
+        )
+        for payload in payloads:
+            with self.subTest(payload=payload), tempfile.TemporaryDirectory() as temporary:
+                for symbol in ("2303", "2330"):
+                    write_artifact(temporary, symbol)
+                path = Path(temporary) / "checkpoints" / "exclusion_list-TW.csv"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(payload)
+                with self.assertRaisesRegex(RuntimeError, "recovery is incomplete"):
+                    self._run_fake(
+                        temporary,
+                        final_dates={
+                            "2303": TARGET.isoformat(),
+                            "2330": TARGET.isoformat(),
+                        },
+                    )
+
     def test_cli_returns_success_when_all_active_artifacts_match_target(self):
         with tempfile.TemporaryDirectory() as temporary:
             for symbol in ("2303", "2330"):
@@ -721,7 +795,7 @@ class TWOfficialPostCloseCLITests(unittest.TestCase):
         self.assertEqual(result, 7)
 
     def test_cli_repairs_last_artifact_post_write_pre_apply_without_rewrite(self):
-        series = snapshot_series((BASELINE, TARGET))
+        series = snapshot_series(FULL_SERIES_DATES)
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             legacy = write_artifact(root, "2330", BASELINE.isoformat())
@@ -750,7 +824,7 @@ class TWOfficialPostCloseCLITests(unittest.TestCase):
             after_mtime = target.stat().st_mtime_ns
             manifest = json.loads(store.manifest_path.read_text(encoding="utf-8"))
         self.assertEqual(result, 0)
-        self.assertEqual(builder.call_args.args[1], (BASELINE, TARGET))
+        self.assertEqual(builder.call_args.args[1], FULL_SERIES_DATES)
         self.assertEqual(after_sha, before_sha)
         self.assertEqual(after_mtime, before_mtime)
         self.assertEqual(manifest["entries"]["2330"]["status"], "applied")
@@ -760,6 +834,7 @@ class TWOfficialPostCloseCLITests(unittest.TestCase):
         original_fetch = pipeline.fetch_finmind_dataset
         observed = {}
         module = types.ModuleType("local_quant")
+        module.OBSERVATION_SOURCE_VERSION = "observation-source-v1"
         module.get_taiwan_symbols = lambda _pipeline: ["2303", "2330"]
         module.load_stock_pipeline = lambda _root: pipeline
 
@@ -792,6 +867,7 @@ class TWOfficialPostCloseCLITests(unittest.TestCase):
                 batch_identity={
                     "target_market_date": TARGET.isoformat(),
                     "product_mode": "observation",
+                    "source_version": module.OBSERVATION_SOURCE_VERSION,
                 },
             )
             payload = module.build_stock_snapshot(pipeline, "TW", "2330")
