@@ -48,16 +48,30 @@ def daily_snapshot(value, price_symbols=("2330", "2303")):
         request_count=6,
         request_budget=OfficialRequestBudget(6, 12, 6, 0, True, "capacity_proven"),
         source_mode="tw_official_bulk_v2",
-        source_schema_version="tw-official-historical-v1",
+        source_schema_version="tw-official-historical-v2",
     )
 
 
 def snapshot_series(dates=(TARGET,), price_symbols=("2330", "2303")):
     snapshots = {value: daily_snapshot(value, price_symbols) for value in dates}
+    manifest_document = {
+        "source_mode": "tw_official_bulk_v2",
+        "source_schema_version": "tw-official-historical-v2",
+        "target_date": max(dates).isoformat(),
+        "snapshots": [
+            {
+                "date": value.isoformat(),
+                "manifest_sha256": snapshots[value].manifest_sha256,
+            }
+            for value in dates
+        ],
+    }
     digest = hashlib.sha256(
         json.dumps(
-            [(value.isoformat(), snapshots[value].manifest_sha256) for value in dates]
-        ).encode()
+            manifest_document,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
     ).hexdigest()
     return OfficialSnapshotSeries(
         target_date=max(dates),

@@ -51,7 +51,7 @@ def snapshot_for(value, close, manifest_char):
         request_count=6,
         request_budget=OfficialRequestBudget(6, 12, 6, 0, True, "capacity_proven"),
         source_mode="tw_official_bulk_v2",
-        source_schema_version="tw-official-historical-v1",
+        source_schema_version="tw-official-historical-v2",
     )
 
 
@@ -65,13 +65,16 @@ def series():
     second = snapshot()
     document = {
         "source_mode": "tw_official_bulk_v2",
+        "source_schema_version": "tw-official-historical-v2",
         "target_date": TARGET.isoformat(),
         "snapshots": [
             {"date": first_date.isoformat(), "manifest_sha256": first.manifest_sha256},
             {"date": TARGET.isoformat(), "manifest_sha256": second.manifest_sha256},
         ],
     }
-    digest = hashlib.sha256(json.dumps(document, sort_keys=True).encode()).hexdigest()
+    digest = hashlib.sha256(
+        json.dumps(document, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
     return OfficialSnapshotSeries(
         target_date=TARGET,
         snapshots=MappingProxyType({first_date: first, TARGET: second}),
@@ -139,11 +142,25 @@ def target_history(**changes):
 
 
 def official_lineage(*, schema_version="tw-official-historical-v2", reconciliation=None):
+    manifest_document = {
+        "source_mode": "tw_official_bulk_v2",
+        "source_schema_version": schema_version,
+        "target_date": TARGET.isoformat(),
+        "snapshots": [
+            {"date": TARGET.isoformat(), "manifest_sha256": "a" * 64}
+        ],
+    }
     result = {
         "source_mode": "tw_official_bulk_v2",
         "source_schema_version": schema_version,
         "target_market_date": TARGET.isoformat(),
-        "official_series_manifest_sha256": "a" * 64,
+        "official_series_manifest_sha256": hashlib.sha256(
+            json.dumps(
+                manifest_document,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest(),
         "official_snapshot_dates": [TARGET.isoformat()],
         "official_snapshot_manifests": [
             {"date": TARGET.isoformat(), "manifest_sha256": "a" * 64}
@@ -156,6 +173,57 @@ def official_lineage(*, schema_version="tw-official-historical-v2", reconciliati
     if reconciliation is not None:
         result["legacy_reconciliation"] = reconciliation
     return result
+
+
+def reconciliation_record(
+    *,
+    replaced_date=None,
+    legacy_as_of=None,
+    snapshot_dates=None,
+):
+    replaced_date = replaced_date or TARGET.isoformat()
+    legacy_as_of = legacy_as_of or TARGET.isoformat()
+    snapshot_dates = snapshot_dates or (TARGET.isoformat(),)
+    snapshot_manifests = [
+        {
+            "date": value,
+            "manifest_sha256": ("a" if value == TARGET.isoformat() else "b") * 64,
+        }
+        for value in snapshot_dates
+    ]
+    manifest_document = {
+        "source_mode": "tw_official_bulk_v2",
+        "source_schema_version": "tw-official-historical-v2",
+        "target_date": snapshot_dates[-1],
+        "snapshots": snapshot_manifests,
+    }
+    return {
+        "schema_version": 1,
+        "mode": "replace_verified_legacy",
+        "legacy_artifact_sha256": "d" * 64,
+        "legacy_artifact_as_of": legacy_as_of,
+        "official_source_mode": "tw_official_bulk_v2",
+        "official_source_schema_version": "tw-official-historical-v2",
+        "official_series_manifest_sha256": hashlib.sha256(
+            json.dumps(
+                manifest_document,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest(),
+        "official_snapshot_dates": list(snapshot_dates),
+        "official_snapshot_manifests": snapshot_manifests,
+        "replaced_dates": [replaced_date],
+        "price_replaced_dates": [replaced_date],
+        "institutional_replaced_dates": [replaced_date],
+        "margin_replaced_dates": [replaced_date],
+        "date_evidence": [{
+            "date": replaced_date,
+            "price_replaced": True,
+            "institutional_replaced": True,
+            "margin_replaced": True,
+        }],
+    }
 
 
 def snapshot_without_optional(*, price=True, row_date=None, row_symbol="2330"):
@@ -210,7 +278,10 @@ class TWOfficialIncrementalTests(unittest.TestCase):
             )
             self.assertEqual(list(margin["MarginPurchaseTodayBalance"]), [4900.0, 5000.0])
             lineage = fetcher.lineage_for("2330")
-            self.assertEqual(lineage["official_series_manifest_sha256"], "a" * 64)
+            self.assertEqual(
+                lineage["official_series_manifest_sha256"],
+                "465df97b3dce102d52133e047071a045efae70e1e89a130bce29431a60a20104",
+            )
             self.assertNotIn("token", json.dumps(lineage).lower())
 
     def test_snapshot_series_fills_each_missing_trading_session_in_order(self):
@@ -634,6 +705,336 @@ class TWLegacyOverlapReconciliationTests(unittest.TestCase):
                     TARGET.isoformat(),
                 )
 
+    def test_reconciliation_rejects_invalid_official_source_identity(self):
+        base = snapshot()
+        cases = (
+            {"source_mode": "finmind"},
+            {"source_schema_version": "unknown-v99"},
+            {"manifest_sha256": "g" * 64},
+        )
+        for changes in cases:
+            values = {
+                "target_date": base.target_date,
+                "price_by_symbol": base.price_by_symbol,
+                "institutional_by_symbol": base.institutional_by_symbol,
+                "margin_by_symbol": base.margin_by_symbol,
+                "source_results": base.source_results,
+                "manifest_sha256": base.manifest_sha256,
+                "request_count": base.request_count,
+                "request_budget": base.request_budget,
+                "source_mode": base.source_mode,
+                "source_schema_version": base.source_schema_version,
+            }
+            values.update(changes)
+            with self.subTest(changes=changes):
+                with self.assertRaises(ValueError):
+                    self._fetcher(
+                        tempfile.gettempdir(),
+                        OfficialDailySnapshot(**values),
+                    )
+
+    def test_reconciliation_rejects_invalid_numeric_or_duplicate_category(self):
+        base = snapshot()
+        invalid_price = MappingProxyType({"2330": MappingProxyType({
+            **dict(base.price_by_symbol["2330"]),
+            "close": float("nan"),
+        })})
+        duplicate_institutional = MappingProxyType({"2330": (
+            base.institutional_by_symbol["2330"][0],
+            base.institutional_by_symbol["2330"][0],
+        )})
+        cases = (
+            (invalid_price, base.institutional_by_symbol, "TaiwanStockPrice"),
+            (
+                base.price_by_symbol,
+                duplicate_institutional,
+                "TaiwanStockInstitutionalInvestorsBuySell",
+            ),
+        )
+        for price_rows, institutional_rows, dataset in cases:
+            source = OfficialDailySnapshot(
+                target_date=base.target_date,
+                price_by_symbol=price_rows,
+                institutional_by_symbol=institutional_rows,
+                margin_by_symbol=base.margin_by_symbol,
+                source_results=base.source_results,
+                manifest_sha256=base.manifest_sha256,
+                request_count=base.request_count,
+                request_budget=base.request_budget,
+                source_mode=base.source_mode,
+                source_schema_version=base.source_schema_version,
+            )
+            with self.subTest(dataset=dataset):
+                with tempfile.TemporaryDirectory() as temporary:
+                    write_artifact(
+                        temporary,
+                        daily=target_history(),
+                        as_of=TARGET.isoformat(),
+                    )
+                    with self.assertRaises(IncrementalHistoryError):
+                        self._fetcher(temporary, source)(
+                            dataset,
+                            "2330",
+                            TARGET.isoformat(),
+                            TARGET.isoformat(),
+                        )
+
+    def test_official_lineage_rejects_tampered_canonical_series_identity(self):
+        lineage = official_lineage()
+        lineage["official_series_manifest_sha256"] = "f" * 64
+        matching = target_history(
+            Open=1100.0,
+            High=1120.0,
+            Low=1090.0,
+            Close=1110.0,
+            Volume=1000.0,
+            InstitutionalNet=90.0,
+            ForeignNet=80.0,
+            MarginBalance=5000.0,
+            ShortBalance=200.0,
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            write_artifact(
+                temporary,
+                daily=matching,
+                as_of=TARGET.isoformat(),
+                source_lineage=lineage,
+            )
+            with self.assertRaisesRegex(
+                IncrementalHistoryError,
+                "historical artifact lineage is not eligible for reconciliation: TW:2330",
+            ):
+                self._fetcher(temporary)(
+                    "TaiwanStockPrice",
+                    "2330",
+                    TARGET.isoformat(),
+                    TARGET.isoformat(),
+                )
+
+    def test_reconciliation_evidence_is_independent_of_query_range(self):
+        overlap = target_history()[0]
+        overlap["Date"] = "2026-07-23T00:00:00.000"
+        with tempfile.TemporaryDirectory() as temporary:
+            write_artifact(
+                temporary,
+                daily=history() + [overlap],
+                as_of="2026-07-23",
+            )
+            fetcher = self._fetcher(temporary, series())
+            fetcher(
+                "TaiwanStockPrice",
+                "2330",
+                TARGET.isoformat(),
+                TARGET.isoformat(),
+            )
+            self.assertEqual(
+                fetcher.reconciliation_for("2330")["replaced_dates"],
+                ["2026-07-23"],
+            )
+
+    def test_preserved_reconciliation_evidence_cannot_be_mutated_by_caller(self):
+        prior = reconciliation_record()
+        matching = target_history(
+            Open=1100.0,
+            High=1120.0,
+            Low=1090.0,
+            Close=1110.0,
+            Volume=1000.0,
+            InstitutionalNet=90.0,
+            ForeignNet=80.0,
+            MarginBalance=5000.0,
+            ShortBalance=200.0,
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            lineage = official_lineage(reconciliation=prior)
+            lineage["historical_as_of"] = TARGET.isoformat()
+            write_artifact(
+                temporary,
+                daily=matching,
+                as_of=TARGET.isoformat(),
+                source_lineage=lineage,
+            )
+            fetcher = self._fetcher(temporary)
+            first = fetcher.lineage_for("2330")
+            first["legacy_reconciliation"]["date_evidence"][0][
+                "margin_replaced"
+            ] = False
+            self.assertTrue(
+                fetcher.lineage_for("2330")["legacy_reconciliation"]
+                ["date_evidence"][0]["margin_replaced"]
+            )
+
+    def test_official_lineage_rejects_impossible_reconciliation_dates(self):
+        impossible = reconciliation_record(
+            replaced_date="2026-07-23",
+            legacy_as_of="2026-07-22",
+        )
+        lineage = official_lineage(reconciliation=impossible)
+        lineage["historical_as_of"] = "2026-07-22"
+        with tempfile.TemporaryDirectory() as temporary:
+            write_artifact(
+                temporary,
+                daily=target_history(
+                    Open=1100.0,
+                    High=1120.0,
+                    Low=1090.0,
+                    Close=1110.0,
+                    Volume=1000.0,
+                    InstitutionalNet=90.0,
+                    ForeignNet=80.0,
+                    MarginBalance=5000.0,
+                    ShortBalance=200.0,
+                ),
+                as_of=TARGET.isoformat(),
+                source_lineage=lineage,
+            )
+            with self.assertRaisesRegex(
+                IncrementalHistoryError,
+                "historical artifact lineage is not eligible for reconciliation: TW:2330",
+            ):
+                self._fetcher(temporary)(
+                    "TaiwanStockPrice",
+                    "2330",
+                    TARGET.isoformat(),
+                    TARGET.isoformat(),
+                )
+
+    def test_official_lineage_rejects_impossible_preserved_time_identity(self):
+        impossible_records = (
+            reconciliation_record(
+                snapshot_dates=(TARGET.isoformat(), "2026-07-25"),
+            ),
+            reconciliation_record(
+                replaced_date="2026-07-23",
+                legacy_as_of=TARGET.isoformat(),
+                snapshot_dates=("2026-07-23", TARGET.isoformat()),
+            ),
+        )
+        matching = target_history(
+            Open=1100.0,
+            High=1120.0,
+            Low=1090.0,
+            Close=1110.0,
+            Volume=1000.0,
+            InstitutionalNet=90.0,
+            ForeignNet=80.0,
+            MarginBalance=5000.0,
+            ShortBalance=200.0,
+        )
+        for reconciliation in impossible_records:
+            with self.subTest(reconciliation=reconciliation):
+                lineage = official_lineage(reconciliation=reconciliation)
+                lineage["historical_as_of"] = TARGET.isoformat()
+                with tempfile.TemporaryDirectory() as temporary:
+                    write_artifact(
+                        temporary,
+                        daily=matching,
+                        as_of=TARGET.isoformat(),
+                        source_lineage=lineage,
+                    )
+                    with self.assertRaisesRegex(
+                        IncrementalHistoryError,
+                        "historical artifact lineage is not eligible for reconciliation: TW:2330",
+                    ):
+                        self._fetcher(temporary)(
+                            "TaiwanStockPrice",
+                            "2330",
+                            TARGET.isoformat(),
+                            TARGET.isoformat(),
+                        )
+
+    def test_single_snapshot_reconciliation_lineage_round_trips_as_official(self):
+        matching = target_history(
+            Open=1100.0,
+            High=1120.0,
+            Low=1090.0,
+            Close=1110.0,
+            Volume=1000.0,
+            InstitutionalNet=90.0,
+            ForeignNet=80.0,
+            MarginBalance=5000.0,
+            ShortBalance=200.0,
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            write_artifact(
+                temporary,
+                daily=target_history(),
+                as_of=TARGET.isoformat(),
+            )
+            reconciler = self._fetcher(temporary)
+            for dataset in OfficialCompatFetcher.SUPPORTED_DATASETS:
+                reconciler(
+                    dataset,
+                    "2330",
+                    TARGET.isoformat(),
+                    TARGET.isoformat(),
+                )
+            write_artifact(
+                temporary,
+                daily=matching,
+                as_of=TARGET.isoformat(),
+                source_lineage=reconciler.lineage_for("2330"),
+            )
+            strict = OfficialCompatFetcher(Path(temporary), snapshot(), pd=pd)
+            price = strict(
+                "TaiwanStockPrice",
+                "2330",
+                TARGET.isoformat(),
+                TARGET.isoformat(),
+            )
+            self.assertEqual(price.iloc[0]["close"], 1110.0)
+
+    def test_official_lineage_allows_symbol_history_after_series_start(self):
+        lineage = official_lineage()
+        snapshot_dates = ["2026-07-22", TARGET.isoformat()]
+        snapshot_manifests = [
+            {"date": "2026-07-22", "manifest_sha256": "b" * 64},
+            {"date": TARGET.isoformat(), "manifest_sha256": "a" * 64},
+        ]
+        manifest_document = {
+            "source_mode": "tw_official_bulk_v2",
+            "source_schema_version": "tw-official-historical-v2",
+            "target_date": TARGET.isoformat(),
+            "snapshots": snapshot_manifests,
+        }
+        lineage.update(
+            historical_as_of="2026-07-23",
+            official_snapshot_dates=snapshot_dates,
+            official_snapshot_manifests=snapshot_manifests,
+            official_series_manifest_sha256=hashlib.sha256(
+                json.dumps(
+                    manifest_document,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest(),
+        )
+        matching = target_history(
+            Open=1100.0,
+            High=1120.0,
+            Low=1090.0,
+            Close=1110.0,
+            Volume=1000.0,
+            InstitutionalNet=90.0,
+            ForeignNet=80.0,
+            MarginBalance=5000.0,
+            ShortBalance=200.0,
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            write_artifact(
+                temporary,
+                daily=matching,
+                as_of=TARGET.isoformat(),
+                source_lineage=lineage,
+            )
+            price = self._fetcher(temporary)(
+                "TaiwanStockPrice",
+                "2330",
+                TARGET.isoformat(),
+                TARGET.isoformat(),
+            )
+            self.assertEqual(price.iloc[0]["close"], 1110.0)
+
     def test_reconciliation_evidence_records_original_hash_and_dates(self):
         with tempfile.TemporaryDirectory() as temporary:
             path = write_artifact(
@@ -666,21 +1067,7 @@ class TWLegacyOverlapReconciliationTests(unittest.TestCase):
             )
 
     def test_later_official_run_preserves_legacy_reconciliation_evidence(self):
-        prior = {
-            "schema_version": 1,
-            "mode": "replace_verified_legacy",
-            "legacy_artifact_sha256": "d" * 64,
-            "replaced_dates": [TARGET.isoformat()],
-            "price_replaced_dates": [TARGET.isoformat()],
-            "institutional_replaced_dates": [TARGET.isoformat()],
-            "margin_replaced_dates": [TARGET.isoformat()],
-            "date_evidence": [{
-                "date": TARGET.isoformat(),
-                "price_replaced": True,
-                "institutional_replaced": True,
-                "margin_replaced": True,
-            }],
-        }
+        prior = reconciliation_record()
         matching = target_history(
             Open=1100.0,
             High=1120.0,
@@ -693,11 +1080,13 @@ class TWLegacyOverlapReconciliationTests(unittest.TestCase):
             ShortBalance=200.0,
         )
         with tempfile.TemporaryDirectory() as temporary:
+            lineage = official_lineage(reconciliation=prior)
+            lineage["historical_as_of"] = TARGET.isoformat()
             write_artifact(
                 temporary,
                 daily=matching,
                 as_of=TARGET.isoformat(),
-                source_lineage=official_lineage(reconciliation=prior),
+                source_lineage=lineage,
             )
             fetcher = self._fetcher(temporary)
             fetcher(
