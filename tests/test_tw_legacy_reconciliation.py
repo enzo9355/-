@@ -220,6 +220,13 @@ class LegacyArtifactBackupStoreTests(unittest.TestCase):
             "passthrough",
         )
         self.assertFalse(self.store.manifest_path.exists())
+        self.assertFalse(self.store.backup_root.exists())
+        self.assertIsNone(
+            LegacyArtifactBackupStore.discover_resume(
+                self.root,
+                target_date=TARGET,
+            )
+        )
 
     def test_constructor_and_symbol_identity_fail_closed(self):
         for target_date, series_sha in (

@@ -1493,6 +1493,60 @@ class TWLegacyOverlapReconciliationTests(unittest.TestCase):
                 OfficialCompatFetcher._valid_official_lineage(mixed, artifact)
             )
 
+    def test_official_lineage_rejects_future_or_cross_symbol_history(self):
+        future = reconciliation_record(
+            replaced_date=TARGET.isoformat(),
+            legacy_as_of=TARGET.isoformat(),
+            snapshot_dates=(TARGET.isoformat(), "2026-07-28"),
+        )
+        prior = reconciliation_record()
+        cases = (
+            ("2330", [future]),
+            ("2303", [prior]),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            for symbol, history_value in cases:
+                with self.subTest(symbol=symbol):
+                    lineage = official_lineage()
+                    lineage["symbol"] = symbol
+                    lineage["legacy_reconciliation_history"] = history_value
+                    write_artifact(
+                        temporary,
+                        symbol=symbol,
+                        daily=target_history(),
+                        as_of=TARGET.isoformat(),
+                        source_lineage=lineage,
+                    )
+                    artifact = load_incremental_artifact(
+                        Path(temporary), symbol
+                    )
+                    self.assertFalse(
+                        OfficialCompatFetcher._valid_official_lineage(
+                            lineage, artifact
+                        )
+                    )
+
+    def test_official_lineage_rejects_unordered_history(self):
+        current = reconciliation_record()
+        earlier = reconciliation_record(
+            replaced_date="2026-07-23",
+            legacy_as_of="2026-07-23",
+            snapshot_dates=("2026-07-23",),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            lineage = official_lineage()
+            lineage["legacy_reconciliation_history"] = [current, earlier]
+            write_artifact(
+                temporary,
+                daily=target_history(),
+                as_of=TARGET.isoformat(),
+                source_lineage=lineage,
+            )
+            artifact = load_incremental_artifact(Path(temporary), "2330")
+            self.assertFalse(
+                OfficialCompatFetcher._valid_official_lineage(lineage, artifact)
+            )
+
     def test_reconciliation_does_not_bootstrap_missing_artifact(self):
         with tempfile.TemporaryDirectory() as temporary:
             with self.assertRaisesRegex(
