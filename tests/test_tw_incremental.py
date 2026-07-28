@@ -1521,6 +1521,15 @@ class TWLegacyOverlapReconciliationTests(unittest.TestCase):
             self.assertFalse(
                 OfficialCompatFetcher._valid_official_lineage(tampered, artifact)
             )
+            artifact_tampered = copy.deepcopy(output)
+            artifact_tampered["legacy_reconciliation_history"][0][
+                "reconciled_artifact_sha256"
+            ] = "f" * 64
+            self.assertFalse(
+                OfficialCompatFetcher._valid_official_lineage(
+                    artifact_tampered, artifact
+                )
+            )
             mixed = copy.deepcopy(output)
             mixed["legacy_reconciliation"] = prior
             self.assertFalse(
