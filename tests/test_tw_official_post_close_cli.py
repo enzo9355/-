@@ -787,6 +787,27 @@ class TWOfficialPostCloseCLITests(unittest.TestCase):
             )
         self.assertEqual(result, 0)
 
+    def test_cli_post_run_checks_reconciliation_state_before_artifact_gate(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            for symbol in ("2303", "2330"):
+                write_artifact(temporary, symbol)
+            with patch.object(cli, "LegacyArtifactBackupStore") as store_type:
+                store_type.discover_resume.return_value = None
+                store_type.return_value.assert_current_state_complete = Mock(
+                    side_effect=RuntimeError("reconciliation state is incomplete")
+                )
+                with self.assertRaisesRegex(
+                    RuntimeError, "reconciliation state is incomplete"
+                ):
+                    self._run_fake(
+                        temporary,
+                        reconcile=True,
+                        final_dates={
+                            "2303": TARGET.isoformat(),
+                            "2330": TARGET.isoformat(),
+                        },
+                    )
+
     def test_cli_returns_nonzero_local_quant_status_unchanged(self):
         with tempfile.TemporaryDirectory() as temporary:
             for symbol in ("2303", "2330"):
