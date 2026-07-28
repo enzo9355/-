@@ -5,9 +5,11 @@ import hashlib
 import json
 import os
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from stock_papi.quant.tw_legacy_reconciliation import (
     LegacyArtifactBackupStore,
@@ -324,6 +326,70 @@ class LegacyArtifactBackupStoreTests(unittest.TestCase):
         _path, second = read_manifest(self.root)
         self.assertEqual(second, first)
         self.assertEqual(manifest_path.stat().st_mtime_ns, first_mtime)
+
+    def test_concurrent_backups_do_not_lose_manifest_entries(self):
+        second_path, _ = write_artifact(
+            self.root, legacy_document(), symbol="2303"
+        )
+        second_evidence = evidence(
+            hashlib.sha256(second_path.read_bytes()).hexdigest()
+        )
+        second_store = LegacyArtifactBackupStore(
+            self.root,
+            target_date=TARGET,
+            series_manifest_sha256=SERIES_SHA,
+        )
+        first_in_write = threading.Event()
+        release_first = threading.Event()
+        second_started = threading.Event()
+        errors = []
+        real_write = LegacyArtifactBackupStore._write_manifest
+
+        def delayed_write(store, document):
+            if threading.current_thread().name == "first-backup":
+                first_in_write.set()
+                if not release_first.wait(5):
+                    raise AssertionError("timed out waiting to release first write")
+            return real_write(store, document)
+
+        def backup(store, symbol, path, value):
+            try:
+                if symbol == "2303":
+                    second_started.set()
+                store.backup_before_write(
+                    symbol=symbol, artifact_path=path, evidence=value
+                )
+            except BaseException as exc:
+                errors.append(exc)
+
+        with patch.object(
+            LegacyArtifactBackupStore, "_write_manifest", delayed_write
+        ):
+            first = threading.Thread(
+                target=backup,
+                args=(self.store, "2330", self.path, self.evidence),
+                name="first-backup",
+            )
+            second = threading.Thread(
+                target=backup,
+                args=(second_store, "2303", second_path, second_evidence),
+                name="second-backup",
+            )
+            first.start()
+            self.assertTrue(first_in_write.wait(5))
+            second.start()
+            self.assertTrue(second_started.wait(5))
+            time.sleep(0.05)
+            self.assertTrue(second.is_alive())
+            release_first.set()
+            first.join(5)
+            second.join(5)
+
+        self.assertFalse(first.is_alive())
+        self.assertFalse(second.is_alive())
+        self.assertEqual(errors, [])
+        _path, manifest = read_manifest(self.root)
+        self.assertEqual(set(manifest["entries"]), {"2303", "2330"})
 
     def test_backup_complete_state_can_resume(self):
         self.backup()
