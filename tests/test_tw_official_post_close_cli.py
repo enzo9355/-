@@ -122,7 +122,7 @@ def write_calendar(root, year=2026):
     return path
 
 
-def write_artifact(root, symbol, as_of="2026-07-23"):
+def write_artifact(root, symbol, as_of="2026-07-23", source_lineage=None):
     path = Path(root) / "artifacts" / "stocks" / "TW" / f"{symbol}.json.gz"
     path.parent.mkdir(parents=True, exist_ok=True)
     document = {
@@ -170,6 +170,8 @@ def exclusion_row(symbol, state="Excluded", action=""):
         "Reason": "test",
         "OperatorAction": action,
     }
+    if source_lineage is not None:
+        document["source_lineage"] = source_lineage
 
 
 def reconciliation_evidence(original_sha, series):
@@ -201,6 +203,29 @@ def reconciliation_evidence(original_sha, series):
             "institutional_action": "preserved_legacy_no_official_row",
             "margin_action": "preserved_legacy_no_official_row",
         }],
+    }
+
+
+def official_lineage(symbol, series):
+    return {
+        "source_mode": series.source_mode,
+        "source_schema_version": series.source_schema_version,
+        "symbol": symbol,
+        "target_market_date": series.target_date.isoformat(),
+        "historical_as_of": series.target_date.isoformat(),
+        "historical_artifact_sha256": "c" * 64,
+        "official_target_price_available": (
+            symbol in series.snapshots[series.target_date].price_by_symbol
+        ),
+        "official_snapshot_dates": [value.isoformat() for value in series.dates],
+        "official_snapshot_manifests": [
+            {
+                "date": value.isoformat(),
+                "manifest_sha256": snapshot.manifest_sha256,
+            }
+            for value, snapshot in series.snapshots.items()
+        ],
+        "official_series_manifest_sha256": series.manifest_sha256,
     }
 
 
@@ -285,7 +310,12 @@ class TWOfficialPostCloseCLITests(unittest.TestCase):
                 if as_of is None:
                     write_artifact(data_root, symbol).unlink()
                 else:
-                    write_artifact(data_root, symbol, as_of)
+                    write_artifact(
+                        data_root,
+                        symbol,
+                        as_of,
+                        official_lineage(symbol, chosen_series) if reconcile else None,
+                    )
             state = {
                 "stage": "market_batch",
                 "market": "TW",
@@ -446,7 +476,12 @@ class TWOfficialPostCloseCLITests(unittest.TestCase):
         series = snapshot_series(FULL_SERIES_DATES)
         with tempfile.TemporaryDirectory() as temporary:
             for symbol in ("2303", "2330"):
-                write_artifact(temporary, symbol, TARGET.isoformat())
+                write_artifact(
+                    temporary,
+                    symbol,
+                    TARGET.isoformat(),
+                    official_lineage(symbol, series),
+                )
             with patch.object(
                 LegacyArtifactBackupStore,
                 "discover_resume",
@@ -827,6 +862,28 @@ class TWOfficialPostCloseCLITests(unittest.TestCase):
                         },
                     )
 
+    def test_cli_refuses_target_date_active_artifact_without_official_lineage(self):
+        series = snapshot_series(FULL_SERIES_DATES)
+        with tempfile.TemporaryDirectory() as temporary:
+            for symbol in ("2303", "2330"):
+                write_artifact(temporary, symbol, TARGET.isoformat())
+            with patch.object(
+                LegacyArtifactBackupStore,
+                "discover_resume",
+                return_value=(series.manifest_sha256, BASELINE),
+            ), patch.object(
+                LegacyArtifactBackupStore,
+                "assert_current_state_complete",
+                return_value=frozenset(),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "recovery is incomplete"):
+                    self._run_fake(
+                        temporary,
+                        reconcile=True,
+                        series=series,
+                        final_dates={},
+                    )
+
     def test_cli_returns_nonzero_local_quant_status_unchanged(self):
         with tempfile.TemporaryDirectory() as temporary:
             for symbol in ("2303", "2330"):
@@ -850,7 +907,12 @@ class TWOfficialPostCloseCLITests(unittest.TestCase):
                 symbol="2330", artifact_path=legacy, evidence=evidence
             )
             target = write_official_artifact(root, "2330", series, evidence)
-            write_artifact(root, "2303", TARGET.isoformat())
+            write_artifact(
+                root,
+                "2303",
+                TARGET.isoformat(),
+                official_lineage("2303", series),
+            )
             before_sha = hashlib.sha256(target.read_bytes()).hexdigest()
             before_mtime = target.stat().st_mtime_ns
             time.sleep(0.01)
