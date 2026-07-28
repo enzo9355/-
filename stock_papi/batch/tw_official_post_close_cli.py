@@ -21,7 +21,11 @@ from stock_papi.integrations.market_data.tw_official_historical import (
     build_official_snapshot_series,
 )
 from stock_papi.quant.tw_artifact_audit import audit_artifact_dates
-from stock_papi.quant.tw_incremental import OfficialCompatFetcher
+from stock_papi.quant.tw_incremental import (
+    IncrementalHistoryError,
+    OfficialCompatFetcher,
+    load_incremental_artifact,
+)
 from stock_papi.quant.tw_legacy_reconciliation import LegacyArtifactBackupStore
 
 
@@ -193,6 +197,8 @@ def _assert_complete(
     symbols: list[str],
     target_market_date: datetime.date,
     expected_identity: dict[str, Any],
+    official_series: OfficialSnapshotSeries | None = None,
+    applied_reconciliation_symbols: frozenset[str] = frozenset(),
 ) -> None:
     pending, excluded = _load_exclusion_state(root)
     universe = set(symbols)
@@ -239,6 +245,49 @@ def _assert_complete(
         or any(value != target_market_date for value in audit.latest_by_symbol.values())
     ):
         raise RuntimeError(_INCOMPLETE)
+    if official_series is None:
+        return
+    if not applied_reconciliation_symbols.issubset(active):
+        raise RuntimeError(_INCOMPLETE)
+    expected_dates = [value.isoformat() for value in official_series.dates]
+    expected_manifests = [
+        {
+            "date": value.isoformat(),
+            "manifest_sha256": snapshot.manifest_sha256,
+        }
+        for value, snapshot in official_series.snapshots.items()
+    ]
+    for symbol in sorted(active):
+        try:
+            artifact = load_incremental_artifact(root, symbol)
+        except IncrementalHistoryError as exc:
+            raise RuntimeError(_INCOMPLETE) from exc
+        lineage = artifact.document.get("source_lineage")
+        reconciliation = (
+            lineage.get("legacy_reconciliation")
+            if isinstance(lineage, dict)
+            else None
+        )
+        if (
+            not OfficialCompatFetcher._valid_official_lineage(lineage, artifact)
+            or lineage.get("source_mode") != official_series.source_mode
+            or lineage.get("source_schema_version")
+            != official_series.source_schema_version
+            or lineage.get("target_market_date")
+            != target_market_date.isoformat()
+            or lineage.get("official_series_manifest_sha256")
+            != official_series.manifest_sha256
+            or lineage.get("official_snapshot_dates") != expected_dates
+            or lineage.get("official_snapshot_manifests") != expected_manifests
+            or lineage.get("official_target_price_available")
+            != (
+                symbol
+                in official_series.snapshots[target_market_date].price_by_symbol
+            )
+            or (reconciliation is not None)
+            != (symbol in applied_reconciliation_symbols)
+        ):
+            raise RuntimeError(_INCOMPLETE)
 
 
 @contextlib.contextmanager
@@ -452,8 +501,11 @@ def run(
         result = int(local_quant.main(argv))
     if result != 0:
         return result
+    applied_reconciliation_symbols = frozenset()
     if backup_store is not None:
-        backup_store.assert_current_state_complete()
+        applied_reconciliation_symbols = frozenset(
+            backup_store.assert_current_state_complete() or ()
+        )
     expected_identity = _enrich_batch_identity(
         {
             "target_market_date": target_market_date.isoformat(),
@@ -470,6 +522,8 @@ def run(
         symbols=[str(value) for value in symbols],
         target_market_date=target_market_date,
         expected_identity=expected_identity,
+        official_series=series if reconcile_legacy_overlaps else None,
+        applied_reconciliation_symbols=applied_reconciliation_symbols,
     )
     return 0
 

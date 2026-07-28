@@ -136,6 +136,8 @@ def write_artifact(root, symbol, as_of="2026-07-23", source_lineage=None):
             "Close": 1.0, "Volume": 1.0,
         }],
     }
+    if source_lineage is not None:
+        document["source_lineage"] = source_lineage
     with path.open("wb") as raw:
         with gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as stream:
             stream.write(json.dumps(document).encode())
@@ -170,10 +172,6 @@ def exclusion_row(symbol, state="Excluded", action=""):
         "Reason": "test",
         "OperatorAction": action,
     }
-    if source_lineage is not None:
-        document["source_lineage"] = source_lineage
-
-
 def reconciliation_evidence(original_sha, series):
     dates = [value.isoformat() for value in series.dates]
     manifests = [
