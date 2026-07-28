@@ -615,3 +615,31 @@ Run two independent final-head reviews: security/state-machine and data/provenan
 - Schema v2 distinguishes overlap from per-dataset replacement or preservation without symbol exceptions.
 - The nine-symbol check is read-only, network-denying, writer-free, and batch-free.
 - `00947B` and `00948B` remain fail closed; no bootstrap or exclusion mutation exists.
+
+## Phase 1N execution result (2026-07-28)
+
+The three Phase 1M implementation findings now have RED/GREEN coverage:
+
+| Revision | RED commit | GREEN commit | Focused result |
+|---|---|---|---|
+| resume current artifact | `3883fc8`, `ad7177d` | `51a9739b`, `07b1b30` | included below |
+| outer/inner lineage binding | `3883fc8` | `e531334` | included below |
+| no-price overlap/schema v2 | `3883fc8`, `a786157` | `d1c16c9` | included below |
+
+Fresh code verification passed: the five required focused modules ran 167 tests with one existing Windows symlink-capability skip, and the full suite ran 1,014 tests with the same single skip. Python compile, Node syntax, PowerShell 5.1 AST, and diff checks passed.
+
+The mandatory Production-cache acceptance gate did not pass. The seven-date warm series `bc195e0df4cd6e63ee93f90c31c746007fbfa320db44374ef1617c2d725f7544` was read with zero requests and zero selected-data mutations. All nine symbols produced all three datasets, schema-v2 baseline evidence, zero duplicate identities, and zero non-finite numeric values. However, the validated 2026-07-24 snapshot contains no official price row for any of the nine, so every target-dated in-memory stock snapshot correctly failed with `ValueError: target market date mismatch`. Their latest available price dates were:
+
+| Symbol | Latest price date |
+|---|---|
+| 1589 | 2026-07-16 |
+| 3064 | 2026-07-22 |
+| 3067 | 2026-07-23 |
+| 4183 | 2026-07-22 |
+| 4305 | 2026-07-23 |
+| 4804 | 2026-07-16 |
+| 6236 | 2026-07-16 |
+| 6242 | 2026-07-23 |
+| 8905 | 2026-07-23 |
+
+No price was synthesized or carried forward. Therefore this revision remains fail closed and cannot be reported ready for independent revalidation until a separately authorized source/cache correction provides trustworthy target-date price rows or the acceptance contract is revised.

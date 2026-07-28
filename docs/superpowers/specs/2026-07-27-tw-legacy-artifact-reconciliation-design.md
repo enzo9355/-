@@ -269,3 +269,9 @@ This phase records enough evidence for a later separately authorized rollback: i
 - Official CLI returns zero only when every active artifact is complete at the target date.
 - Missing-baseline symbols remain outside this phase.
 - No Production, network, publication, scheduling, or data mutation occurs.
+
+## Phase 1N acceptance note (2026-07-28)
+
+The implementation satisfies the schema-v2 no-price overlap contract without weakening strict mode: a missing official overlap row preserves the exact legacy dataset values, while each available optional dataset replaces independently. Resume validation, terminal active-artifact validation, and outer/inner lineage cross-binding are also enforced.
+
+The required read-only nine-symbol acceptance run remains blocked by current verified source state. The 2026-07-24 warm snapshot has no official price row for `1589`, `3064`, `3067`, `4183`, `4305`, `4804`, `6236`, `6242`, or `8905`. Consequently no legal in-memory artifact can claim `as_of=2026-07-24`; all nine fail the existing target-date invariant. This design does not permit forward fill, synthetic zero rows, or relabeling legacy values as official, so the failure is preserved rather than bypassed.
