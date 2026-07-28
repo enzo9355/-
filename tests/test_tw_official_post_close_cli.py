@@ -882,6 +882,45 @@ class TWOfficialPostCloseCLITests(unittest.TestCase):
                         final_dates={},
                     )
 
+    def test_cli_strict_refuses_target_date_artifact_without_official_lineage(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            for symbol in ("2303", "2330"):
+                write_artifact(temporary, symbol, TARGET.isoformat())
+            with self.assertRaisesRegex(RuntimeError, "recovery is incomplete"):
+                self._run_fake(temporary, final_dates={})
+
+    def test_cli_final_loader_compares_applied_manifest_sha(self):
+        series = snapshot_series(FULL_SERIES_DATES)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            write_artifact(
+                root,
+                "2303",
+                TARGET.isoformat(),
+                official_lineage("2303", series),
+            )
+            legacy = write_artifact(root, "2330", BASELINE.isoformat())
+            value = reconciliation_evidence(
+                hashlib.sha256(legacy.read_bytes()).hexdigest(), series
+            )
+            write_official_artifact(root, "2330", series, value)
+            with patch.object(
+                LegacyArtifactBackupStore,
+                "discover_resume",
+                return_value=(series.manifest_sha256, BASELINE),
+            ), patch.object(
+                LegacyArtifactBackupStore,
+                "assert_current_state_complete",
+                return_value={"2330": "f" * 64},
+            ):
+                with self.assertRaisesRegex(RuntimeError, "recovery is incomplete"):
+                    self._run_fake(
+                        root,
+                        reconcile=True,
+                        series=series,
+                        final_dates={},
+                    )
+
     def test_cli_returns_nonzero_local_quant_status_unchanged(self):
         with tempfile.TemporaryDirectory() as temporary:
             for symbol in ("2303", "2330"):

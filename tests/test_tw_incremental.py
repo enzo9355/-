@@ -1410,6 +1410,77 @@ class TWLegacyOverlapReconciliationTests(unittest.TestCase):
                 )
             )
 
+    def test_next_market_date_preserves_reconciliation_as_valid_history(self):
+        prior = reconciliation_record()
+        future = datetime.date(2026, 7, 27)
+        future_snapshot = snapshot_for(future, 1120.0, "c")
+        document = {
+            "source_mode": "tw_official_bulk_v2",
+            "source_schema_version": "tw-official-historical-v2",
+            "target_date": future.isoformat(),
+            "snapshots": [{
+                "date": future.isoformat(),
+                "manifest_sha256": future_snapshot.manifest_sha256,
+            }],
+        }
+        future_series = OfficialSnapshotSeries(
+            target_date=future,
+            snapshots=MappingProxyType({future: future_snapshot}),
+            manifest_sha256=hashlib.sha256(
+                json.dumps(
+                    document, sort_keys=True, separators=(",", ":")
+                ).encode()
+            ).hexdigest(),
+            request_count=6,
+            request_budget=OfficialRequestBudget(6, 12, 6, 0, True, "capacity_proven"),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            write_artifact(
+                temporary,
+                daily=target_history(
+                    Open=1100.0,
+                    High=1120.0,
+                    Low=1090.0,
+                    Close=1110.0,
+                    Volume=1000.0,
+                    InstitutionalNet=90.0,
+                    ForeignNet=80.0,
+                    MarginBalance=5000.0,
+                    ShortBalance=200.0,
+                ),
+                as_of=TARGET.isoformat(),
+                source_lineage=official_lineage(reconciliation=prior),
+            )
+            fetcher = OfficialCompatFetcher(
+                Path(temporary), future_series, pd=pd
+            )
+            price = fetcher(
+                "TaiwanStockPrice",
+                "2330",
+                future.isoformat(),
+                future.isoformat(),
+            )
+            output = fetcher.lineage_for("2330")
+            self.assertNotIn("legacy_reconciliation", output)
+            self.assertEqual(output["legacy_reconciliation_history"], [prior])
+            write_artifact(
+                temporary,
+                daily=[{
+                    "Date": f"{future.isoformat()}T00:00:00.000",
+                    "Open": price.iloc[0]["open"],
+                    "High": price.iloc[0]["max"],
+                    "Low": price.iloc[0]["min"],
+                    "Close": price.iloc[0]["close"],
+                    "Volume": price.iloc[0]["Trading_Volume"],
+                }],
+                as_of=future.isoformat(),
+                source_lineage=output,
+            )
+            artifact = load_incremental_artifact(Path(temporary), "2330")
+            self.assertTrue(
+                OfficialCompatFetcher._valid_official_lineage(output, artifact)
+            )
+
     def test_reconciliation_does_not_bootstrap_missing_artifact(self):
         with tempfile.TemporaryDirectory() as temporary:
             with self.assertRaisesRegex(
