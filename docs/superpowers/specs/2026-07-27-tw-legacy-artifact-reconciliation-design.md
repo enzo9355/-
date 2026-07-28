@@ -115,11 +115,11 @@ The fetcher accumulates reconciliation schema v2 evidence per symbol and exposes
 }
 ```
 
-`lineage_for(symbol)` adds this evidence as `legacy_reconciliation` only after reconciliation. A later official run preserves a valid existing reconciliation record so the audit trail is not discarded.
+`lineage_for(symbol)` adds this evidence as `legacy_reconciliation` only after reconciliation. An idempotent run against the same official series retains that direct record and its full outer/inner binding. A later run against a different target or series moves the record to `legacy_reconciliation_history`; the current outer lineage then describes the current official run instead of claiming the older snapshot series ends at the new target.
 
 When official lineage contains `legacy_reconciliation`, validation cross-binds every duplicated identity rather than accepting two independently well-formed documents. Outer historical SHA/as-of must equal inner legacy artifact SHA/as-of. Outer source mode, source schema, series SHA, snapshot dates, and snapshot manifests must equal the inner official identities exactly. The backup result validator delegates to this same full lineage validator and then checks the manifest entry identity; it does not maintain a weaker second trust boundary.
 
-When a later official run preserves an earlier reconciliation record, the outer historical SHA/as-of remains the original legacy root identity from that record, rather than being rewritten to the intermediate official artifact. The outer official series and snapshot identities likewise remain the reconciled source identity while the record is preserved. This keeps the required full equality truthful without adding a second relation schema.
+Every history record is independently validated against its own ordered snapshot tail and canonical series identity. A lineage cannot contain both a direct `legacy_reconciliation` and `legacy_reconciliation_history`; malformed or mixed relations fail closed. This preserves the original audit evidence without making the current target identity internally impossible.
 
 ## Backup store
 
@@ -141,7 +141,7 @@ manifest.json
 
 The constructor validates the date and 64-hex series identity. Symbol values must match the existing TW symbol contract. Artifact paths must equal the expected TW artifact path under the configured root. Existing path components are checked without following links; symlinks and Windows reparse points are rejected. Resolved paths must remain below their expected roots.
 
-Backup objects contain the original compressed bytes. A new object is written to a unique same-directory `O_EXCL` temporary file, flushed/fsynced, then atomically published without overwrite using `os.link(temp, final)` and the temporary link is removed. If the final name wins a race, the store verifies the existing object instead. An unsupported no-clobber operation fails closed. The final object is always re-read to verify bytes, size, and SHA. Manifest writes use a unique same-directory `O_EXCL` temporary file, flush/fsync, and atomic `os.replace()`.
+Backup objects contain the original compressed bytes. A new object is written to a unique same-directory `O_EXCL` temporary file, flushed/fsynced, then atomically published without overwrite using `os.link(temp, final)` and the temporary link is removed. If the final name wins a race, the store verifies the existing object instead. An unsupported no-clobber operation fails closed. The final object is always re-read to verify bytes, size, and SHA. Manifest writes use a unique same-directory `O_EXCL` temporary file, flush/fsync, and atomic `os.replace()`. A persistent one-byte `.manifest.lock` uses the native standard-library byte-range/file lock so every manifest read-modify-write transition and terminal state read is serialized across processes; lock path or acquisition failures fail closed.
 
 Every manifest read validates the complete top-level and entry contract: schema, target date, series manifest, unique valid symbols, status, hashes, sizes, replacement dates, and status-specific `new_sha256`. `backup_path` is not trusted input; it must exactly equal `objects/<original-sha256>.json.gz`. All existing artifact, backup-root, object, manifest, and temporary-path components are checked without following links and reject symlinks or Windows reparse points.
 
@@ -215,14 +215,14 @@ Missing artifacts still fail in `load_incremental_artifact()` and never reach ba
 The gate runs only after the official CLI invokes `local_quant.main()`:
 
 1. A nonzero result is returned unchanged.
-2. In reconciliation mode, require every manifest entry to be `applied`, require the current SHA to equal `new_sha256`, and rerun the complete expected-result validation. Any `backup_complete`, unknown, missing, or mismatched current artifact is incomplete.
+2. In reconciliation mode, require every manifest entry to be `applied`, require the current SHA to equal `new_sha256`, rerun the complete expected-result validation, and return the exact symbol-to-result-SHA mapping to the final artifact gate. Any `backup_complete`, unknown, missing, or mismatched current artifact is incomplete.
 3. Load the final TW checkpoint and require `stage == "market_batch"`, `market == "TW"`, and `next_index >= len(universe)`. Require a valid `failed` list with no malformed/unknown item and no failure whose symbol remains active. Failures belonging only to current pending/excluded symbols are not active recovery failures; this resolves the existing retry-checkpoint case where an excluded symbol can remain in a checkpoint that was not rewritten.
 4. Read the raw exclusion CSV directly rather than using `load_exclusion_list()`, which intentionally swallows read errors. Require the canonical headers, unique valid TW symbols, blank `OperatorAction`, and only `Pending`, blank-as-pending, or `Excluded` state. Encoding, CSV, schema, duplicate, action, symbol, or state errors are incomplete.
 5. Compute `active = universe - pending - excluded`.
 6. Require checkpoint batch identity to match the requested target, observation product, official source mode/schema, series manifest, ordered-universe SHA, and reconciliation policy.
 7. Run the existing artifact audit only for `active`.
 8. Require no unavailable active symbols and require every active latest date to equal the requested target. The audit already rejects future artifacts.
-9. Load every active artifact and require complete official lineage for the requested target and series. If its lineage contains reconciliation evidence, require a matching fully applied manifest entry. Lineage-free or unrelated-series target-date artifacts cannot satisfy the terminal gate.
+9. In both strict and reconciliation modes, load every active artifact and require complete official lineage for the requested target and series. If its lineage contains direct reconciliation evidence, require a matching fully applied manifest entry whose `new_sha256` equals the compressed SHA of that same loaded artifact. Lineage-free, swapped-SHA, or unrelated-series target-date artifacts cannot satisfy the terminal gate.
 
 Any failure raises exactly:
 

@@ -625,8 +625,13 @@ The three Phase 1M implementation findings now have RED/GREEN coverage:
 | resume current artifact | `3883fc8`, `ad7177d` | `51a9739b`, `07b1b30` | included below |
 | outer/inner lineage binding | `3883fc8` | `e531334` | included below |
 | no-price overlap/schema v2 | `3883fc8`, `a786157` | `d1c16c9` | included below |
+| cross-date lineage state | `65be2fd1` | `2e79bc3` | 171 tests, one skip |
+| terminal artifact SHA binding | `65be2fd1` | `2e79bc3` | 171 tests, one skip |
+| manifest concurrent update | `4f5aab9` | `2e79bc3` | 171 tests, one skip |
 
-Fresh code verification passed: the five required focused modules ran 167 tests with one existing Windows symlink-capability skip, and the full suite ran 1,014 tests with the same single skip. Python compile, Node syntax, PowerShell 5.1 AST, and diff checks passed.
+The first pair of final reviews correctly rejected the prior head because a later target could retain an internally impossible old direct lineage, the terminal gate compared only reconciliation symbol membership rather than the same artifact SHA, and manifest read-modify-write transitions were not serialized across processes. The remediation keeps current outer lineage current, moves older valid evidence to independently validated history, binds each applied manifest SHA to the loaded terminal artifact, and uses a persistent standard-library file lock around manifest transactions.
+
+Fresh code verification on the remediated head passed: the five required focused modules ran 171 tests with one existing Windows symlink-capability skip, and the full suite ran 1,018 tests with the same single skip. Python syntax compilation also passed with bytecode output redirected to the system temporary directory. The remaining static, safety, and final independent-review gates are recorded separately before the Draft PR is updated.
 
 The mandatory Production-cache acceptance gate did not pass. The seven-date warm series `bc195e0df4cd6e63ee93f90c31c746007fbfa320db44374ef1617c2d725f7544` was read with zero requests and zero selected-data mutations. All nine symbols produced all three datasets, schema-v2 baseline evidence, zero duplicate identities, and zero non-finite numeric values. However, the validated 2026-07-24 snapshot contains no official price row for any of the nine, so every target-dated in-memory stock snapshot correctly failed with `ValueError: target market date mismatch`. Their latest available price dates were:
 
