@@ -293,6 +293,7 @@ class LegacyArtifactBackupStoreTests(unittest.TestCase):
 
     def test_backup_rejects_malformed_reconciliation_evidence(self):
         mutations = [
+            ("schema_version", 1),
             ("official_source_schema_version", "unknown"),
             ("official_snapshot_dates", [TARGET.isoformat(), BASELINE.isoformat()]),
             ("official_snapshot_manifests", []),
@@ -710,6 +711,29 @@ class LegacyArtifactBackupStoreTests(unittest.TestCase):
                 self.root,
                 target_date=TARGET,
             )
+
+    def test_resume_discovery_rejects_old_manifest_schema_without_write(self):
+        directory = (
+            self.root
+            / "quarantine"
+            / "tw-recovery"
+            / "legacy-reconciliation"
+            / "v1"
+            / TARGET.isoformat()
+            / SERIES_SHA
+        )
+        directory.mkdir(parents=True)
+        manifest_path = directory / "manifest.json"
+        manifest_path.write_text("{}", encoding="utf-8")
+        before = (manifest_path.read_bytes(), manifest_path.stat().st_mtime_ns)
+        with self.assertRaises(LegacyReconciliationError):
+            LegacyArtifactBackupStore.discover_resume(
+                self.root,
+                target_date=TARGET,
+            )
+        self.assertEqual(
+            (manifest_path.read_bytes(), manifest_path.stat().st_mtime_ns), before
+        )
 
 
 if __name__ == "__main__":

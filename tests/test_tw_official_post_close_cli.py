@@ -179,7 +179,7 @@ def reconciliation_evidence(original_sha, series):
         for value, snapshot in series.snapshots.items()
     ]
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "mode": "replace_verified_legacy",
         "legacy_artifact_sha256": original_sha,
         "legacy_artifact_as_of": BASELINE.isoformat(),
@@ -188,15 +188,18 @@ def reconciliation_evidence(original_sha, series):
         "official_series_manifest_sha256": series.manifest_sha256,
         "official_snapshot_dates": dates,
         "official_snapshot_manifests": manifests,
-        "replaced_dates": [BASELINE.isoformat()],
+        "overlap_dates": [BASELINE.isoformat()],
         "price_replaced_dates": [BASELINE.isoformat()],
+        "price_preserved_no_official_row_dates": [],
         "institutional_replaced_dates": [],
+        "institutional_preserved_no_official_row_dates": [BASELINE.isoformat()],
         "margin_replaced_dates": [],
+        "margin_preserved_no_official_row_dates": [BASELINE.isoformat()],
         "date_evidence": [{
             "date": BASELINE.isoformat(),
-            "price_replaced": True,
-            "institutional_replaced": False,
-            "margin_replaced": False,
+            "price_action": "replaced_official",
+            "institutional_action": "preserved_legacy_no_official_row",
+            "margin_action": "preserved_legacy_no_official_row",
         }],
     }
 

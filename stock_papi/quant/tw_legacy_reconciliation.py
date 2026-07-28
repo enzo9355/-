@@ -38,7 +38,7 @@ _ENTRY_FIELDS = {
     "original_size",
     "original_uncompressed_size",
     "backup_path",
-    "replaced_dates",
+    "overlap_dates",
     "new_sha256",
 }
 
@@ -100,15 +100,22 @@ def _decode_gzip(raw: bytes) -> bytes:
     return decoded
 
 
-def _read_bytes(path: Path) -> bytes:
+def _read_bytes(path: Path, *, max_bytes: int = MAX_COMPRESSED_BYTES) -> bytes:
     try:
         size = path.stat().st_size
-        raw = path.read_bytes()
+        if not 0 < size <= max_bytes:
+            raise ValueError("size")
+        with path.open("rb") as stream:
+            raw = stream.read(max_bytes + 1)
     except OSError as exc:
         raise LegacyReconciliationError(
             "legacy reconciliation artifact is unavailable"
         ) from exc
-    if len(raw) != size:
+    except ValueError as exc:
+        raise LegacyReconciliationError(
+            "legacy reconciliation artifact is invalid"
+        ) from exc
+    if len(raw) != size or len(raw) > max_bytes:
         raise LegacyReconciliationError("legacy reconciliation artifact changed")
     return raw
 
@@ -151,7 +158,7 @@ class LegacyArtifactBackupStore:
             / "quarantine"
             / "tw-recovery"
             / "legacy-reconciliation"
-            / "v1"
+            / "v2"
             / target_date.isoformat()
         )
         self.backup_root = self.target_parent / series_manifest_sha256
@@ -172,7 +179,7 @@ class LegacyArtifactBackupStore:
 
     def _base_manifest(self) -> dict[str, Any]:
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "target_market_date": self.target_date.isoformat(),
             "official_series_manifest_sha256": self.series_manifest_sha256,
             "entries": {},
@@ -182,7 +189,7 @@ class LegacyArtifactBackupStore:
         if not isinstance(value, dict) or set(value) != _ENTRY_FIELDS:
             raise LegacyReconciliationError("legacy reconciliation manifest is invalid")
         original_sha = value.get("original_sha256")
-        replaced = _dates(value.get("replaced_dates"))
+        overlap = _dates(value.get("overlap_dates"))
         status = value.get("status")
         new_sha = value.get("new_sha256")
         if (
@@ -197,8 +204,8 @@ class LegacyArtifactBackupStore:
             or isinstance(value.get("original_uncompressed_size"), bool)
             or value["original_uncompressed_size"] <= 0
             or value.get("backup_path") != f"objects/{original_sha}.json.gz"
-            or replaced is None
-            or replaced[-1] > self.target_date
+            or overlap is None
+            or overlap[-1] > self.target_date
             or (status == "backup_complete" and new_sha is not None)
             or (status == "applied" and not _is_sha256(new_sha))
         ):
@@ -206,6 +213,16 @@ class LegacyArtifactBackupStore:
         return value
 
     def _load_manifest(self, *, required: bool = False) -> dict[str, Any]:
+        old_target = (
+            self.target_parent.parent.parent
+            / "v1"
+            / self.target_date.isoformat()
+        )
+        _assert_safe_child(self.root, old_target)
+        if old_target.exists():
+            raise LegacyReconciliationError(
+                "legacy reconciliation manifest schema is unsupported"
+            )
         _assert_safe_child(self.root, self.manifest_path)
         if not self.manifest_path.exists():
             if required:
@@ -214,9 +231,11 @@ class LegacyArtifactBackupStore:
                 )
             return self._base_manifest()
         try:
-            if not 0 < self.manifest_path.stat().st_size <= MAX_UNCOMPRESSED_BYTES:
-                raise ValueError("manifest size")
-            document = json.loads(self.manifest_path.read_text(encoding="utf-8"))
+            document = json.loads(
+                _read_bytes(
+                    self.manifest_path, max_bytes=MAX_UNCOMPRESSED_BYTES
+                ).decode("utf-8")
+            )
         except (OSError, UnicodeError, ValueError) as exc:
             raise LegacyReconciliationError(
                 "legacy reconciliation manifest is invalid"
@@ -224,7 +243,7 @@ class LegacyArtifactBackupStore:
         if (
             not isinstance(document, dict)
             or set(document) != _MANIFEST_FIELDS
-            or document.get("schema_version") != 1
+            or document.get("schema_version") != 2
             or document.get("target_market_date") != self.target_date.isoformat()
             or document.get("official_series_manifest_sha256")
             != self.series_manifest_sha256
@@ -263,7 +282,9 @@ class LegacyArtifactBackupStore:
         ).encode("utf-8")
         if self.manifest_path.exists():
             try:
-                if self.manifest_path.read_bytes() == payload:
+                if _read_bytes(
+                    self.manifest_path, max_bytes=MAX_UNCOMPRESSED_BYTES
+                ) == payload:
                     return
             except OSError as exc:
                 raise LegacyReconciliationError(
@@ -382,7 +403,7 @@ class LegacyArtifactBackupStore:
             not OfficialCompatFetcher._valid_reconciliation(
                 value, target_date=self.target_date
             )
-            or value.get("schema_version") != 1
+            or value.get("schema_version") != 2
             or value.get("mode") != "replace_verified_legacy"
             or value.get("legacy_artifact_sha256") != original_sha256
             or value.get("legacy_artifact_as_of") != artifact_as_of.isoformat()
@@ -393,16 +414,16 @@ class LegacyArtifactBackupStore:
             raise LegacyReconciliationError(
                 f"legacy reconciliation evidence is invalid for TW:{symbol}"
             )
-        replaced = _dates(value.get("replaced_dates"))
+        overlap = _dates(value.get("overlap_dates"))
         if (
-            replaced is None
-            or replaced[-1] != artifact_as_of
-            or replaced[-1] > self.target_date
+            overlap is None
+            or overlap[-1] != artifact_as_of
+            or overlap[-1] > self.target_date
         ):
             raise LegacyReconciliationError(
                 f"legacy reconciliation evidence is invalid for TW:{symbol}"
             )
-        return replaced
+        return overlap
 
     def _validate_original(
         self,
@@ -471,13 +492,13 @@ class LegacyArtifactBackupStore:
             or lineage.get("official_series_manifest_sha256")
             != self.series_manifest_sha256
             or not isinstance(reconciliation, dict)
-            or reconciliation.get("schema_version") != 1
+            or reconciliation.get("schema_version") != 2
             or reconciliation.get("mode") != "replace_verified_legacy"
             or reconciliation.get("legacy_artifact_sha256")
             != entry["original_sha256"]
             or reconciliation.get("official_series_manifest_sha256")
             != self.series_manifest_sha256
-            or reconciliation.get("replaced_dates") != entry["replaced_dates"]
+            or reconciliation.get("overlap_dates") != entry["overlap_dates"]
         ):
             raise LegacyReconciliationError(
                 f"legacy reconciliation result is invalid for TW:{symbol}"
@@ -528,7 +549,7 @@ class LegacyArtifactBackupStore:
         if entry is None:
             if evidence is None:
                 return "passthrough"
-            raw, uncompressed_size, replaced = self._validate_original(
+            raw, uncompressed_size, overlap = self._validate_original(
                 symbol, path, evidence
             )
             original_sha = _sha256(raw)
@@ -544,7 +565,7 @@ class LegacyArtifactBackupStore:
                 "original_size": len(raw),
                 "original_uncompressed_size": uncompressed_size,
                 "backup_path": f"objects/{original_sha}.json.gz",
-                "replaced_dates": [value.isoformat() for value in replaced],
+                "overlap_dates": [value.isoformat() for value in overlap],
                 "new_sha256": None,
             }
             self._write_manifest(manifest)
@@ -556,14 +577,14 @@ class LegacyArtifactBackupStore:
             return "noop"
         if state == "original":
             try:
-                _raw, _size, replaced = self._validate_original(
+                _raw, _size, overlap = self._validate_original(
                     symbol, path, evidence
                 )
             except LegacyReconciliationError as exc:
                 raise LegacyReconciliationError(
                     f"legacy reconciliation state conflict for TW:{symbol}"
                 ) from exc
-            if [value.isoformat() for value in replaced] != entry["replaced_dates"]:
+            if [value.isoformat() for value in overlap] != entry["overlap_dates"]:
                 raise LegacyReconciliationError(
                     f"legacy reconciliation state conflict for TW:{symbol}"
                 )
@@ -594,18 +615,15 @@ class LegacyArtifactBackupStore:
         self._write_manifest(manifest)
         return path
 
-    def assert_current_state_complete(self) -> None:
-        manifest = self._load_manifest(required=True)
-        if not manifest["entries"]:
-            raise LegacyReconciliationError(
-                "legacy reconciliation state is incomplete"
-            )
+    def assert_current_state_complete(self) -> frozenset[str]:
+        manifest = self._load_manifest()
         for symbol, entry in manifest["entries"].items():
             if entry["status"] != "applied":
                 raise LegacyReconciliationError(
                     "legacy reconciliation state is incomplete"
                 )
             self._current_entry_state(symbol, entry)
+        return frozenset(manifest["entries"])
 
     @classmethod
     def discover_resume(
@@ -620,7 +638,7 @@ class LegacyArtifactBackupStore:
         ):
             raise TypeError("target_date must be a date")
         root = _absolute(Path(root))
-        parent = (
+        old_parent = (
             root
             / "quarantine"
             / "tw-recovery"
@@ -628,15 +646,36 @@ class LegacyArtifactBackupStore:
             / "v1"
             / target_date.isoformat()
         )
+        _assert_safe_child(root, old_parent)
+        if old_parent.exists():
+            raise LegacyReconciliationError(
+                "legacy reconciliation manifest schema is unsupported"
+            )
+        parent = (
+            root
+            / "quarantine"
+            / "tw-recovery"
+            / "legacy-reconciliation"
+            / "v2"
+            / target_date.isoformat()
+        )
         _assert_safe_child(root, parent)
         if not parent.exists():
             return None
         try:
-            candidates = [
-                child
-                for child in parent.iterdir()
-                if child.is_dir() and (child / "manifest.json").exists()
-            ]
+            candidates = []
+            with os.scandir(parent) as entries:
+                for entry in entries:
+                    directory = Path(entry.path)
+                    if (
+                        not entry.is_dir(follow_symlinks=False)
+                        or _is_reparse(directory)
+                        or not (directory / "manifest.json").is_file()
+                    ):
+                        raise LegacyReconciliationError(
+                            "legacy reconciliation resume state is invalid"
+                        )
+                    candidates.append(directory)
         except OSError as exc:
             raise LegacyReconciliationError(
                 "legacy reconciliation resume state is unavailable"
@@ -657,14 +696,12 @@ class LegacyArtifactBackupStore:
                 raise LegacyReconciliationError(
                     "legacy reconciliation resume state is invalid"
                 )
-            for entry in manifest["entries"].values():
-                store._verify_entry_object(entry)
             for symbol, entry in manifest["entries"].items():
                 store._current_entry_state(symbol, entry)
             baseline = min(
                 datetime.date.fromisoformat(value)
                 for entry in manifest["entries"].values()
-                for value in entry["replaced_dates"]
+                for value in entry["overlap_dates"]
             )
             results.append((directory.name, baseline))
         if len(results) > 1:

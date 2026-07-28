@@ -221,7 +221,7 @@ class OfficialCompatFetcher:
         self._lineage_kinds: dict[str, str] = {}
         self._existing_reconciliations: dict[str, dict[str, Any]] = {}
         self._reconciliation_dates: dict[
-            str, dict[_datetime.date, dict[str, bool]]
+            str, dict[_datetime.date, dict[str, str]]
         ] = {}
 
     def _load_artifact(self, symbol: str) -> IncrementalArtifact:
@@ -290,7 +290,7 @@ class OfficialCompatFetcher:
     ) -> bool:
         if (
             not isinstance(value, dict)
-            or value.get("schema_version") != 1
+            or value.get("schema_version") != 2
             or value.get("mode") != "replace_verified_legacy"
             or not cls._is_sha256(value.get("legacy_artifact_sha256"))
             or value.get("official_source_mode") != SOURCE_MODE
@@ -334,42 +334,45 @@ class OfficialCompatFetcher:
             ),
         ):
             return False
-        replaced = cls._date_list(value.get("replaced_dates"))
-        price = cls._date_list(value.get("price_replaced_dates"))
+        overlap = cls._date_list(value.get("overlap_dates"))
         if (
-            replaced is None
-            or price != replaced
-            or replaced[-1] > target_date
-            or replaced[-1] != legacy_as_of
-            or not set(replaced).issubset(snapshot_dates)
+            overlap is None
+            or overlap[-1] > target_date
+            or overlap[-1] != legacy_as_of
+            or not set(overlap).issubset(snapshot_dates)
         ):
             return False
-        optional_dates = {}
-        for name in ("institutional_replaced_dates", "margin_replaced_dates"):
-            raw = value.get(name)
-            if raw == []:
-                optional_dates[name] = ()
-                continue
-            parsed = cls._date_list(raw)
-            if parsed is None or not set(parsed).issubset(replaced):
+        partitions: dict[str, tuple[_datetime.date, ...]] = {}
+        for dataset in ("price", "institutional", "margin"):
+            replaced_name = f"{dataset}_replaced_dates"
+            preserved_name = f"{dataset}_preserved_no_official_row_dates"
+            for name in (replaced_name, preserved_name):
+                raw = value.get(name)
+                parsed = () if raw == [] else cls._date_list(raw)
+                if parsed is None:
+                    return False
+                partitions[name] = parsed
+            replaced = set(partitions[replaced_name])
+            preserved = set(partitions[preserved_name])
+            if replaced & preserved or replaced | preserved != set(overlap):
                 return False
-            optional_dates[name] = parsed
         evidence = value.get("date_evidence")
-        if not isinstance(evidence, list) or len(evidence) != len(replaced):
+        if not isinstance(evidence, list) or len(evidence) != len(overlap):
             return False
-        for row, row_date in zip(evidence, replaced):
+        for row, row_date in zip(evidence, overlap):
             if (
                 not isinstance(row, dict)
                 or row.get("date") != row_date.isoformat()
-                or row.get("price_replaced") is not True
-                or not isinstance(row.get("institutional_replaced"), bool)
-                or not isinstance(row.get("margin_replaced"), bool)
-                or row["institutional_replaced"]
-                != (row_date in optional_dates["institutional_replaced_dates"])
-                or row["margin_replaced"]
-                != (row_date in optional_dates["margin_replaced_dates"])
             ):
                 return False
+            for dataset in ("price", "institutional", "margin"):
+                expected = (
+                    "replaced_official"
+                    if row_date in partitions[f"{dataset}_replaced_dates"]
+                    else "preserved_legacy_no_official_row"
+                )
+                if row.get(f"{dataset}_action") != expected:
+                    return False
         return True
 
     @classmethod
@@ -624,16 +627,24 @@ class OfficialCompatFetcher:
         snapshot: OfficialDailySnapshot,
     ) -> None:
         price = self._official_price(snapshot, symbol)
-        if price is None:
-            raise IncrementalHistoryError(
-                f"official price is unavailable for legacy overlap: TW:{symbol}"
-            )
-        institutional = bool(self._official_institutional(snapshot, symbol))
-        margin = self._official_margin(snapshot, symbol) is not None
+        institutional = self._official_institutional(snapshot, symbol)
+        margin = self._official_margin(snapshot, symbol)
         current = {
-            "price_replaced": True,
-            "institutional_replaced": institutional,
-            "margin_replaced": margin,
+            "price_action": (
+                "replaced_official"
+                if price is not None
+                else "preserved_legacy_no_official_row"
+            ),
+            "institutional_action": (
+                "replaced_official"
+                if institutional
+                else "preserved_legacy_no_official_row"
+            ),
+            "margin_action": (
+                "replaced_official"
+                if margin is not None
+                else "preserved_legacy_no_official_row"
+            ),
         }
         recorded = self._reconciliation_dates.setdefault(symbol, {}).get(value)
         if recorded is not None and recorded != current:
@@ -645,7 +656,7 @@ class OfficialCompatFetcher:
     def _reconciliation_plan(
         self,
         symbol: str,
-    ) -> dict[_datetime.date, dict[str, bool]]:
+    ) -> dict[_datetime.date, dict[str, str]]:
         if symbol in self._reconciliation_dates:
             return self._reconciliation_dates[symbol]
         self._reconciliation_dates[symbol] = {}
@@ -722,12 +733,14 @@ class OfficialCompatFetcher:
             self.legacy_overlap_policy == "replace_verified_legacy"
             and lineage_kind == "legacy"
         )
-        replacement_dates = (
-            set(self._reconciliation_plan(symbol)).intersection(
-                historical_by_date
-            )
+        reconciliation = (
+            {
+                value: actions
+                for value, actions in self._reconciliation_plan(symbol).items()
+                if value in historical_by_date
+            }
             if replace_legacy
-            else set()
+            else {}
         )
         for value, snapshot in self.snapshots.items():
             existing = historical_by_date.get(value)
@@ -737,7 +750,10 @@ class OfficialCompatFetcher:
         rows: list[dict[str, Any]] = []
         if dataset == "TaiwanStockPrice":
             for row in historical:
-                if row["_date"] in replacement_dates:
+                if (
+                    reconciliation.get(row["_date"], {}).get("price_action")
+                    == "replaced_official"
+                ):
                     rows.append(
                         self._official_price(
                             self.snapshots[row["_date"]], symbol
@@ -764,7 +780,9 @@ class OfficialCompatFetcher:
                     self._official_institutional(
                         self.snapshots[row["_date"]], symbol
                     )
-                    if row["_date"] in replacement_dates
+                    if reconciliation.get(row["_date"], {}).get(
+                        "institutional_action"
+                    ) == "replaced_official"
                     else []
                 )
                 if official:
@@ -789,7 +807,9 @@ class OfficialCompatFetcher:
             for row in historical:
                 official = (
                     self._official_margin(self.snapshots[row["_date"]], symbol)
-                    if row["_date"] in replacement_dates
+                    if reconciliation.get(row["_date"], {}).get(
+                        "margin_action"
+                    ) == "replaced_official"
                     else None
                 )
                 if official is not None:
@@ -842,7 +862,7 @@ class OfficialCompatFetcher:
         artifact = self._load_artifact(symbol)
         dates = sorted(recorded)
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "mode": "replace_verified_legacy",
             "legacy_artifact_sha256": artifact.compressed_sha256,
             "legacy_artifact_as_of": artifact.latest_date.isoformat(),
@@ -859,18 +879,22 @@ class OfficialCompatFetcher:
                 }
                 for value, snapshot in self.snapshots.items()
             ],
-            "replaced_dates": [value.isoformat() for value in dates],
-            "price_replaced_dates": [value.isoformat() for value in dates],
-            "institutional_replaced_dates": [
-                value.isoformat()
-                for value in dates
-                if recorded[value]["institutional_replaced"]
-            ],
-            "margin_replaced_dates": [
-                value.isoformat()
-                for value in dates
-                if recorded[value]["margin_replaced"]
-            ],
+            "overlap_dates": [value.isoformat() for value in dates],
+            **{
+                f"{dataset}_{suffix}_dates": [
+                    value.isoformat()
+                    for value in dates
+                    if recorded[value][f"{dataset}_action"] == action
+                ]
+                for dataset in ("price", "institutional", "margin")
+                for suffix, action in (
+                    ("replaced", "replaced_official"),
+                    (
+                        "preserved_no_official_row",
+                        "preserved_legacy_no_official_row",
+                    ),
+                )
+            },
             "date_evidence": [
                 {"date": value.isoformat(), **recorded[value]}
                 for value in dates
