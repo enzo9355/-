@@ -484,6 +484,37 @@ class LegacyArtifactBackupStore:
             )
         return current_sha
 
+    def _current_entry_state(
+        self,
+        symbol: str,
+        entry: dict[str, Any],
+    ) -> tuple[str, Path, str]:
+        path = self._validate_artifact_path(
+            symbol, self._expected_artifact_path(symbol)
+        )
+        self._verify_entry_object(entry)
+        try:
+            current_sha = _sha256(_read_bytes(path))
+        except LegacyReconciliationError as exc:
+            raise LegacyReconciliationError(
+                f"legacy reconciliation state conflict for TW:{symbol}"
+            ) from exc
+        if entry["status"] == "backup_complete" and current_sha == entry[
+            "original_sha256"
+        ]:
+            return "original", path, current_sha
+        try:
+            result_sha = self._validate_expected_result(symbol, path, entry)
+        except LegacyReconciliationError as exc:
+            raise LegacyReconciliationError(
+                f"legacy reconciliation state conflict for TW:{symbol}"
+            ) from exc
+        if entry["status"] == "applied" and result_sha != entry["new_sha256"]:
+            raise LegacyReconciliationError(
+                f"legacy reconciliation state conflict for TW:{symbol}"
+            )
+        return "result", path, result_sha
+
     def backup_before_write(
         self,
         *,
@@ -520,20 +551,10 @@ class LegacyArtifactBackupStore:
             return "write"
 
         entry = self._validate_entry(symbol, entry)
-        self._verify_entry_object(entry)
-        try:
-            current_sha = _sha256(_read_bytes(path))
-        except LegacyReconciliationError as exc:
-            raise LegacyReconciliationError(
-                f"legacy reconciliation state conflict for TW:{symbol}"
-            ) from exc
+        state, _current_path, _current_sha = self._current_entry_state(symbol, entry)
         if entry["status"] == "applied":
-            if current_sha == entry["new_sha256"]:
-                return "noop"
-            raise LegacyReconciliationError(
-                f"legacy reconciliation state conflict for TW:{symbol}"
-            )
-        if current_sha == entry["original_sha256"]:
+            return "noop"
+        if state == "original":
             try:
                 _raw, _size, replaced = self._validate_original(
                     symbol, path, evidence
@@ -547,14 +568,8 @@ class LegacyArtifactBackupStore:
                     f"legacy reconciliation state conflict for TW:{symbol}"
                 )
             return "write"
-        try:
-            new_sha = self._validate_expected_result(symbol, path, entry)
-        except LegacyReconciliationError as exc:
-            raise LegacyReconciliationError(
-                f"legacy reconciliation state conflict for TW:{symbol}"
-            ) from exc
         entry["status"] = "applied"
-        entry["new_sha256"] = new_sha
+        entry["new_sha256"] = _current_sha
         self._write_manifest(manifest)
         return "noop"
 
@@ -567,18 +582,30 @@ class LegacyArtifactBackupStore:
                 f"legacy reconciliation state conflict for TW:{symbol}"
             )
         entry = self._validate_entry(symbol, entry)
-        self._verify_entry_object(entry)
-        new_sha = self._validate_expected_result(symbol, path, entry)
+        state, _current_path, new_sha = self._current_entry_state(symbol, entry)
+        if state != "result":
+            raise LegacyReconciliationError(
+                f"legacy reconciliation state conflict for TW:{symbol}"
+            )
         if entry["status"] == "applied":
-            if entry["new_sha256"] != new_sha:
-                raise LegacyReconciliationError(
-                    f"legacy reconciliation state conflict for TW:{symbol}"
-                )
             return path
         entry["status"] = "applied"
         entry["new_sha256"] = new_sha
         self._write_manifest(manifest)
         return path
+
+    def assert_current_state_complete(self) -> None:
+        manifest = self._load_manifest(required=True)
+        if not manifest["entries"]:
+            raise LegacyReconciliationError(
+                "legacy reconciliation state is incomplete"
+            )
+        for symbol, entry in manifest["entries"].items():
+            if entry["status"] != "applied":
+                raise LegacyReconciliationError(
+                    "legacy reconciliation state is incomplete"
+                )
+            self._current_entry_state(symbol, entry)
 
     @classmethod
     def discover_resume(
@@ -632,6 +659,8 @@ class LegacyArtifactBackupStore:
                 )
             for entry in manifest["entries"].values():
                 store._verify_entry_object(entry)
+            for symbol, entry in manifest["entries"].items():
+                store._current_entry_state(symbol, entry)
             baseline = min(
                 datetime.date.fromisoformat(value)
                 for entry in manifest["entries"].values()

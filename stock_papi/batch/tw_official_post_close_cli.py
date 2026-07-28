@@ -452,6 +452,8 @@ def run(
         result = int(local_quant.main(argv))
     if result != 0:
         return result
+    if backup_store is not None:
+        backup_store.assert_current_state_complete()
     expected_identity = _enrich_batch_identity(
         {
             "target_market_date": target_market_date.isoformat(),

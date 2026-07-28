@@ -618,6 +618,23 @@ class LegacyArtifactBackupStoreTests(unittest.TestCase):
             },
         )
 
+    def test_resume_discovery_accepts_post_write_pre_apply_read_only(self):
+        self.backup()
+        target = self.write_official()
+        manifest_path, before_manifest = read_manifest(self.root)
+        before = (target.read_bytes(), target.stat().st_mtime_ns, manifest_path.stat().st_mtime_ns)
+        self.assertEqual(
+            LegacyArtifactBackupStore.discover_resume(
+                self.root, target_date=TARGET
+            ),
+            (SERIES_SHA, BASELINE),
+        )
+        self.assertEqual(read_manifest(self.root)[1], before_manifest)
+        self.assertEqual(
+            (target.read_bytes(), target.stat().st_mtime_ns, manifest_path.stat().st_mtime_ns),
+            before,
+        )
+
     def test_no_price_reconciliation_resume_is_idempotent(self):
         value = no_price_evidence(self.original_sha)
         self.assertTrue(

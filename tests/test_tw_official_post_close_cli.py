@@ -407,12 +407,20 @@ class TWOfficialPostCloseCLITests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             for symbol in ("2303", "2330"):
                 write_artifact(temporary, symbol)
-            result, observed, builder, _module = self._run_fake(
-                temporary,
-                reconcile=True,
-                series=series,
-                final_dates={"2303": TARGET.isoformat(), "2330": TARGET.isoformat()},
-            )
+            with patch.object(
+                LegacyArtifactBackupStore,
+                "assert_current_state_complete",
+                return_value=None,
+            ):
+                result, observed, builder, _module = self._run_fake(
+                    temporary,
+                    reconcile=True,
+                    series=series,
+                    final_dates={
+                        "2303": TARGET.isoformat(),
+                        "2330": TARGET.isoformat(),
+                    },
+                )
         self.assertEqual(result, 0)
         self.assertEqual(
             builder.call_args.args[1], (datetime.date(2026, 7, 23), TARGET)
@@ -440,6 +448,10 @@ class TWOfficialPostCloseCLITests(unittest.TestCase):
                 LegacyArtifactBackupStore,
                 "discover_resume",
                 return_value=(series.manifest_sha256, BASELINE),
+            ), patch.object(
+                LegacyArtifactBackupStore,
+                "assert_current_state_complete",
+                return_value=None,
             ):
                 result, _observed, builder, _module = self._run_fake(
                     temporary,
@@ -459,6 +471,10 @@ class TWOfficialPostCloseCLITests(unittest.TestCase):
                 LegacyArtifactBackupStore,
                 "discover_resume",
                 return_value=(series.manifest_sha256, datetime.date(2026, 7, 20)),
+            ), patch.object(
+                LegacyArtifactBackupStore,
+                "assert_current_state_complete",
+                return_value=None,
             ):
                 result, _observed, builder, _module = self._run_fake(
                     temporary,
