@@ -593,7 +593,7 @@ class TWOfficialPostCloseCLITests(unittest.TestCase):
                 self._run_fake(temporary, reconcile=True)
             self.assertFalse((Path(temporary) / "quarantine").exists())
 
-    def test_cli_backup_happens_before_existing_writer(self):
+    def test_no_price_reconciliation_backup_is_created_before_write(self):
         events = []
         local = types.SimpleNamespace(
             load_stock_pipeline=lambda _root: None,

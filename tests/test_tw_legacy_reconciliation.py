@@ -13,6 +13,7 @@ from stock_papi.quant.tw_legacy_reconciliation import (
     LegacyArtifactBackupStore,
     LegacyReconciliationError,
 )
+from stock_papi.quant.tw_incremental import OfficialCompatFetcher
 
 
 TARGET = datetime.date(2026, 7, 24)
@@ -83,6 +84,37 @@ def evidence(original_sha, replaced_date=BASELINE):
             "price_replaced": True,
             "institutional_replaced": True,
             "margin_replaced": True,
+        }],
+    }
+
+
+def no_price_evidence(original_sha, overlap_date=BASELINE):
+    date_text = overlap_date.isoformat()
+    return {
+        "schema_version": 2,
+        "mode": "replace_verified_legacy",
+        "legacy_artifact_sha256": original_sha,
+        "legacy_artifact_as_of": date_text,
+        "official_source_mode": "tw_official_bulk_v2",
+        "official_source_schema_version": "tw-official-historical-v2",
+        "official_series_manifest_sha256": SERIES_SHA,
+        "official_snapshot_dates": [date_text, TARGET.isoformat()],
+        "official_snapshot_manifests": [
+            {"date": date_text, "manifest_sha256": "a" * 64},
+            {"date": TARGET.isoformat(), "manifest_sha256": "b" * 64},
+        ],
+        "overlap_dates": [date_text],
+        "price_replaced_dates": [],
+        "price_preserved_no_official_row_dates": [date_text],
+        "institutional_replaced_dates": [date_text],
+        "institutional_preserved_no_official_row_dates": [],
+        "margin_replaced_dates": [],
+        "margin_preserved_no_official_row_dates": [date_text],
+        "date_evidence": [{
+            "date": date_text,
+            "price_action": "preserved_legacy_no_official_row",
+            "institutional_action": "replaced_official",
+            "margin_action": "preserved_legacy_no_official_row",
         }],
     }
 
@@ -319,6 +351,19 @@ class LegacyArtifactBackupStoreTests(unittest.TestCase):
         self.assertEqual(hashlib.sha256(target.read_bytes()).hexdigest(), before_sha)
         self.assertEqual(target.stat().st_mtime_ns, before_mtime)
 
+    def test_post_run_gate_rejects_non_applied_manifest_entry(self):
+        self.backup()
+        with self.assertRaises(LegacyReconciliationError):
+            self.store.assert_current_state_complete()
+
+    def test_post_run_gate_rejects_applied_artifact_state_mismatch(self):
+        self.backup()
+        target = self.write_official()
+        self.store.mark_applied(symbol="2330", artifact_path=target)
+        write_artifact(self.root, legacy_document(datetime.date(2026, 7, 17)))
+        with self.assertRaises(LegacyReconciliationError):
+            self.store.assert_current_state_complete()
+
     def test_backup_state_conflict_fails_closed(self):
         self.backup()
         write_artifact(self.root, legacy_document(datetime.date(2026, 7, 17)))
@@ -386,6 +431,14 @@ class LegacyArtifactBackupStoreTests(unittest.TestCase):
                 target = write_artifact(root, document)[0]
                 with self.assertRaises(LegacyReconciliationError):
                     store.mark_applied(symbol="2330", artifact_path=target)
+
+    def test_backup_result_rejects_outer_inner_identity_mismatch(self):
+        self.backup()
+        document = official_document(self.evidence)
+        document["source_lineage"]["historical_artifact_sha256"] = "f" * 64
+        target = write_artifact(self.root, document)[0]
+        with self.assertRaises(LegacyReconciliationError):
+            self.store.mark_applied(symbol="2330", artifact_path=target)
 
     def test_mark_applied_requires_valid_incremental_artifact(self):
         self.backup()
@@ -496,6 +549,102 @@ class LegacyArtifactBackupStoreTests(unittest.TestCase):
             ),
             (SERIES_SHA, BASELINE),
         )
+
+    def test_resume_discovery_rejects_applied_artifact_sha_mismatch(self):
+        self.backup()
+        target = self.write_official()
+        self.store.mark_applied(symbol="2330", artifact_path=target)
+        write_artifact(self.root, legacy_document(datetime.date(2026, 7, 17)))
+        with self.assertRaises(LegacyReconciliationError):
+            LegacyArtifactBackupStore.discover_resume(
+                self.root, target_date=TARGET
+            )
+
+    def test_resume_discovery_rejects_applied_artifact_missing_lineage(self):
+        self.backup()
+        target = self.write_official()
+        self.store.mark_applied(symbol="2330", artifact_path=target)
+        document = official_document(self.evidence)
+        document.pop("source_lineage")
+        write_artifact(self.root, document)
+        with self.assertRaises(LegacyReconciliationError):
+            LegacyArtifactBackupStore.discover_resume(
+                self.root, target_date=TARGET
+            )
+
+    def test_resume_discovery_rejects_applied_artifact_tampered_reconciliation(self):
+        self.backup()
+        target = self.write_official()
+        self.store.mark_applied(symbol="2330", artifact_path=target)
+        document = official_document(copy.deepcopy(self.evidence))
+        document["source_lineage"]["legacy_reconciliation"][
+            "legacy_artifact_sha256"
+        ] = "f" * 64
+        write_artifact(self.root, document)
+        with self.assertRaises(LegacyReconciliationError):
+            LegacyArtifactBackupStore.discover_resume(
+                self.root, target_date=TARGET
+            )
+
+    def test_resume_discovery_rejects_backup_complete_unknown_artifact(self):
+        self.backup()
+        write_artifact(self.root, legacy_document(datetime.date(2026, 7, 17)))
+        with self.assertRaises(LegacyReconciliationError):
+            LegacyArtifactBackupStore.discover_resume(
+                self.root, target_date=TARGET
+            )
+
+    def test_resume_discovery_accepts_valid_applied_artifact_read_only(self):
+        self.backup()
+        target = self.write_official()
+        self.store.mark_applied(symbol="2330", artifact_path=target)
+        manifest_path, manifest = read_manifest(self.root)
+        object_path = manifest_path.parent / manifest["entries"]["2330"]["backup_path"]
+        before = {
+            path: (path.read_bytes(), path.stat().st_mtime_ns)
+            for path in (target, manifest_path, object_path)
+        }
+        self.assertEqual(
+            LegacyArtifactBackupStore.discover_resume(
+                self.root, target_date=TARGET
+            ),
+            (SERIES_SHA, BASELINE),
+        )
+        self.assertEqual(
+            before,
+            {
+                path: (path.read_bytes(), path.stat().st_mtime_ns)
+                for path in (target, manifest_path, object_path)
+            },
+        )
+
+    def test_no_price_reconciliation_resume_is_idempotent(self):
+        value = no_price_evidence(self.original_sha)
+        self.assertTrue(
+            OfficialCompatFetcher._valid_reconciliation(value, target_date=TARGET)
+        )
+        self.assertEqual(
+            self.store.backup_before_write(
+                symbol="2330", artifact_path=self.path, evidence=value
+            ),
+            "write",
+        )
+        manifest_path, first = read_manifest(self.root)
+        before_mtime = manifest_path.stat().st_mtime_ns
+        self.assertEqual(
+            LegacyArtifactBackupStore.discover_resume(
+                self.root, target_date=TARGET
+            ),
+            (SERIES_SHA, BASELINE),
+        )
+        self.assertEqual(
+            LegacyArtifactBackupStore.discover_resume(
+                self.root, target_date=TARGET
+            ),
+            (SERIES_SHA, BASELINE),
+        )
+        self.assertEqual(read_manifest(self.root)[1], first)
+        self.assertEqual(manifest_path.stat().st_mtime_ns, before_mtime)
 
     def test_resume_discovery_rejects_multiple_series(self):
         self.backup()

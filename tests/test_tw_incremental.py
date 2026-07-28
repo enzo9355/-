@@ -255,6 +255,50 @@ def snapshot_without_optional(*, price=True, row_date=None, row_symbol="2330"):
     )
 
 
+def snapshot_without_price(*, institutional=True, margin=True, value=TARGET):
+    base = snapshot_for(value, 1110.0 if value == TARGET else 1090.0, "a")
+    return OfficialDailySnapshot(
+        target_date=value,
+        price_by_symbol=MappingProxyType({}),
+        institutional_by_symbol=(
+            base.institutional_by_symbol if institutional else MappingProxyType({})
+        ),
+        margin_by_symbol=(
+            base.margin_by_symbol if margin else MappingProxyType({})
+        ),
+        source_results=base.source_results,
+        manifest_sha256=base.manifest_sha256,
+        request_count=base.request_count,
+        request_budget=base.request_budget,
+        source_mode=base.source_mode,
+        source_schema_version=base.source_schema_version,
+    )
+
+
+def series_without_baseline_price():
+    first_date = datetime.date(2026, 7, 23)
+    first = snapshot_without_price(value=first_date)
+    second = snapshot()
+    document = {
+        "source_mode": "tw_official_bulk_v2",
+        "source_schema_version": "tw-official-historical-v2",
+        "target_date": TARGET.isoformat(),
+        "snapshots": [
+            {"date": first_date.isoformat(), "manifest_sha256": first.manifest_sha256},
+            {"date": TARGET.isoformat(), "manifest_sha256": second.manifest_sha256},
+        ],
+    }
+    return OfficialSnapshotSeries(
+        target_date=TARGET,
+        snapshots=MappingProxyType({first_date: first, TARGET: second}),
+        manifest_sha256=hashlib.sha256(
+            json.dumps(document, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest(),
+        request_count=12,
+        request_budget=OfficialRequestBudget(12, 24, 12, 0, True, "capacity_proven"),
+    )
+
+
 class TWOfficialIncrementalTests(unittest.TestCase):
     def test_serves_history_plus_target_without_finmind(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -384,6 +428,36 @@ class TWLegacyOverlapReconciliationTests(unittest.TestCase):
             legacy_overlap_policy="replace_verified_legacy",
         )
 
+    def _assert_official_lineage_rejected(self, lineage):
+        matching = target_history(
+            Open=1100.0,
+            High=1120.0,
+            Low=1090.0,
+            Close=1110.0,
+            Volume=1000.0,
+            InstitutionalNet=90.0,
+            ForeignNet=80.0,
+            MarginBalance=5000.0,
+            ShortBalance=200.0,
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            write_artifact(
+                temporary,
+                daily=matching,
+                as_of=TARGET.isoformat(),
+                source_lineage=lineage,
+            )
+            with self.assertRaisesRegex(
+                IncrementalHistoryError,
+                "historical artifact lineage is not eligible for reconciliation",
+            ):
+                self._fetcher(temporary)(
+                    "TaiwanStockPrice",
+                    "2330",
+                    TARGET.isoformat(),
+                    TARGET.isoformat(),
+                )
+
     def test_replace_verified_legacy_overrides_overlapping_price(self):
         with tempfile.TemporaryDirectory() as temporary:
             write_artifact(
@@ -499,24 +573,162 @@ class TWLegacyOverlapReconciliationTests(unittest.TestCase):
                 ],
             )
 
-    def test_reconciliation_requires_official_price_for_every_overlap(self):
+    def test_reconciliation_preserves_legacy_price_when_official_price_missing(self):
         with tempfile.TemporaryDirectory() as temporary:
             write_artifact(
                 temporary,
                 daily=target_history(),
                 as_of=TARGET.isoformat(),
             )
-            with self.assertRaisesRegex(
-                IncrementalHistoryError,
-                "official price is unavailable for legacy overlap",
-            ):
-                self._fetcher(
-                    temporary, snapshot_without_optional(price=False)
-                )(
-                    "TaiwanStockPrice",
-                    "2330",
-                    TARGET.isoformat(),
-                    TARGET.isoformat(),
+            price = self._fetcher(
+                temporary, snapshot_without_optional(price=False)
+            )(
+                "TaiwanStockPrice",
+                "2330",
+                TARGET.isoformat(),
+                TARGET.isoformat(),
+            )
+            self.assertEqual(
+                price.iloc[0][
+                    ["open", "max", "min", "close", "Trading_Volume"]
+                ].tolist(),
+                [1.0, 2.0, 0.5, 1.5, 7.0],
+            )
+
+    def test_reconciliation_replaces_optional_rows_independently_when_price_missing(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            write_artifact(
+                temporary, daily=target_history(), as_of=TARGET.isoformat()
+            )
+            fetcher = self._fetcher(temporary, snapshot_without_price())
+            institutional = fetcher(
+                "TaiwanStockInstitutionalInvestorsBuySell",
+                "2330",
+                TARGET.isoformat(),
+                TARGET.isoformat(),
+            )
+            margin = fetcher(
+                "TaiwanStockMarginPurchaseShortSale",
+                "2330",
+                TARGET.isoformat(),
+                TARGET.isoformat(),
+            )
+            self.assertEqual(
+                institutional[["name", "buy", "sell"]].values.tolist(),
+                [
+                    ["Foreign", 100.0, 20.0],
+                    ["InvestmentTrust", 20.0, 10.0],
+                    ["Dealer", 5.0, 5.0],
+                ],
+            )
+            self.assertEqual(
+                margin.iloc[0][
+                    ["MarginPurchaseTodayBalance", "ShortSaleTodayBalance"]
+                ].tolist(),
+                [5000.0, 200.0],
+            )
+
+    def test_reconciliation_preserves_optional_rows_when_official_rows_missing(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            write_artifact(
+                temporary, daily=target_history(), as_of=TARGET.isoformat()
+            )
+            fetcher = self._fetcher(
+                temporary,
+                snapshot_without_price(institutional=False, margin=False),
+            )
+            institutional = fetcher(
+                "TaiwanStockInstitutionalInvestorsBuySell",
+                "2330",
+                TARGET.isoformat(),
+                TARGET.isoformat(),
+            )
+            margin = fetcher(
+                "TaiwanStockMarginPurchaseShortSale",
+                "2330",
+                TARGET.isoformat(),
+                TARGET.isoformat(),
+            )
+            foreign = institutional[institutional.name == "Foreign"].iloc[0]
+            self.assertEqual(foreign.buy - foreign.sell, 9.0)
+            self.assertEqual(
+                margin.iloc[0][
+                    ["MarginPurchaseTodayBalance", "ShortSaleTodayBalance"]
+                ].tolist(),
+                [22.0, 3.0],
+            )
+
+    def test_no_price_reconciliation_appends_later_official_sessions(self):
+        overlap = target_history()[0]
+        overlap["Date"] = "2026-07-23T00:00:00.000"
+        with tempfile.TemporaryDirectory() as temporary:
+            write_artifact(temporary, daily=[overlap], as_of="2026-07-23")
+            price = self._fetcher(temporary, series_without_baseline_price())(
+                "TaiwanStockPrice", "2330", "2026-07-23", TARGET.isoformat()
+            )
+            self.assertEqual(
+                price[["date", "close"]].values.tolist(),
+                [["2026-07-23", 1.5], [TARGET.isoformat(), 1110.0]],
+            )
+
+    def test_no_price_reconciliation_has_no_duplicate_dates(self):
+        overlap = target_history()[0]
+        overlap["Date"] = "2026-07-23T00:00:00.000"
+        with tempfile.TemporaryDirectory() as temporary:
+            write_artifact(temporary, daily=[overlap], as_of="2026-07-23")
+            price = self._fetcher(temporary, series_without_baseline_price())(
+                "TaiwanStockPrice", "2330", "2026-07-23", TARGET.isoformat()
+            )
+            self.assertEqual(
+                price["date"].tolist(), ["2026-07-23", TARGET.isoformat()]
+            )
+
+    def test_no_price_reconciliation_records_explicit_provenance(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            write_artifact(
+                temporary, daily=target_history(), as_of=TARGET.isoformat()
+            )
+            fetcher = self._fetcher(temporary, snapshot_without_price())
+            evidence = fetcher.reconciliation_for("2330")
+            self.assertEqual(evidence["schema_version"], 2)
+            self.assertEqual(evidence["overlap_dates"], [TARGET.isoformat()])
+            self.assertEqual(evidence["price_replaced_dates"], [])
+            self.assertEqual(
+                evidence["price_preserved_no_official_row_dates"],
+                [TARGET.isoformat()],
+            )
+            self.assertEqual(
+                evidence["date_evidence"],
+                [{
+                    "date": TARGET.isoformat(),
+                    "price_action": "preserved_legacy_no_official_row",
+                    "institutional_action": "replaced_official",
+                    "margin_action": "replaced_official",
+                }],
+            )
+
+    def test_strict_mode_behavior_remains_unchanged_for_missing_official_price(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            write_artifact(
+                temporary, daily=target_history(), as_of=TARGET.isoformat()
+            )
+            price = OfficialCompatFetcher(
+                Path(temporary), snapshot_without_optional(price=False), pd=pd
+            )(
+                "TaiwanStockPrice", "2330", TARGET.isoformat(), TARGET.isoformat()
+            )
+            self.assertEqual(
+                price.iloc[0][
+                    ["open", "max", "min", "close", "Trading_Volume"]
+                ].tolist(),
+                [1.0, 2.0, 0.5, 1.5, 7.0],
+            )
+
+    def test_missing_baseline_artifact_still_fails_closed(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaises(IncrementalHistoryError):
+                self._fetcher(temporary, snapshot_without_price())(
+                    "TaiwanStockPrice", "2330", TARGET.isoformat(), TARGET.isoformat()
                 )
 
     def test_reconciliation_rejects_official_row_identity_mismatch(self):
@@ -810,6 +1022,73 @@ class TWLegacyOverlapReconciliationTests(unittest.TestCase):
                     TARGET.isoformat(),
                     TARGET.isoformat(),
                 )
+
+    def test_official_lineage_rejects_mismatched_legacy_artifact_sha(self):
+        reconciliation = reconciliation_record()
+        lineage = official_lineage(reconciliation=reconciliation)
+        lineage["historical_as_of"] = reconciliation["legacy_artifact_as_of"]
+        self.assertNotEqual(
+            lineage["historical_artifact_sha256"],
+            reconciliation["legacy_artifact_sha256"],
+        )
+        self._assert_official_lineage_rejected(lineage)
+
+    def test_official_lineage_rejects_mismatched_legacy_artifact_as_of(self):
+        reconciliation = reconciliation_record()
+        lineage = official_lineage(reconciliation=reconciliation)
+        lineage["historical_artifact_sha256"] = reconciliation[
+            "legacy_artifact_sha256"
+        ]
+        lineage["historical_as_of"] = "2026-07-23"
+        self._assert_official_lineage_rejected(lineage)
+
+    def test_official_lineage_rejects_mismatched_reconciliation_series(self):
+        reconciliation = reconciliation_record()
+        reconciliation["official_snapshot_manifests"][0][
+            "manifest_sha256"
+        ] = "b" * 64
+        reconciliation["official_series_manifest_sha256"] = hashlib.sha256(
+            json.dumps(
+                {
+                    "source_mode": "tw_official_bulk_v2",
+                    "source_schema_version": "tw-official-historical-v2",
+                    "target_date": TARGET.isoformat(),
+                    "snapshots": reconciliation["official_snapshot_manifests"],
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        lineage = official_lineage(reconciliation=reconciliation)
+        lineage["historical_artifact_sha256"] = reconciliation[
+            "legacy_artifact_sha256"
+        ]
+        lineage["historical_as_of"] = reconciliation["legacy_artifact_as_of"]
+        self._assert_official_lineage_rejected(lineage)
+
+    def test_official_lineage_rejects_mismatched_reconciliation_schema(self):
+        reconciliation = reconciliation_record()
+        reconciliation["official_source_schema_version"] = (
+            "tw-official-historical-v1"
+        )
+        reconciliation["official_series_manifest_sha256"] = hashlib.sha256(
+            json.dumps(
+                {
+                    "source_mode": "tw_official_bulk_v2",
+                    "source_schema_version": "tw-official-historical-v1",
+                    "target_date": TARGET.isoformat(),
+                    "snapshots": reconciliation["official_snapshot_manifests"],
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        lineage = official_lineage(reconciliation=reconciliation)
+        lineage["historical_artifact_sha256"] = reconciliation[
+            "legacy_artifact_sha256"
+        ]
+        lineage["historical_as_of"] = reconciliation["legacy_artifact_as_of"]
+        self._assert_official_lineage_rejected(lineage)
 
     def test_reconciliation_evidence_is_independent_of_query_range(self):
         overlap = target_history()[0]
