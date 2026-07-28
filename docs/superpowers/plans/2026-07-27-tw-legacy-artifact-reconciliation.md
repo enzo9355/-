@@ -630,10 +630,13 @@ The three Phase 1M implementation findings now have RED/GREEN coverage:
 | manifest concurrent update | `4f5aab9` | `2e79bc3` | 171 tests, one skip |
 | history subject/time trust | `3d139d3` | `2b6976d` | 173 tests, one skip |
 | passthrough lock namespace | `3d139d3` | `2b6976d` | 173 tests, one skip |
+| complete history-envelope digest | `f619589` | `c570777` | 173 tests, one skip |
 
 The first pair of final reviews correctly rejected the prior head because a later target could retain an internally impossible old direct lineage, the terminal gate compared only reconciliation symbol membership rather than the same artifact SHA, and manifest read-modify-write transitions were not serialized across processes. The remediation keeps current outer lineage current, moves older valid evidence to independently validated history, binds each applied manifest SHA to the loaded terminal artifact, and uses a persistent standard-library file lock around manifest transactions.
 
-A subsequent pair of final-head reviews found that the first lock location could leave a manifest-less series directory after passthrough, and that unversioned history allowed future or cross-symbol evidence. The final remediation moves locks to a non-discoverable namespace and wraps each history record with subject, reconciled-artifact SHA, canonical record SHA, version, and ordered time bounds.
+A subsequent pair of final-head reviews found that the first lock location could leave a manifest-less series directory after passthrough, and that unversioned history allowed future or cross-symbol evidence. The final remediation moves locks to a non-discoverable namespace and wraps each history record with subject, reconciled-artifact SHA, complete canonical history SHA, version, and ordered time bounds.
+
+The next security review found that the first history digest covered only the inner record. The schema-v2 envelope now hashes the version, subject, reconciled-artifact SHA, and reconciliation together, so changing any archived identity without rebuilding the complete relation fails validation.
 
 Fresh code verification on the final remediated head passed: the five required focused modules ran 173 tests with one existing Windows symlink-capability skip, and the full suite ran 1,020 tests with the same single skip. The remaining static, safety, and final independent-review gates are recorded separately before the Draft PR is updated.
 
