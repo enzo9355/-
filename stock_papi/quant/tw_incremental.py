@@ -28,7 +28,7 @@ _RECONCILIATION_HISTORY_FIELDS = frozenset({
     "schema_version",
     "symbol",
     "reconciled_artifact_sha256",
-    "reconciliation_sha256",
+    "history_sha256",
     "reconciliation",
 })
 
@@ -482,12 +482,12 @@ class OfficialCompatFetcher:
                 if (
                     not isinstance(item, dict)
                     or set(item) != _RECONCILIATION_HISTORY_FIELDS
-                    or item.get("schema_version") != 1
+                    or item.get("schema_version") != 2
                     or item.get("symbol") != artifact.symbol
                     or not cls._is_sha256(
                         item.get("reconciled_artifact_sha256")
                     )
-                    or not cls._is_sha256(item.get("reconciliation_sha256"))
+                    or not cls._is_sha256(item.get("history_sha256"))
                     or dates is None
                     or not cls._valid_reconciliation(
                         reconciliation_value,
@@ -495,10 +495,14 @@ class OfficialCompatFetcher:
                     )
                 ):
                     return False
-                reconciliation_sha256 = cls._canonical_json_sha256(
-                    reconciliation_value
+                history_sha256 = cls._canonical_json_sha256(
+                    {
+                        name: value
+                        for name, value in item.items()
+                        if name != "history_sha256"
+                    }
                 )
-                if item["reconciliation_sha256"] != reconciliation_sha256:
+                if item["history_sha256"] != history_sha256:
                     return False
                 history_dates.append(dates[-1])
                 artifact_hashes.append(item["reconciled_artifact_sha256"])
@@ -1030,19 +1034,20 @@ class OfficialCompatFetcher:
                 )
             else:
                 reconciliation_copy = copy.deepcopy(existing_reconciliation)
+                history_item = {
+                    "schema_version": 2,
+                    "symbol": symbol,
+                    "reconciled_artifact_sha256": artifact.compressed_sha256,
+                    "reconciliation": reconciliation_copy,
+                }
+                history_item["history_sha256"] = self._canonical_json_sha256(
+                    history_item
+                )
                 lineage["legacy_reconciliation_history"] = [
                     *copy.deepcopy(
                         self._existing_reconciliation_history.get(symbol, [])
                     ),
-                    {
-                        "schema_version": 1,
-                        "symbol": symbol,
-                        "reconciled_artifact_sha256": artifact.compressed_sha256,
-                        "reconciliation_sha256": self._canonical_json_sha256(
-                            reconciliation_copy
-                        ),
-                        "reconciliation": reconciliation_copy,
-                    },
+                    history_item,
                 ]
         elif symbol in self._existing_reconciliation_history:
             lineage["legacy_reconciliation_history"] = copy.deepcopy(

@@ -255,21 +255,22 @@ def reconciliation_history_record(
     artifact_sha="e" * 64,
 ):
     value = copy.deepcopy(reconciliation)
-    return {
-        "schema_version": 1,
+    result = {
+        "schema_version": 2,
         "symbol": symbol,
         "reconciled_artifact_sha256": artifact_sha,
-        "reconciliation_sha256": hashlib.sha256(
-            json.dumps(
-                value,
-                ensure_ascii=True,
-                allow_nan=False,
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode("utf-8")
-        ).hexdigest(),
         "reconciliation": value,
     }
+    result["history_sha256"] = hashlib.sha256(
+        json.dumps(
+            result,
+            ensure_ascii=True,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    return result
 
 
 def snapshot_without_optional(*, price=True, row_date=None, row_symbol="2330"):
