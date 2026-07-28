@@ -267,8 +267,24 @@ class LegacyArtifactBackupStore:
 
     @contextlib.contextmanager
     def _manifest_transaction(self):
-        self._ensure_directories()
-        lock_path = self.backup_root / ".manifest.lock"
+        lock_root = (
+            self.root
+            / "quarantine"
+            / "tw-recovery"
+            / "legacy-reconciliation"
+            / "v2"
+            / ".locks"
+            / self.target_date.isoformat()
+        )
+        _assert_safe_child(self.root, lock_root)
+        try:
+            lock_root.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise LegacyReconciliationError(
+                "legacy reconciliation lock is unavailable"
+            ) from exc
+        _assert_safe_child(self.root, lock_root)
+        lock_path = lock_root / f"{self.series_manifest_sha256}.lock"
         _assert_safe_child(self.root, lock_path)
         if _is_reparse(lock_path):
             raise LegacyReconciliationError(

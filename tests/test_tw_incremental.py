@@ -249,6 +249,29 @@ def reconciliation_record(
     }
 
 
+def reconciliation_history_record(
+    symbol,
+    reconciliation,
+    artifact_sha="e" * 64,
+):
+    value = copy.deepcopy(reconciliation)
+    return {
+        "schema_version": 1,
+        "symbol": symbol,
+        "reconciled_artifact_sha256": artifact_sha,
+        "reconciliation_sha256": hashlib.sha256(
+            json.dumps(
+                value,
+                ensure_ascii=True,
+                allow_nan=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest(),
+        "reconciliation": value,
+    }
+
+
 def snapshot_without_optional(*, price=True, row_date=None, row_symbol="2330"):
     value = TARGET
     price_rows = {}
@@ -1461,8 +1484,17 @@ class TWLegacyOverlapReconciliationTests(unittest.TestCase):
                 future.isoformat(),
             )
             output = fetcher.lineage_for("2330")
+            original_artifact = fetcher._load_artifact("2330")
+            expected_history = reconciliation_history_record(
+                "2330",
+                prior,
+                original_artifact.compressed_sha256,
+            )
             self.assertNotIn("legacy_reconciliation", output)
-            self.assertEqual(output["legacy_reconciliation_history"], [prior])
+            self.assertEqual(
+                output["legacy_reconciliation_history"],
+                [expected_history],
+            )
             write_artifact(
                 temporary,
                 daily=[{
@@ -1482,6 +1514,8 @@ class TWLegacyOverlapReconciliationTests(unittest.TestCase):
             )
             tampered = copy.deepcopy(output)
             tampered["legacy_reconciliation_history"][0][
+                "reconciliation"
+            ][
                 "official_series_manifest_sha256"
             ] = "f" * 64
             self.assertFalse(
@@ -1501,8 +1535,8 @@ class TWLegacyOverlapReconciliationTests(unittest.TestCase):
         )
         prior = reconciliation_record()
         cases = (
-            ("2330", [future]),
-            ("2303", [prior]),
+            ("2330", [reconciliation_history_record("2330", future)]),
+            ("2303", [reconciliation_history_record("2330", prior)]),
         )
         with tempfile.TemporaryDirectory() as temporary:
             for symbol, history_value in cases:
@@ -1535,7 +1569,10 @@ class TWLegacyOverlapReconciliationTests(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as temporary:
             lineage = official_lineage()
-            lineage["legacy_reconciliation_history"] = [current, earlier]
+            lineage["legacy_reconciliation_history"] = [
+                reconciliation_history_record("2330", current, "e" * 64),
+                reconciliation_history_record("2330", earlier, "f" * 64),
+            ]
             write_artifact(
                 temporary,
                 daily=target_history(),
