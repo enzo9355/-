@@ -628,10 +628,14 @@ The three Phase 1M implementation findings now have RED/GREEN coverage:
 | cross-date lineage state | `65be2fd1` | `2e79bc3` | 171 tests, one skip |
 | terminal artifact SHA binding | `65be2fd1` | `2e79bc3` | 171 tests, one skip |
 | manifest concurrent update | `4f5aab9` | `2e79bc3` | 171 tests, one skip |
+| history subject/time trust | `3d139d3` | `2b6976d` | 173 tests, one skip |
+| passthrough lock namespace | `3d139d3` | `2b6976d` | 173 tests, one skip |
 
 The first pair of final reviews correctly rejected the prior head because a later target could retain an internally impossible old direct lineage, the terminal gate compared only reconciliation symbol membership rather than the same artifact SHA, and manifest read-modify-write transitions were not serialized across processes. The remediation keeps current outer lineage current, moves older valid evidence to independently validated history, binds each applied manifest SHA to the loaded terminal artifact, and uses a persistent standard-library file lock around manifest transactions.
 
-Fresh code verification on the remediated head passed: the five required focused modules ran 171 tests with one existing Windows symlink-capability skip, and the full suite ran 1,018 tests with the same single skip. Python syntax compilation also passed with bytecode output redirected to the system temporary directory. The remaining static, safety, and final independent-review gates are recorded separately before the Draft PR is updated.
+A subsequent pair of final-head reviews found that the first lock location could leave a manifest-less series directory after passthrough, and that unversioned history allowed future or cross-symbol evidence. The final remediation moves locks to a non-discoverable namespace and wraps each history record with subject, reconciled-artifact SHA, canonical record SHA, version, and ordered time bounds.
+
+Fresh code verification on the final remediated head passed: the five required focused modules ran 173 tests with one existing Windows symlink-capability skip, and the full suite ran 1,020 tests with the same single skip. The remaining static, safety, and final independent-review gates are recorded separately before the Draft PR is updated.
 
 The mandatory Production-cache acceptance gate did not pass. The seven-date warm series `bc195e0df4cd6e63ee93f90c31c746007fbfa320db44374ef1617c2d725f7544` was read with zero requests and zero selected-data mutations. All nine symbols produced all three datasets, schema-v2 baseline evidence, zero duplicate identities, and zero non-finite numeric values. However, the validated 2026-07-24 snapshot contains no official price row for any of the nine, so every target-dated in-memory stock snapshot correctly failed with `ValueError: target market date mismatch`. Their latest available price dates were:
 
