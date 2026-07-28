@@ -11,7 +11,7 @@ import json
 import re
 import sys
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterator, Mapping
 
 from stock_papi.batch.calendar import TradingCalendarSet
 from stock_papi.integrations.market_data.tw_official_bulk import OfficialSourceFailure
@@ -198,8 +198,9 @@ def _assert_complete(
     target_market_date: datetime.date,
     expected_identity: dict[str, Any],
     official_series: OfficialSnapshotSeries | None = None,
-    applied_reconciliation_symbols: frozenset[str] = frozenset(),
+    applied_reconciliation_artifacts: Mapping[str, str] | None = None,
 ) -> None:
+    applied_reconciliation_artifacts = applied_reconciliation_artifacts or {}
     pending, excluded = _load_exclusion_state(root)
     universe = set(symbols)
     checkpoint = _load_checkpoint(root)
@@ -247,7 +248,7 @@ def _assert_complete(
         raise RuntimeError(_INCOMPLETE)
     if official_series is None:
         return
-    if not applied_reconciliation_symbols.issubset(active):
+    if not set(applied_reconciliation_artifacts).issubset(active):
         raise RuntimeError(_INCOMPLETE)
     expected_dates = [value.isoformat() for value in official_series.dates]
     expected_manifests = [
@@ -285,7 +286,12 @@ def _assert_complete(
                 in official_series.snapshots[target_market_date].price_by_symbol
             )
             or (reconciliation is not None)
-            != (symbol in applied_reconciliation_symbols)
+            != (symbol in applied_reconciliation_artifacts)
+            or (
+                reconciliation is not None
+                and artifact.compressed_sha256
+                != applied_reconciliation_artifacts[symbol]
+            )
         ):
             raise RuntimeError(_INCOMPLETE)
 
@@ -501,10 +507,10 @@ def run(
         result = int(local_quant.main(argv))
     if result != 0:
         return result
-    applied_reconciliation_symbols = frozenset()
+    applied_reconciliation_artifacts = {}
     if backup_store is not None:
-        applied_reconciliation_symbols = frozenset(
-            backup_store.assert_current_state_complete() or ()
+        applied_reconciliation_artifacts = (
+            backup_store.assert_current_state_complete() or {}
         )
     expected_identity = _enrich_batch_identity(
         {
@@ -522,8 +528,8 @@ def run(
         symbols=[str(value) for value in symbols],
         target_market_date=target_market_date,
         expected_identity=expected_identity,
-        official_series=series if reconcile_legacy_overlaps else None,
-        applied_reconciliation_symbols=applied_reconciliation_symbols,
+        official_series=series,
+        applied_reconciliation_artifacts=applied_reconciliation_artifacts,
     )
     return 0
 

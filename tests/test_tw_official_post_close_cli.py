@@ -312,7 +312,7 @@ class TWOfficialPostCloseCLITests(unittest.TestCase):
                         data_root,
                         symbol,
                         as_of,
-                        official_lineage(symbol, chosen_series) if reconcile else None,
+                        official_lineage(symbol, chosen_series),
                     )
             state = {
                 "stage": "market_batch",
@@ -970,6 +970,7 @@ class TWOfficialPostCloseCLITests(unittest.TestCase):
 
     def test_prefetches_series_enriches_identity_and_restores_patches(self):
         pipeline = Pipeline()
+        series = snapshot_series()
         original_fetch = pipeline.fetch_finmind_dataset
         observed = {}
         module = types.ModuleType("local_quant")
@@ -982,7 +983,12 @@ class TWOfficialPostCloseCLITests(unittest.TestCase):
         ):
             observed["identity"] = batch_identity
             for symbol in symbols:
-                write_artifact(root, symbol, TARGET.isoformat())
+                write_artifact(
+                    root,
+                    symbol,
+                    TARGET.isoformat(),
+                    official_lineage(symbol, series),
+                )
             state = {
                 "stage": "market_batch",
                 "market": "TW",
@@ -1017,7 +1023,7 @@ class TWOfficialPostCloseCLITests(unittest.TestCase):
         module.main = local_main
         old = sys.modules.get("local_quant")
         sys.modules["local_quant"] = module
-        builder = Mock(return_value=snapshot_series())
+        builder = Mock(return_value=series)
         try:
             with tempfile.TemporaryDirectory() as temporary:
                 for symbol in ("2303", "2330"):

@@ -220,6 +220,9 @@ class OfficialCompatFetcher:
         self._artifacts: dict[str, IncrementalArtifact] = {}
         self._lineage_kinds: dict[str, str] = {}
         self._existing_reconciliations: dict[str, dict[str, Any]] = {}
+        self._existing_reconciliation_history: dict[
+            str, list[dict[str, Any]]
+        ] = {}
         self._reconciliation_dates: dict[
             str, dict[_datetime.date, dict[str, str]]
         ] = {}
@@ -432,6 +435,29 @@ class OfficialCompatFetcher:
         ):
             return False
         reconciliation = lineage.get("legacy_reconciliation", _MISSING)
+        history = lineage.get("legacy_reconciliation_history", _MISSING)
+        if history is not _MISSING:
+            if (
+                reconciliation is not _MISSING
+                or not isinstance(history, list)
+                or not history
+            ):
+                return False
+            for item in history:
+                dates = (
+                    cls._date_list(item.get("official_snapshot_dates"))
+                    if isinstance(item, dict)
+                    else None
+                )
+                if (
+                    dates is None
+                    or not cls._valid_reconciliation(
+                        item,
+                        target_date=dates[-1],
+                    )
+                ):
+                    return False
+            return True
         if reconciliation is _MISSING:
             return True
         return (
@@ -467,6 +493,11 @@ class OfficialCompatFetcher:
             if reconciliation is not None:
                 self._existing_reconciliations[symbol] = copy.deepcopy(
                     reconciliation
+                )
+            history = lineage.get("legacy_reconciliation_history")
+            if history is not None:
+                self._existing_reconciliation_history[symbol] = copy.deepcopy(
+                    history
                 )
         else:
             raise IncrementalHistoryError(
@@ -927,25 +958,36 @@ class OfficialCompatFetcher:
         reconciliation = self.reconciliation_for(symbol)
         existing_reconciliation = self._existing_reconciliations.get(symbol)
         if reconciliation is None and existing_reconciliation is not None:
-            reconciliation = existing_reconciliation
-            lineage.update(
-                historical_artifact_sha256=reconciliation[
-                    "legacy_artifact_sha256"
-                ],
-                historical_as_of=reconciliation["legacy_artifact_as_of"],
-                source_mode=reconciliation["official_source_mode"],
-                source_schema_version=reconciliation[
-                    "official_source_schema_version"
-                ],
-                official_series_manifest_sha256=reconciliation[
-                    "official_series_manifest_sha256"
-                ],
-                official_snapshot_dates=copy.deepcopy(
-                    reconciliation["official_snapshot_dates"]
-                ),
-                official_snapshot_manifests=copy.deepcopy(
-                    reconciliation["official_snapshot_manifests"]
-                ),
+            same_series = (
+                existing_reconciliation["official_source_mode"]
+                == self.source_mode
+                and existing_reconciliation["official_source_schema_version"]
+                == self.source_schema_version
+                and existing_reconciliation["official_series_manifest_sha256"]
+                == self.series_manifest_sha256
+                and existing_reconciliation["official_snapshot_dates"]
+                == lineage["official_snapshot_dates"]
+                and existing_reconciliation["official_snapshot_manifests"]
+                == lineage["official_snapshot_manifests"]
+            )
+            if same_series:
+                reconciliation = existing_reconciliation
+                lineage.update(
+                    historical_artifact_sha256=reconciliation[
+                        "legacy_artifact_sha256"
+                    ],
+                    historical_as_of=reconciliation["legacy_artifact_as_of"],
+                )
+            else:
+                lineage["legacy_reconciliation_history"] = [
+                    *copy.deepcopy(
+                        self._existing_reconciliation_history.get(symbol, [])
+                    ),
+                    copy.deepcopy(existing_reconciliation),
+                ]
+        elif symbol in self._existing_reconciliation_history:
+            lineage["legacy_reconciliation_history"] = copy.deepcopy(
+                self._existing_reconciliation_history[symbol]
             )
         if reconciliation is not None:
             lineage["legacy_reconciliation"] = copy.deepcopy(reconciliation)

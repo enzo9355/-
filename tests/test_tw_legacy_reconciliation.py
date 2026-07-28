@@ -219,7 +219,7 @@ class LegacyArtifactBackupStoreTests(unittest.TestCase):
             ),
             "passthrough",
         )
-        self.assertFalse((self.root / "quarantine").exists())
+        self.assertFalse(self.store.manifest_path.exists())
 
     def test_constructor_and_symbol_identity_fail_closed(self):
         for target_date, series_sha in (
@@ -260,6 +260,10 @@ class LegacyArtifactBackupStoreTests(unittest.TestCase):
         self.assertEqual(entry["original_sha256"], self.original_sha)
         self.assertEqual(entry["status"], "applied")
         self.assertEqual(entry["new_sha256"], new_sha)
+        self.assertEqual(
+            self.store.assert_current_state_complete(),
+            {"2330": new_sha},
+        )
 
     def test_backup_manifest_records_compressed_and_uncompressed_sizes(self):
         self.backup()

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import datetime
 import gzip
 import hashlib
@@ -263,6 +264,50 @@ class LegacyArtifactBackupStore:
                 "legacy reconciliation backup directory is unavailable"
             ) from exc
         _assert_safe_child(self.root, self.objects_dir)
+
+    @contextlib.contextmanager
+    def _manifest_transaction(self):
+        self._ensure_directories()
+        lock_path = self.backup_root / ".manifest.lock"
+        _assert_safe_child(self.root, lock_path)
+        if _is_reparse(lock_path):
+            raise LegacyReconciliationError(
+                "legacy reconciliation lock is invalid"
+            )
+        try:
+            with lock_path.open("a+b") as stream:
+                if _is_reparse(lock_path):
+                    raise LegacyReconciliationError(
+                        "legacy reconciliation lock is invalid"
+                    )
+                stream.seek(0, os.SEEK_END)
+                if stream.tell() == 0:
+                    stream.write(b"\0")
+                    stream.flush()
+                stream.seek(0)
+                if os.name == "nt":
+                    import msvcrt
+
+                    msvcrt.locking(stream.fileno(), msvcrt.LK_LOCK, 1)
+                    unlock = msvcrt.locking
+                    unlock_args = (stream.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+                    unlock = fcntl.flock
+                    unlock_args = (stream.fileno(), fcntl.LOCK_UN)
+                try:
+                    yield
+                finally:
+                    stream.seek(0)
+                    unlock(*unlock_args)
+        except LegacyReconciliationError:
+            raise
+        except OSError as exc:
+            raise LegacyReconciliationError(
+                "legacy reconciliation lock is unavailable"
+            ) from exc
 
     @staticmethod
     def _write_descriptor(descriptor: int, payload: bytes) -> None:
@@ -543,6 +588,20 @@ class LegacyArtifactBackupStore:
         artifact_path: Path,
         evidence: dict[str, Any] | None,
     ) -> str:
+        with self._manifest_transaction():
+            return self._backup_before_write(
+                symbol=symbol,
+                artifact_path=artifact_path,
+                evidence=evidence,
+            )
+
+    def _backup_before_write(
+        self,
+        *,
+        symbol: str,
+        artifact_path: Path,
+        evidence: dict[str, Any] | None,
+    ) -> str:
         path = self._validate_artifact_path(symbol, artifact_path)
         manifest = self._load_manifest()
         entry = manifest["entries"].get(symbol)
@@ -595,6 +654,10 @@ class LegacyArtifactBackupStore:
         return "noop"
 
     def mark_applied(self, *, symbol: str, artifact_path: Path) -> Path:
+        with self._manifest_transaction():
+            return self._mark_applied(symbol=symbol, artifact_path=artifact_path)
+
+    def _mark_applied(self, *, symbol: str, artifact_path: Path) -> Path:
         path = self._validate_artifact_path(symbol, artifact_path)
         manifest = self._load_manifest(required=True)
         entry = manifest["entries"].get(symbol)
@@ -615,7 +678,11 @@ class LegacyArtifactBackupStore:
         self._write_manifest(manifest)
         return path
 
-    def assert_current_state_complete(self) -> frozenset[str]:
+    def assert_current_state_complete(self) -> dict[str, str]:
+        with self._manifest_transaction():
+            return self._assert_current_state_complete()
+
+    def _assert_current_state_complete(self) -> dict[str, str]:
         manifest = self._load_manifest()
         for symbol, entry in manifest["entries"].items():
             if entry["status"] != "applied":
@@ -623,7 +690,10 @@ class LegacyArtifactBackupStore:
                     "legacy reconciliation state is incomplete"
                 )
             self._current_entry_state(symbol, entry)
-        return frozenset(manifest["entries"])
+        return {
+            symbol: entry["new_sha256"]
+            for symbol, entry in manifest["entries"].items()
+        }
 
     @classmethod
     def discover_resume(
