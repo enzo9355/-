@@ -1,4 +1,5 @@
 import datetime
+import copy
 import gzip
 import hashlib
 import json
@@ -172,6 +173,25 @@ def official_lineage(*, schema_version="tw-official-historical-v2", reconciliati
     }
     if reconciliation is not None:
         result["legacy_reconciliation"] = reconciliation
+        result.update(
+            historical_artifact_sha256=reconciliation[
+                "legacy_artifact_sha256"
+            ],
+            historical_as_of=reconciliation["legacy_artifact_as_of"],
+            source_mode=reconciliation["official_source_mode"],
+            source_schema_version=reconciliation[
+                "official_source_schema_version"
+            ],
+            official_series_manifest_sha256=reconciliation[
+                "official_series_manifest_sha256"
+            ],
+            official_snapshot_dates=copy.deepcopy(
+                reconciliation["official_snapshot_dates"]
+            ),
+            official_snapshot_manifests=copy.deepcopy(
+                reconciliation["official_snapshot_manifests"]
+            ),
+        )
     return result
 
 
@@ -1026,24 +1046,18 @@ class TWLegacyOverlapReconciliationTests(unittest.TestCase):
     def test_official_lineage_rejects_mismatched_legacy_artifact_sha(self):
         reconciliation = reconciliation_record()
         lineage = official_lineage(reconciliation=reconciliation)
-        lineage["historical_as_of"] = reconciliation["legacy_artifact_as_of"]
-        self.assertNotEqual(
-            lineage["historical_artifact_sha256"],
-            reconciliation["legacy_artifact_sha256"],
-        )
+        lineage["historical_artifact_sha256"] = "c" * 64
         self._assert_official_lineage_rejected(lineage)
 
     def test_official_lineage_rejects_mismatched_legacy_artifact_as_of(self):
         reconciliation = reconciliation_record()
         lineage = official_lineage(reconciliation=reconciliation)
-        lineage["historical_artifact_sha256"] = reconciliation[
-            "legacy_artifact_sha256"
-        ]
         lineage["historical_as_of"] = "2026-07-23"
         self._assert_official_lineage_rejected(lineage)
 
     def test_official_lineage_rejects_mismatched_reconciliation_series(self):
         reconciliation = reconciliation_record()
+        lineage = official_lineage(reconciliation=reconciliation)
         reconciliation["official_snapshot_manifests"][0][
             "manifest_sha256"
         ] = "b" * 64
@@ -1059,15 +1073,11 @@ class TWLegacyOverlapReconciliationTests(unittest.TestCase):
                 separators=(",", ":"),
             ).encode("utf-8")
         ).hexdigest()
-        lineage = official_lineage(reconciliation=reconciliation)
-        lineage["historical_artifact_sha256"] = reconciliation[
-            "legacy_artifact_sha256"
-        ]
-        lineage["historical_as_of"] = reconciliation["legacy_artifact_as_of"]
         self._assert_official_lineage_rejected(lineage)
 
     def test_official_lineage_rejects_mismatched_reconciliation_schema(self):
         reconciliation = reconciliation_record()
+        lineage = official_lineage(reconciliation=reconciliation)
         reconciliation["official_source_schema_version"] = (
             "tw-official-historical-v1"
         )
@@ -1083,11 +1093,6 @@ class TWLegacyOverlapReconciliationTests(unittest.TestCase):
                 separators=(",", ":"),
             ).encode("utf-8")
         ).hexdigest()
-        lineage = official_lineage(reconciliation=reconciliation)
-        lineage["historical_artifact_sha256"] = reconciliation[
-            "legacy_artifact_sha256"
-        ]
-        lineage["historical_as_of"] = reconciliation["legacy_artifact_as_of"]
         self._assert_official_lineage_rejected(lineage)
 
     def test_reconciliation_evidence_is_independent_of_query_range(self):
@@ -1374,8 +1379,23 @@ class TWLegacyOverlapReconciliationTests(unittest.TestCase):
                 TARGET.isoformat(),
                 TARGET.isoformat(),
             )
+            output = fetcher.lineage_for("2330")
+            self.assertEqual(output["legacy_reconciliation"], prior)
             self.assertEqual(
-                fetcher.lineage_for("2330")["legacy_reconciliation"], prior
+                output["historical_artifact_sha256"],
+                prior["legacy_artifact_sha256"],
+            )
+            self.assertEqual(
+                output["historical_as_of"], prior["legacy_artifact_as_of"]
+            )
+            self.assertEqual(
+                output["official_series_manifest_sha256"],
+                prior["official_series_manifest_sha256"],
+            )
+            self.assertTrue(
+                OfficialCompatFetcher._valid_official_lineage(
+                    output, fetcher._load_artifact("2330")
+                )
             )
 
     def test_reconciliation_does_not_bootstrap_missing_artifact(self):

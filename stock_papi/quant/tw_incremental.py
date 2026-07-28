@@ -429,12 +429,26 @@ class OfficialCompatFetcher:
         ):
             return False
         reconciliation = lineage.get("legacy_reconciliation", _MISSING)
+        if reconciliation is _MISSING:
+            return True
         return (
-            reconciliation is _MISSING
-            or cls._valid_reconciliation(
+            cls._valid_reconciliation(
                 reconciliation,
                 target_date=target_date,
             )
+            and lineage["historical_artifact_sha256"]
+            == reconciliation["legacy_artifact_sha256"]
+            and lineage["historical_as_of"]
+            == reconciliation["legacy_artifact_as_of"]
+            and lineage["source_mode"] == reconciliation["official_source_mode"]
+            and lineage["source_schema_version"]
+            == reconciliation["official_source_schema_version"]
+            and lineage["official_series_manifest_sha256"]
+            == reconciliation["official_series_manifest_sha256"]
+            and lineage["official_snapshot_dates"]
+            == reconciliation["official_snapshot_dates"]
+            and lineage["official_snapshot_manifests"]
+            == reconciliation["official_snapshot_manifests"]
         )
 
     def _lineage_kind(self, symbol: str) -> str:
@@ -886,10 +900,29 @@ class OfficialCompatFetcher:
                 symbol in self.snapshots[self.target_date].price_by_symbol
             ),
         }
-        reconciliation = (
-            self.reconciliation_for(symbol)
-            or self._existing_reconciliations.get(symbol)
-        )
+        reconciliation = self.reconciliation_for(symbol)
+        existing_reconciliation = self._existing_reconciliations.get(symbol)
+        if reconciliation is None and existing_reconciliation is not None:
+            reconciliation = existing_reconciliation
+            lineage.update(
+                historical_artifact_sha256=reconciliation[
+                    "legacy_artifact_sha256"
+                ],
+                historical_as_of=reconciliation["legacy_artifact_as_of"],
+                source_mode=reconciliation["official_source_mode"],
+                source_schema_version=reconciliation[
+                    "official_source_schema_version"
+                ],
+                official_series_manifest_sha256=reconciliation[
+                    "official_series_manifest_sha256"
+                ],
+                official_snapshot_dates=copy.deepcopy(
+                    reconciliation["official_snapshot_dates"]
+                ),
+                official_snapshot_manifests=copy.deepcopy(
+                    reconciliation["official_snapshot_manifests"]
+                ),
+            )
         if reconciliation is not None:
             lineage["legacy_reconciliation"] = copy.deepcopy(reconciliation)
         return lineage
