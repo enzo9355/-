@@ -218,7 +218,7 @@ def reconciliation_record(
         "snapshots": snapshot_manifests,
     }
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "mode": "replace_verified_legacy",
         "legacy_artifact_sha256": "d" * 64,
         "legacy_artifact_as_of": legacy_as_of,
@@ -233,15 +233,18 @@ def reconciliation_record(
         ).hexdigest(),
         "official_snapshot_dates": list(snapshot_dates),
         "official_snapshot_manifests": snapshot_manifests,
-        "replaced_dates": [replaced_date],
+        "overlap_dates": [replaced_date],
         "price_replaced_dates": [replaced_date],
+        "price_preserved_no_official_row_dates": [],
         "institutional_replaced_dates": [replaced_date],
+        "institutional_preserved_no_official_row_dates": [],
         "margin_replaced_dates": [replaced_date],
+        "margin_preserved_no_official_row_dates": [],
         "date_evidence": [{
             "date": replaced_date,
-            "price_replaced": True,
-            "institutional_replaced": True,
-            "margin_replaced": True,
+            "price_action": "replaced_official",
+            "institutional_action": "replaced_official",
+            "margin_action": "replaced_official",
         }],
     }
 
@@ -563,12 +566,20 @@ class TWLegacyOverlapReconciliationTests(unittest.TestCase):
             self.assertEqual(evidence["institutional_replaced_dates"], [])
             self.assertEqual(evidence["margin_replaced_dates"], [])
             self.assertEqual(
+                evidence["institutional_preserved_no_official_row_dates"],
+                [TARGET.isoformat()],
+            )
+            self.assertEqual(
+                evidence["margin_preserved_no_official_row_dates"],
+                [TARGET.isoformat()],
+            )
+            self.assertEqual(
                 evidence["date_evidence"],
                 [{
                     "date": TARGET.isoformat(),
-                    "price_replaced": True,
-                    "institutional_replaced": False,
-                    "margin_replaced": False,
+                    "price_action": "replaced_official",
+                    "institutional_action": "preserved_legacy_no_official_row",
+                    "margin_action": "preserved_legacy_no_official_row",
                 }],
             )
 
@@ -1112,7 +1123,7 @@ class TWLegacyOverlapReconciliationTests(unittest.TestCase):
                 TARGET.isoformat(),
             )
             self.assertEqual(
-                fetcher.reconciliation_for("2330")["replaced_dates"],
+                fetcher.reconciliation_for("2330")["overlap_dates"],
                 ["2026-07-23"],
             )
 
@@ -1141,11 +1152,12 @@ class TWLegacyOverlapReconciliationTests(unittest.TestCase):
             fetcher = self._fetcher(temporary)
             first = fetcher.lineage_for("2330")
             first["legacy_reconciliation"]["date_evidence"][0][
-                "margin_replaced"
-            ] = False
-            self.assertTrue(
+                "margin_action"
+            ] = "preserved_legacy_no_official_row"
+            self.assertEqual(
                 fetcher.lineage_for("2330")["legacy_reconciliation"]
-                ["date_evidence"][0]["margin_replaced"]
+                ["date_evidence"][0]["margin_action"],
+                "replaced_official",
             )
 
     def test_official_lineage_rejects_impossible_reconciliation_dates(self):
@@ -1337,10 +1349,10 @@ class TWLegacyOverlapReconciliationTests(unittest.TestCase):
                     TARGET.isoformat(),
                 )
             evidence = fetcher.reconciliation_for("2330")
-            self.assertEqual(evidence["schema_version"], 1)
+            self.assertEqual(evidence["schema_version"], 2)
             self.assertEqual(evidence["mode"], "replace_verified_legacy")
             self.assertEqual(evidence["legacy_artifact_sha256"], original_sha)
-            self.assertEqual(evidence["replaced_dates"], [TARGET.isoformat()])
+            self.assertEqual(evidence["overlap_dates"], [TARGET.isoformat()])
             self.assertEqual(evidence["price_replaced_dates"], [TARGET.isoformat()])
             self.assertEqual(
                 evidence["institutional_replaced_dates"], [TARGET.isoformat()]

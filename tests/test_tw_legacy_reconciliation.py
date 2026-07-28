@@ -63,7 +63,7 @@ def legacy_document(value=BASELINE):
 def evidence(original_sha, replaced_date=BASELINE):
     date_text = replaced_date.isoformat()
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "mode": "replace_verified_legacy",
         "legacy_artifact_sha256": original_sha,
         "legacy_artifact_as_of": date_text,
@@ -75,15 +75,18 @@ def evidence(original_sha, replaced_date=BASELINE):
             {"date": date_text, "manifest_sha256": "a" * 64},
             {"date": TARGET.isoformat(), "manifest_sha256": "b" * 64},
         ],
-        "replaced_dates": [date_text],
+        "overlap_dates": [date_text],
         "price_replaced_dates": [date_text],
+        "price_preserved_no_official_row_dates": [],
         "institutional_replaced_dates": [date_text],
+        "institutional_preserved_no_official_row_dates": [],
         "margin_replaced_dates": [date_text],
+        "margin_preserved_no_official_row_dates": [],
         "date_evidence": [{
             "date": date_text,
-            "price_replaced": True,
-            "institutional_replaced": True,
-            "margin_replaced": True,
+            "price_action": "replaced_official",
+            "institutional_action": "replaced_official",
+            "margin_action": "replaced_official",
         }],
     }
 
@@ -162,7 +165,7 @@ def read_manifest(root):
         / "quarantine"
         / "tw-recovery"
         / "legacy-reconciliation"
-        / "v1"
+        / "v2"
         / TARGET.isoformat()
         / SERIES_SHA
         / "manifest.json"
@@ -293,7 +296,7 @@ class LegacyArtifactBackupStoreTests(unittest.TestCase):
             ("official_source_schema_version", "unknown"),
             ("official_snapshot_dates", [TARGET.isoformat(), BASELINE.isoformat()]),
             ("official_snapshot_manifests", []),
-            ("price_replaced_dates", []),
+            ("price_preserved_no_official_row_dates", [BASELINE.isoformat()]),
             ("institutional_replaced_dates", [TARGET.isoformat()]),
             ("margin_replaced_dates", [TARGET.isoformat()]),
             ("date_evidence", []),
@@ -454,7 +457,7 @@ class LegacyArtifactBackupStoreTests(unittest.TestCase):
             / "quarantine"
             / "tw-recovery"
             / "legacy-reconciliation"
-            / "v1"
+            / "v2"
             / TARGET.isoformat()
             / SERIES_SHA
             / "objects"
@@ -493,7 +496,7 @@ class LegacyArtifactBackupStoreTests(unittest.TestCase):
         self.backup()
         manifest_path, original = read_manifest(self.root)
         mutations = (
-            lambda value: value.update(schema_version=2),
+            lambda value: value.update(schema_version=1),
             lambda value: value.update(target_market_date="2026-07-23"),
             lambda value: value.update(official_series_manifest_sha256="f" * 64),
             lambda value: value["entries"]["2330"].update(symbol="2303"),
@@ -503,7 +506,7 @@ class LegacyArtifactBackupStoreTests(unittest.TestCase):
             lambda value: value["entries"]["2330"].update(
                 original_uncompressed_size=0
             ),
-            lambda value: value["entries"]["2330"].update(replaced_dates=[]),
+            lambda value: value["entries"]["2330"].update(overlap_dates=[]),
             lambda value: value["entries"]["2330"].update(new_sha256="f" * 64),
         )
         for mutate in mutations:
@@ -670,7 +673,7 @@ class LegacyArtifactBackupStoreTests(unittest.TestCase):
             / "quarantine"
             / "tw-recovery"
             / "legacy-reconciliation"
-            / "v1"
+            / "v2"
             / TARGET.isoformat()
             / ("f" * 64)
         )
@@ -696,7 +699,7 @@ class LegacyArtifactBackupStoreTests(unittest.TestCase):
             / "quarantine"
             / "tw-recovery"
             / "legacy-reconciliation"
-            / "v1"
+            / "v2"
             / TARGET.isoformat()
             / SERIES_SHA
         )
