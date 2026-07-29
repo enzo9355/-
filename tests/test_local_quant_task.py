@@ -173,6 +173,38 @@ class LocalQuantTaskTests(unittest.TestCase):
             self.assertFalse(call_log.exists(), result.stdout + result.stderr)
             self.assertIn("Status object evidence mismatch", result.stdout + result.stderr)
 
+    def test_uploader_rejects_object_path_not_bound_to_declared_sha(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            data_root = root / "AbsorbData"
+            publish = write_quant_publish_v3(data_root)
+            latest_path = publish / "latest-TW.json"
+            latest = json.loads(latest_path.read_text(encoding="utf-8"))
+            manifest = json.loads(
+                (publish / latest["manifest"]).read_text(encoding="utf-8")
+            )
+            entry = manifest["symbols"]["2330"]
+            mismatched = f"objects/{'f' * 64}.json.gz"
+            (publish / mismatched).write_bytes((publish / entry["path"]).read_bytes())
+            entry["path"] = mismatched
+            encoded = json.dumps(
+                manifest,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+            digest = hashlib.sha256(encoded).hexdigest()
+            relative = latest["manifest"].rsplit("-", 1)[0] + f"-{digest[:12]}.json"
+            (publish / relative).write_bytes(encoded)
+            latest.update(manifest=relative, manifest_sha256=digest)
+            latest_path.write_text(json.dumps(latest), encoding="utf-8")
+
+            result, call_log = self._run_uploader_preflight(root)
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertFalse(call_log.exists(), result.stdout + result.stderr)
+            self.assertIn("Object path hash mismatch", result.stdout + result.stderr)
+
     def test_uploader_valid_v3_passes_without_gcloud_copy(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

@@ -160,6 +160,30 @@ class DailyReportSourceTests(unittest.TestCase):
             with self.assertRaisesRegex(ReportSourceError, "manifest hash"):
                 load_report_source(root, market="TW")
 
+    def test_rejects_object_path_not_bound_to_declared_sha(self):
+        from reporting.exceptions import ReportSourceError
+        from reporting.source_loader import load_report_source
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            publish = write_quant_publish_v3(root)
+            latest = json.loads(
+                (publish / "latest-TW.json").read_text(encoding="utf-8")
+            )
+            manifest = json.loads(
+                (publish / latest["manifest"]).read_text(encoding="utf-8")
+            )
+            entry = manifest["symbols"]["2330"]
+            mismatched = f"objects/{'f' * 64}.json.gz"
+            (publish / mismatched).write_bytes((publish / entry["path"]).read_bytes())
+            rewrite_manifest(
+                publish,
+                lambda value: value["symbols"]["2330"].update(path=mismatched),
+            )
+
+            with self.assertRaisesRegex(ReportSourceError, "path or metadata"):
+                load_report_source(root, market="TW")
+
     def test_rejects_path_traversal_object_size_and_non_finite_values(self):
         from reporting.exceptions import ReportSourceError
         from reporting.source_loader import load_report_source

@@ -114,6 +114,42 @@ class QuantSnapshotRepositoryTests(unittest.TestCase):
         self.assertIsNotNone(manifest)
         self.assertIsNone(document)
 
+    def test_repository_rejects_object_path_not_bound_to_declared_sha(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            publish = write_quant_publish_v3(Path(temporary))
+            latest = json.loads(
+                (publish / "latest-TW.json").read_text(encoding="utf-8")
+            )
+            manifest = json.loads(
+                (publish / latest["manifest"]).read_text(encoding="utf-8")
+            )
+            entry = manifest["symbols"]["2330"]
+            mismatched = f"objects/{'f' * 64}.json.gz"
+            (publish / mismatched).write_bytes((publish / entry["path"]).read_bytes())
+            entry["path"] = mismatched
+            rewrite_repository_manifest(publish, manifest)
+
+            def load_object(name, _limit):
+                path = publish / name.removeprefix("quant/v1/")
+                return path.read_bytes() if path.is_file() else None
+
+            manifest = quant_snapshots.published_quant_manifest(
+                "TW",
+                today=datetime.date(2026, 7, 30),
+                load_object=load_object,
+                cache={},
+            )
+            document = quant_snapshots.fetch_quant_snapshot(
+                "2330",
+                today=datetime.date(2026, 7, 30),
+                is_us_ticker_fn=lambda _code: False,
+                load_manifest=lambda market, today=None: manifest,
+                load_object=load_object,
+            )
+
+        self.assertIsNotNone(manifest)
+        self.assertIsNone(document)
+
     def test_repository_keeps_v2_cache_key_separate_from_v3_identity(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
