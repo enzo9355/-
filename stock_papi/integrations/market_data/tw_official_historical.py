@@ -732,11 +732,7 @@ def build_historical_daily_snapshot(
                 terminated[symbol] = disposition
                 continue
             if status is not None:
-                document = dict(status)
-                if candidate is not None:
-                    document["price_row_evidence"] = candidate
-                    document["evidence_sha256"] = evidence_sha256(document)
-                trading_status[symbol] = document
+                trading_status[symbol] = dict(status)
                 continue
             if candidate is not None:
                 document = dict(candidate)
