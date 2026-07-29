@@ -346,7 +346,7 @@ def _assert_complete(
             or (
                 symbol in status_symbols
                 and (
-                    artifact.trading_status
+                    artifact.trading_status_evidence
                     != dict(target_snapshot.trading_status_by_symbol[symbol])
                     or lineage.get("trading_status_evidence_sha256")
                     != target_snapshot.trading_status_by_symbol[symbol].get(
@@ -356,7 +356,7 @@ def _assert_complete(
             )
             or (
                 symbol in regular_symbols
-                and artifact.trading_status is not None
+                and artifact.trading_status_evidence is not None
             )
             or (reconciliation is not None)
             != (symbol in applied_reconciliation_artifacts)

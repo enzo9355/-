@@ -494,7 +494,7 @@ class TWOfficialIncrementalTests(unittest.TestCase):
                 observation_as_of=TARGET.isoformat(),
                 latest_regular_price_date="2026-07-22",
                 observation_kind="official_no_regular_trade",
-                trading_status=status,
+                trading_status_evidence=status,
             )
             with path.open("wb") as raw:
                 with gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as stream:

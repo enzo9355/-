@@ -46,7 +46,7 @@ class IncrementalArtifact:
     compressed_sha256: str
     latest_date: _datetime.date
     observation_date: _datetime.date
-    trading_status: Mapping[str, Any] | None
+    trading_status_evidence: Mapping[str, Any] | None
 
 
 @dataclass(frozen=True)
@@ -112,7 +112,7 @@ def load_incremental_artifact(root: Path, symbol: str) -> IncrementalArtifact:
             raise ValueError("artifact as_of mismatch")
         if document["schema_version"] == 1:
             observation_date = latest_date
-            trading_status = None
+            trading_status_evidence = None
         else:
             target_date = _datetime.date.fromisoformat(
                 str(document["target_market_date"])
@@ -124,7 +124,7 @@ def load_incremental_artifact(root: Path, symbol: str) -> IncrementalArtifact:
                 str(document["latest_regular_price_date"])
             )
             observation_kind = document.get("observation_kind")
-            status_value = document.get("trading_status")
+            status_value = document.get("trading_status_evidence")
             if (
                 target_date != observation_date
                 or latest_regular_price_date != latest_date
@@ -139,7 +139,7 @@ def load_incremental_artifact(root: Path, symbol: str) -> IncrementalArtifact:
             if observation_kind == "regular_price":
                 if latest_date != observation_date or status_value is not None:
                     raise ValueError("regular artifact observation is invalid")
-                trading_status = None
+                trading_status_evidence = None
             else:
                 if (
                     not isinstance(status_value, dict)
@@ -152,7 +152,7 @@ def load_incremental_artifact(root: Path, symbol: str) -> IncrementalArtifact:
                     != evidence_sha256(status_value)
                 ):
                     raise ValueError("artifact trading status is invalid")
-                trading_status = status_value
+                trading_status_evidence = status_value
     except (KeyError, OSError, TypeError, UnicodeError, ValueError, gzip.BadGzipFile) as exc:
         raise IncrementalHistoryError(
             f"historical artifact is unavailable for TW:{symbol}"
@@ -163,7 +163,7 @@ def load_incremental_artifact(root: Path, symbol: str) -> IncrementalArtifact:
         compressed_sha256=hashlib.sha256(compressed).hexdigest(),
         latest_date=latest_date,
         observation_date=observation_date,
-        trading_status=trading_status,
+        trading_status_evidence=trading_status_evidence,
     )
 
 
@@ -500,7 +500,7 @@ class OfficialCompatFetcher:
         ):
             return False
         if status_aware:
-            status = artifact.trading_status
+            status = artifact.trading_status_evidence
             observation_kind = (
                 status.get("status") if status is not None else "regular_price"
             )

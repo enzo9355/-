@@ -808,7 +808,7 @@ File Creation Time: 07082026||||||
         self.assertEqual(payload["latest_regular_price_date"], "2026-07-16")
         self.assertEqual(payload["observation_as_of"], "2026-07-17")
         self.assertEqual(payload["observation_kind"], "official_no_regular_trade")
-        self.assertEqual(payload["trading_status"], status)
+        self.assertEqual(payload["trading_status_evidence"], status)
         self.assertEqual(len(payload["daily"]), 1)
 
     def test_taiwan_snapshot_fast_lane_uses_promoted_backtest_without_walk_forward(self):

@@ -405,7 +405,7 @@ class TWOfficialPostCloseCLITests(unittest.TestCase):
                     observation_as_of=TARGET.isoformat(),
                     latest_regular_price_date=document["as_of"],
                     observation_kind=status_evidence["status"],
-                    trading_status=status_evidence,
+                    trading_status_evidence=status_evidence,
                     source_lineage=pipeline.fetch_finmind_dataset.lineage_for(symbol),
                 )
                 with path.open("wb") as raw:

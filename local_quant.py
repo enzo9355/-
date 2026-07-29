@@ -1543,7 +1543,7 @@ def build_stock_snapshot(
             ),
         )
         if trading_status is not None:
-            result["trading_status"] = trading_status
+            result["trading_status_evidence"] = trading_status
     if not observation_only:
         result["feature_schema_version"] = FEATURE_SCHEMA_VERSION
         result["recommendation_policy_version"] = (
