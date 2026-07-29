@@ -16,7 +16,9 @@ from stock_papi.integrations.market_data.tw_official_bulk import (
 )
 from stock_papi.integrations.market_data.tw_official_cache import (
     OfficialCacheError,
+    load_cached_raw_source,
     load_cached_source,
+    store_cached_raw_source,
     store_cached_source,
 )
 
@@ -185,6 +187,46 @@ class TWOfficialCacheTests(unittest.TestCase):
                     source_id="twse_institutional",
                     target_date=TARGET,
                     parser_version="v1",
+                )
+
+    def test_raw_price_cache_is_content_addressed_and_hash_verified(self):
+        payload = json.dumps(
+            {"stat": "OK", "date": "20260724", "data": [["2330"]]},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        with tempfile.TemporaryDirectory() as temporary:
+            entry = store_cached_raw_source(
+                Path(temporary),
+                source_id="twse_price",
+                target_date=TARGET,
+                payload=payload,
+                parser_version="raw-v1",
+                source_url="https://example.test/report?token=secret",
+                fetched_at=datetime.datetime(
+                    2026, 7, 24, tzinfo=datetime.timezone.utc
+                ),
+            )
+
+            self.assertIn(entry.payload_sha256, entry.payload_path.name)
+            self.assertEqual(entry.payload_path.parent.name, "objects")
+            self.assertNotIn(
+                "secret", entry.metadata_path.read_text(encoding="utf-8")
+            )
+            loaded = load_cached_raw_source(
+                Path(temporary),
+                source_id="twse_price",
+                target_date=TARGET,
+                parser_version="raw-v1",
+            )
+            self.assertEqual(loaded.payload, payload)
+            entry.payload_path.write_bytes(entry.payload_path.read_bytes() + b"x")
+            with self.assertRaises(OfficialCacheError):
+                load_cached_raw_source(
+                    Path(temporary),
+                    source_id="twse_price",
+                    target_date=TARGET,
+                    parser_version="raw-v1",
                 )
 
 

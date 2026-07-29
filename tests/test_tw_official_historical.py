@@ -17,8 +17,10 @@ from stock_papi.integrations.market_data.tw_official_historical import (
     build_official_snapshot_series,
     parse_tpex_margin_report,
     parse_tpex_price_report,
+    parse_tpex_price_report_with_status,
     parse_twse_margin_report,
     parse_twse_price_report,
+    parse_twse_price_report_with_status,
 )
 
 TARGET = datetime.date(2026, 7, 24)
@@ -167,6 +169,33 @@ class Session:
 
 
 class HistoricalParserTests(unittest.TestCase):
+    def test_tpex_blank_row_is_preserved_as_hash_bound_status(self):
+        data = payloads(TARGET)["tpex_price"]
+        data["tables"][0]["data"].append(
+            ["00886", "永豐美國科技", "---", "---", "---", "---", "---", "44.11", "435", "19188", "17", "43.60", "1", "43.92", "1", "4451000", "43.92", "9999.95", "0.01"]
+        )
+
+        prices, statuses = parse_tpex_price_report_with_status(
+            data, TARGET, "a" * 64
+        )
+
+        self.assertNotIn("00886", {row["stock_id"] for row in prices})
+        self.assertEqual(statuses["00886"]["status"], "official_no_regular_trade")
+        self.assertEqual(statuses["00886"]["raw_fields"]["volume"], "435")
+
+    def test_twse_blank_row_is_preserved_as_hash_bound_status(self):
+        data = payloads(TARGET)["twse_price"]
+        data["tables"][1]["data"].append(
+            ["1213", "大飲", "0", "0", "0", "--", "--", "--", "--", "", "0", "7.10", "3", "7.25", "1", "0"]
+        )
+
+        prices, statuses = parse_twse_price_report_with_status(
+            data, TARGET, "b" * 64
+        )
+
+        self.assertNotIn("1213", {row["stock_id"] for row in prices})
+        self.assertEqual(statuses["1213"]["status"], "official_no_regular_trade")
+
     def test_twse_price_and_margin_tables_map_exact_indices(self):
         data = payloads(TARGET)
         twse_price = parse_twse_price_report(data["twse_price"], TARGET)
