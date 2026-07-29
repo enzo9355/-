@@ -29,6 +29,7 @@ from stock_papi.integrations.market_data.tw_official_bulk import (
 from stock_papi.integrations.market_data.tw_official_historical import (
     OfficialSnapshotSeries,
 )
+from stock_papi.integrations.market_data.tw_trading_status import evidence_sha256
 from stock_papi.quant.tw_incremental import OfficialCompatFetcher
 from stock_papi.quant.tw_legacy_reconciliation import LegacyArtifactBackupStore
 
@@ -102,6 +103,50 @@ def snapshot_series(dates=(TARGET,), price_symbols=("2330", "2303")):
             6 * len(dates), 12 * len(dates), 6 * len(dates), 0,
             True, "capacity_proven",
         ),
+        source_schema_version="tw-official-historical-v2",
+    )
+
+
+def status_snapshot_series():
+    status = {
+        "schema_version": 1,
+        "status": "official_no_regular_trade",
+        "market": "TW",
+        "exchange": "TWSE",
+        "symbol": "2303",
+        "target_market_date": TARGET.isoformat(),
+        "source_id": "twse_price",
+        "payload_sha256": "d" * 64,
+        "raw_row_sha256": "e" * 64,
+        "raw_fields": {"open": "--", "high": "--", "low": "--", "close": "--", "volume": "0"},
+        "parser_version": "tw-official-historical-parser-v3",
+    }
+    status["evidence_sha256"] = evidence_sha256(status)
+    snapshot = daily_snapshot(TARGET, ("2330",))
+    snapshot = OfficialDailySnapshot(
+        **{
+            **snapshot.__dict__,
+            "source_schema_version": "tw-official-historical-v3",
+            "trading_status_by_symbol": MappingProxyType({
+                "2303": MappingProxyType(status)
+            }),
+        }
+    )
+    document = {
+        "source_mode": snapshot.source_mode,
+        "source_schema_version": snapshot.source_schema_version,
+        "target_date": TARGET.isoformat(),
+        "snapshots": [{"date": TARGET.isoformat(), "manifest_sha256": snapshot.manifest_sha256}],
+    }
+    return OfficialSnapshotSeries(
+        target_date=TARGET,
+        snapshots=MappingProxyType({TARGET: snapshot}),
+        manifest_sha256=hashlib.sha256(
+            json.dumps(document, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest(),
+        request_count=8,
+        request_budget=OfficialRequestBudget(8, 16, 8, 0, True, "capacity_proven"),
+        source_schema_version="tw-official-historical-v3",
     )
 
 
@@ -600,6 +645,40 @@ class TWOfficialPostCloseCLITests(unittest.TestCase):
             payload = local.build_stock_snapshot(pipeline, "TW", "2330")
             local.write_stock_artifact(Path("root"), "TW", "2330", payload)
         self.assertEqual(written["derived"], 42)
+
+    def test_cli_injects_verified_status_into_status_symbol_builder(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            for symbol in ("2303", "2330"):
+                write_artifact(temporary, symbol)
+            pipeline = Pipeline()
+            observed = {}
+            local = types.SimpleNamespace(
+                load_stock_pipeline=lambda _root: pipeline,
+                run_market_batch=lambda *_args, **_kwargs: None,
+                build_stock_snapshot=lambda *_args, **kwargs: observed.update(kwargs) or {},
+            )
+            fetcher = OfficialCompatFetcher(
+                Path(temporary), status_snapshot_series(), pd=pd
+            )
+            with _patched_pipeline(
+                local,
+                pipeline,
+                fetcher,
+                status_snapshot_series(),
+                Mock(),
+            ):
+                local.build_stock_snapshot(
+                    pipeline,
+                    "TW",
+                    "2303",
+                    target_market_date=TARGET,
+                    observation_only=True,
+                )
+
+        self.assertEqual(
+            observed["trading_status"]["status"],
+            "official_no_regular_trade",
+        )
 
     def test_cli_restores_all_patches_when_assignment_or_pipeline_fails(self):
         class RejectOnce(types.SimpleNamespace):
