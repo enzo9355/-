@@ -10,6 +10,10 @@ from reporting.schemas import (
 )
 from stock_papi.config.capabilities import PredictionCapabilityState
 from stock_papi.batch.observation_products import build_observation_dashboard
+from stock_papi.integrations.market_data.tw_trading_status import (
+    evidence_sha256,
+    resolve_lifecycle_status,
+)
 
 
 FORBIDDEN_KEYS = {
@@ -88,6 +92,111 @@ def _source(stocks, *, coverage=1.0, as_of=datetime.date(2026, 7, 16)):
             failed_symbols=[],
             manifest_path="manifests/TW-20260716T100000Z-aaaaaaaaaaaa.json",
             manifest_sha256="a" * 64,
+        ),
+        stocks=stocks,
+    )
+
+
+def _no_trade_evidence(symbol, target):
+    status = {
+        "schema_version": 1,
+        "status": "official_no_regular_trade",
+        "market": "TW",
+        "exchange": "TWSE",
+        "symbol": symbol,
+        "target_market_date": target.isoformat(),
+        "source_id": "twse_price",
+        "payload_sha256": "b" * 64,
+        "raw_row_sha256": "c" * 64,
+        "raw_fields": {
+            "symbol": symbol,
+            "name": f"測試股票 {symbol}",
+            "open": "--",
+            "high": "--",
+            "low": "--",
+            "close": "--",
+            "volume": "0",
+        },
+        "parser_version": "tw-official-historical-parser-v3",
+    }
+    status["evidence_sha256"] = evidence_sha256(status)
+    return status
+
+
+def _suspended_evidence(symbol, target):
+    event = {
+        "schema_version": 1,
+        "exchange": "TWSE",
+        "symbol": symbol,
+        "event_type": "suspend",
+        "effective_date": (target - datetime.timedelta(days=1)).isoformat(),
+        "source_id": "twse_reduction",
+        "payload_sha256": "d" * 64,
+        "raw_row_sha256": "e" * 64,
+        "parser_version": "tw-lifecycle-parser-v2",
+    }
+    event["evidence_sha256"] = evidence_sha256(event)
+    return resolve_lifecycle_status([event], target, active=True)
+
+
+def _status_stock(symbol, target, status):
+    stock = _stock(
+        symbol,
+        [1_000_000 + index for index in range(64)],
+        name=f"測試股票 {symbol}",
+        rsi=99,
+        volume_ratio=999,
+        institution_ratio=9,
+        foreign_net=1_000_000,
+    )
+    stock.observation_as_of = target
+    stock.latest_regular_price_date = stock.as_of
+    stock.observation_kind = status["status"]
+    stock.trading_status_evidence = status
+    stock.sha256 = status["evidence_sha256"]
+    return stock
+
+
+def _source_v3(regular_stocks, status_stocks, target):
+    for stock in regular_stocks:
+        stock.as_of = target
+        stock.observation_as_of = target
+        stock.latest_regular_price_date = target
+        stock.daily[-1]["Date"] = target.isoformat() + "T00:00:00.000"
+    stocks = regular_stocks + status_stocks
+    expected = {
+        stock.symbol: {
+            "status": stock.observation_kind,
+            "evidence_sha256": stock.trading_status_evidence["evidence_sha256"],
+            "artifact_sha256": stock.sha256,
+            "latest_regular_price_date": stock.as_of.isoformat(),
+        }
+        for stock in status_stocks
+    }
+    return LoadedReportSource(
+        manifest=ReportSourceManifest(
+            schema_version=3,
+            market="TW",
+            generated_at="2026-07-16T10:00:00Z",
+            market_as_of=target,
+            universe_count=len(stocks),
+            symbol_count=len(stocks),
+            failure_count=0,
+            failure_rate=0.0,
+            coverage=1.0,
+            failed_symbols=[],
+            manifest_path="manifests/TW-20260716T100000Z-aaaaaaaaaaaa.json",
+            manifest_sha256="a" * 64,
+            target_market_date=target,
+            observation_as_of=target,
+            regular_price_symbol_count=len(regular_stocks),
+            expected_non_price_symbol_count=len(status_stocks),
+            operational_failure_count=0,
+            regular_price_denominator=len(regular_stocks),
+            regular_price_coverage=1.0,
+            observation_coverage=1.0,
+            expected_non_price_symbols=expected,
+            operational_failed_symbols=[],
         ),
         stocks=stocks,
     )
@@ -257,6 +366,79 @@ class ObservationProductsTests(unittest.TestCase):
         second = self.build(_source(list(reversed(copy.deepcopy(self.stocks)))))
 
         self.assertEqual(first, second)
+
+    def test_v3_status_rows_are_excluded_from_price_math_and_rendered_separately(self):
+        target = datetime.date(2026, 7, 16)
+        no_trade = _status_stock(
+            "2303", target, _no_trade_evidence("2303", target)
+        )
+        suspended = _status_stock(
+            "1459", target, _suspended_evidence("1459", target)
+        )
+        industry_map = copy.deepcopy(self.industry_map)
+        industry_map["全市場"].extend(["2303", "1459"])
+        industry_map["半導體"].extend(["2303", "1459"])
+        regular = _source(copy.deepcopy(self.stocks))
+        source = _source_v3(
+            copy.deepcopy(self.stocks), [no_trade, suspended], target
+        )
+
+        baseline = build_observation_dashboard(
+            regular,
+            self.industry_map,
+            _capability(),
+            generated_at=self.generated_at,
+            today=datetime.date(2026, 7, 17),
+        )
+        document = build_observation_dashboard(
+            source,
+            industry_map,
+            _capability(),
+            generated_at=self.generated_at,
+            today=datetime.date(2026, 7, 17),
+        )
+
+        for key in ("market_observation", "industry_observations", "heatmap", "stock_events", "etf_observations"):
+            self.assertEqual(document[key], baseline[key])
+        self.assertEqual(
+            [item["label"] for item in document["trading_status_observations"]],
+            ["停止買賣", "當日無正常交易"],
+        )
+        for item in document["trading_status_observations"]:
+            self.assertEqual(item["observation_as_of"], target.isoformat())
+            self.assertEqual(
+                set(item),
+                {
+                    "symbol",
+                    "name",
+                    "status",
+                    "label",
+                    "observation_as_of",
+                    "latest_regular_price_date",
+                    "evidence_sha256",
+                    "last_regular_close",
+                },
+            )
+        self.assertEqual(document["data_quality"]["regular_price_count"], 3)
+        self.assertEqual(document["data_quality"]["verified_status_count"], 2)
+        self.assertEqual(document["data_quality"]["operational_failure_count"], 0)
+
+    def test_v3_rejects_status_evidence_tampering(self):
+        target = datetime.date(2026, 7, 16)
+        status = _status_stock(
+            "2303", target, _no_trade_evidence("2303", target)
+        )
+        status.trading_status_evidence["raw_fields"]["volume"] = "1"
+        source = _source_v3(copy.deepcopy(self.stocks), [status], target)
+
+        with self.assertRaisesRegex(ValueError, "status"):
+            build_observation_dashboard(
+                source,
+                self.industry_map,
+                _capability(),
+                generated_at=self.generated_at,
+                today=datetime.date(2026, 7, 17),
+            )
 
 
 if __name__ == "__main__":

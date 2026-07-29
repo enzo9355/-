@@ -17,10 +17,25 @@
 {% set risk_events = d.get("risk_events", []) %}
 {% set candles = d.get("candles", []) %}
 {% set ma20_line = d.get("ma20_line", []) %}
+{% set observation_kind = d.get("observation_kind", "regular_price") %}
 {% block title %}{{ d.name }}（{{ d.code }}）觀察｜ABSORB{% endblock %}
-{% block head %}<script src="https://unpkg.com/lightweight-charts@4.2.2/dist/lightweight-charts.standalone.production.js" integrity="sha384-qQnpH1Chlwm0r93GZ6NgZoEehIelWkhwbBtJMWh0P5wPqySGEt8UjETGKMF0GUdn" crossorigin="anonymous"></script>{% endblock %}
+{% block head %}{% if observation_kind == "regular_price" %}<script src="https://unpkg.com/lightweight-charts@4.2.2/dist/lightweight-charts.standalone.production.js" integrity="sha384-qQnpH1Chlwm0r93GZ6NgZoEehIelWkhwbBtJMWh0P5wPqySGEt8UjETGKMF0GUdn" crossorigin="anonymous"></script>{% endif %}{% endblock %}
 {% block content %}
-<div class="page stock-page" data-stock-code="{{ d.code }}" data-stock-name="{{ d.name }}" data-stock-price="{{ '%.2f'|format(d.price) }}">
+<div class="page stock-page" data-stock-code="{{ d.code }}" data-stock-name="{{ d.name }}"{% if observation_kind == "regular_price" %} data-stock-price="{{ '%.2f'|format(d.price) }}"{% endif %}>
+  {% if observation_kind != "regular_price" %}
+  <header class="stock-hero" id="status-summary">
+    <div class="hero-copy">
+      <a class="back-link" href="{{ url_for('dashboard_page') }}">返回市場觀察</a>
+      <p class="eyebrow">{{ market }} · {{ d.code }}</p>
+      <h1>{{ d.name }}</h1>
+      <p class="decision-headline">{{ d.status_label }}</p>
+      <p class="muted">官方狀態驗證日 {{ d.observation_as_of }}。本頁不以既有價格代表該日交易結果。</p>
+      {% if d.get("last_regular_close") is not none %}<p class="muted">最後正常交易收盤 {{ '{:,.2f}'.format(d.last_regular_close) }}（{{ d.latest_regular_price_date }}）</p>{% endif %}
+      <p class="muted small">證據雜湊 {{ d.evidence_sha256[:12] }}｜{{ quant_source }}</p>
+      <button class="button button-secondary watchlist-toggle" type="button" data-watchlist-toggle data-code="{{ d.code }}" data-name="{{ d.name }}">登入後加入關注</button>
+    </div>
+  </header>
+  {% else %}
   <div class="error-banner" role="status">
     {{ prediction_status }}。本頁只顯示已驗證的價格、均線、技術、籌碼與風險事件。
   </div>
@@ -109,5 +124,6 @@
   </section>
 
   <script id="stock-chart-data" type="application/json">{{ {"candles": candles, "ma20": ma20_line}|tojson }}</script>
+  {% endif %}
 </div>
 {% endblock %}

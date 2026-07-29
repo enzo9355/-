@@ -38,6 +38,9 @@ def build_post_close_observation_metadata(
         "industry_observations": snapshot["industry_observations"],
         "heatmap": snapshot["heatmap"],
         "stock_events": snapshot["stock_events"],
+        "trading_status_observations": snapshot.get(
+            "trading_status_observations", []
+        ),
         "etf_observations": snapshot["etf_observations"],
         "daily_focus": snapshot["daily_focus"],
         "data_quality": snapshot["data_quality"],

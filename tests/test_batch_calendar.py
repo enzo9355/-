@@ -73,6 +73,14 @@ class TradingCalendarTests(unittest.TestCase):
         with self.assertRaises(CalendarError):
             TradingCalendarSet.from_documents([outside])
 
+    def test_calendar_accepts_rfc3339_fraction_longer_than_microseconds(self):
+        document = calendar_document(2026)
+        document["fetched_at"] = "2026-07-15T13:49:37.9260379+00:00"
+
+        calendars = TradingCalendarSet.from_documents([document])
+
+        self.assertTrue(calendars.is_session(datetime.date(2026, 7, 15)))
+
 
 if __name__ == "__main__":
     unittest.main()

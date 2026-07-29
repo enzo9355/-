@@ -49,6 +49,26 @@ def _universe_sha256(symbols: list[str]) -> str:
     ).hexdigest()
 
 
+def _required_symbols_by_exchange(
+    symbols: list[str], *, registry: Mapping[str, Any] | None = None
+) -> dict[str, set[str]]:
+    if registry is None:
+        import twstock
+
+        registry = twstock.codes
+    result = {"TWSE": set(), "TPEx": set()}
+    source_to_exchange = {"twse": "TWSE", "tpex": "TPEx"}
+    for symbol in symbols:
+        info = registry.get(str(symbol))
+        exchange = source_to_exchange.get(
+            str(getattr(info, "data_source", "")).lower()
+        )
+        if exchange is None:
+            raise RuntimeError(f"TW exchange metadata is unavailable for {symbol}")
+        result[exchange].add(str(symbol))
+    return result
+
+
 def _load_calendar_set(paths: list[Path]) -> TradingCalendarSet:
     if not paths:
         raise ValueError("at least one calendar artifact is required")
@@ -227,7 +247,37 @@ def _assert_complete(
         ):
             raise RuntimeError(_INCOMPLETE)
         failed_symbols.add(item["symbol"])
-    active = universe - pending - excluded
+    target_snapshot = (
+        official_series.snapshots[target_market_date]
+        if official_series is not None
+        else None
+    )
+    regular_symbols = (
+        set(target_snapshot.price_by_symbol) if target_snapshot is not None else set()
+    )
+    status_symbols = (
+        set(target_snapshot.trading_status_by_symbol)
+        if target_snapshot is not None
+        else set()
+    )
+    terminated_symbols = (
+        set(target_snapshot.terminated_by_symbol)
+        if target_snapshot is not None
+        else set()
+    )
+    if (
+        not (regular_symbols | status_symbols | terminated_symbols).issubset(universe)
+        or regular_symbols & status_symbols
+        or regular_symbols & terminated_symbols
+        or status_symbols & terminated_symbols
+    ):
+        raise RuntimeError(_INCOMPLETE)
+    active = (
+        universe
+        - (pending - status_symbols)
+        - (excluded - status_symbols)
+        - terminated_symbols
+    )
     if failed_symbols & active:
         raise RuntimeError(_INCOMPLETE)
     if not active:
@@ -243,7 +293,20 @@ def _assert_complete(
     if (
         audit.unavailable_symbols
         or set(audit.latest_by_symbol) != active
-        or any(value != target_market_date for value in audit.latest_by_symbol.values())
+        or set(audit.observation_by_symbol) != active
+        or any(
+            value != target_market_date
+            for value in audit.observation_by_symbol.values()
+        )
+        or ((regular_symbols & active) | (status_symbols & active)) != active
+        or any(
+            audit.latest_by_symbol[symbol] != target_market_date
+            for symbol in regular_symbols & active
+        )
+        or any(
+            audit.latest_by_symbol[symbol] >= target_market_date
+            for symbol in status_symbols & active
+        )
     ):
         raise RuntimeError(_INCOMPLETE)
     if official_series is None:
@@ -285,6 +348,21 @@ def _assert_complete(
                 symbol
                 in official_series.snapshots[target_market_date].price_by_symbol
             )
+            or (
+                symbol in status_symbols
+                and (
+                    artifact.trading_status_evidence
+                    != dict(target_snapshot.trading_status_by_symbol[symbol])
+                    or lineage.get("trading_status_evidence_sha256")
+                    != target_snapshot.trading_status_by_symbol[symbol].get(
+                        "evidence_sha256"
+                    )
+                )
+            )
+            or (
+                symbol in regular_symbols
+                and artifact.trading_status_evidence is not None
+            )
             or (reconciliation is not None)
             != (symbol in applied_reconciliation_artifacts)
             or (
@@ -311,6 +389,12 @@ def _patched_pipeline(
     original_batch = local_quant.run_market_batch
     original_build = local_quant.build_stock_snapshot
     original_writer = getattr(local_quant, "write_stock_artifact", None)
+    original_exclusion_loader = getattr(
+        local_quant, "load_exclusion_list", None
+    )
+    target_status_symbols = set(
+        series.snapshots[series.target_date].trading_status_by_symbol
+    )
 
     def run_market_batch_with_source(
         root,
@@ -342,6 +426,10 @@ def _patched_pipeline(
     def build_stock_snapshot_with_lineage(
         pipeline_arg, market, symbol, *args, **kwargs
     ):
+        if market == "TW":
+            status = fetcher.status_for(str(symbol))
+            if status is not None:
+                kwargs["trading_status"] = status
         result = original_build(
             pipeline_arg, market, symbol, *args, **kwargs
         )
@@ -349,6 +437,18 @@ def _patched_pipeline(
             result = dict(result)
             result["source_lineage"] = fetcher.lineage_for(str(symbol))
         return result
+
+    def load_exclusion_list_with_official_status(root, market):
+        result = original_exclusion_loader(root, market)
+        if market != "TW":
+            return result
+        pending, excluded, rows, invalid_actions = result
+        return (
+            set(pending) - target_status_symbols,
+            set(excluded) - target_status_symbols,
+            rows,
+            invalid_actions,
+        )
 
     def write_stock_artifact_with_backup(
         root, market, symbol, payload, *args, **kwargs
@@ -383,6 +483,10 @@ def _patched_pipeline(
         local_quant.load_stock_pipeline = lambda _root: pipeline
         local_quant.run_market_batch = run_market_batch_with_source
         local_quant.build_stock_snapshot = build_stock_snapshot_with_lineage
+        if original_exclusion_loader is not None:
+            local_quant.load_exclusion_list = (
+                load_exclusion_list_with_official_status
+            )
         if backup_store is not None:
             if original_writer is None:
                 raise RuntimeError("TW artifact writer is unavailable")
@@ -393,6 +497,8 @@ def _patched_pipeline(
             local_quant.write_stock_artifact = original_writer
         local_quant.build_stock_snapshot = original_build
         local_quant.run_market_batch = original_batch
+        if original_exclusion_loader is not None:
+            local_quant.load_exclusion_list = original_exclusion_loader
         local_quant.load_stock_pipeline = original_loader
         pipeline.fetch_finmind_dataset = original_fetch
 
@@ -448,7 +554,14 @@ def run(
             earliest_latest_date=audit.earliest_latest_date,
             target_market_date=target_market_date,
         )
-    series = series_builder(root, trading_dates)
+    required_symbols = _required_symbols_by_exchange(
+        [str(symbol) for symbol in symbols]
+    )
+    series = series_builder(
+        root,
+        trading_dates,
+        required_symbols_by_exchange=required_symbols,
+    )
     if series.target_date != target_market_date:
         raise RuntimeError("official snapshot series target date mismatch")
     if not series.request_budget.capacity_proven:
@@ -458,8 +571,14 @@ def run(
 
     universe = set(symbols)
     for value, snapshot in series.snapshots.items():
-        missing_price = universe - set(snapshot.price_by_symbol)
-        if len(missing_price) / len(universe) >= 0.05:
+        covered = set(snapshot.price_by_symbol)
+        if value == target_market_date:
+            covered |= set(snapshot.trading_status_by_symbol)
+            covered |= set(snapshot.terminated_by_symbol)
+        missing_price = universe - covered
+        if (
+            value == target_market_date and missing_price
+        ) or len(missing_price) / len(universe) >= 0.05:
             raise RuntimeError(
                 f"official price coverage is not publishable for {value}"
             )
@@ -530,6 +649,21 @@ def run(
         expected_identity=expected_identity,
         official_series=series,
         applied_reconciliation_artifacts=applied_reconciliation_artifacts,
+    )
+    pending, excluded = _load_exclusion_state(root)
+    target_snapshot = series.snapshots[target_market_date]
+    status_symbols = set(target_snapshot.trading_status_by_symbol)
+    operational_failures = (
+        pending
+        | excluded
+        | set(target_snapshot.terminated_by_symbol)
+    ) - status_symbols
+    local_quant.publish_market_snapshot(
+        root,
+        "TW",
+        [str(value) for value in symbols],
+        failed_symbols=sorted(operational_failures),
+        target_market_date=target_market_date,
     )
     return 0
 

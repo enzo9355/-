@@ -26,7 +26,9 @@ def _date(value, label):
 
 def _aware_datetime(value, label):
     try:
-        parsed = datetime.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        text = str(value).replace("Z", "+00:00")
+        text = re.sub(r"(\.\d{6})\d+(?=[+-]\d{2}:\d{2}$)", r"\1", text)
+        parsed = datetime.datetime.fromisoformat(text)
     except (TypeError, ValueError) as exc:
         raise CalendarError(f"{label} 時間不合法") from exc
     if parsed.tzinfo is None or parsed.utcoffset() is None:

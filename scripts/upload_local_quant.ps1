@@ -5,7 +5,8 @@ param(
     [switch]$RequireReportV2,
     [switch]$RequireDashboard,
     [switch]$ObservationOnly,
-    [string]$LkgReceiptPath
+    [string]$LkgReceiptPath,
+    [string]$PreflightDataRoot
 )
 
 $ErrorActionPreference = 'Stop'
@@ -13,7 +14,9 @@ if ($DataRoot -notin @('D:\AbsorbData', 'D:\StockPapiData')) { throw 'Data root 
 if ($Bucket -ne 'line-stock-bot-498908-quant-snapshots') { throw 'Bucket is not allowlisted' }
 . (Join-Path $PSScriptRoot 'observation_release_common.ps1')
 
-$PublishRoot = Join-Path $DataRoot 'publish\quant\v1'
+$PublishRoot = Join-Path `
+    $(if ($PreflightDataRoot) { $PreflightDataRoot } else { $DataRoot }) `
+    'publish\quant\v1'
 $ResolvedRoot = (Resolve-Path -LiteralPath $PublishRoot).Path
 if (((Get-Item -LiteralPath $ResolvedRoot).Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
     throw 'Publish root must not be a reparse point'
@@ -56,6 +59,52 @@ function Assert-AllowlistedPath {
         -Path $Path `
         -Root $ResolvedRoot `
         -VerifiedDirs $Global:VerifiedDirs
+}
+
+function Read-VerifiedGzipJson {
+    param(
+        [string]$Path,
+        [long]$ExpectedSize
+    )
+    if ($ExpectedSize -le 0 -or $ExpectedSize -gt 20MB) {
+        throw 'Invalid uncompressed object size'
+    }
+    $InputStream = [IO.File]::OpenRead($Path)
+    try {
+        $Gzip = [IO.Compression.GzipStream]::new(
+            $InputStream,
+            [IO.Compression.CompressionMode]::Decompress
+        )
+        try {
+            $Output = [IO.MemoryStream]::new()
+            try {
+                $Buffer = New-Object byte[] 81920
+                while (($Read = $Gzip.Read($Buffer, 0, $Buffer.Length)) -gt 0) {
+                    $Output.Write($Buffer, 0, $Read)
+                    if ($Output.Length -gt 20MB) {
+                        throw 'Object expands beyond limit'
+                    }
+                }
+                if ($Output.Length -ne $ExpectedSize) {
+                    throw 'Object uncompressed size mismatch'
+                }
+                $Utf8 = [Text.UTF8Encoding]::new($false, $true)
+                return $Utf8.GetString($Output.ToArray()) | ConvertFrom-Json
+            } finally {
+                $Output.Dispose()
+            }
+        } finally {
+            $Gzip.Dispose()
+        }
+    } finally {
+        $InputStream.Dispose()
+    }
+}
+
+function Test-JsonInteger {
+    param($Value)
+    return $Value -is [byte] -or $Value -is [int16] -or
+        $Value -is [int32] -or $Value -is [int64]
 }
 
 function Invoke-GcloudCopy {
@@ -428,29 +477,151 @@ try {
         if (-not (Test-Path -LiteralPath $LatestPath -PathType Leaf)) { continue }
         $LatestPath = Assert-AllowlistedPath $LatestPath
         $Latest = Get-Content -LiteralPath $LatestPath -Raw -Encoding utf8 | ConvertFrom-Json
-        if ($Latest.schema_version -ne 2 -or $Latest.market -ne $Market) {
+        $LatestSchema = [int]$Latest.schema_version
+        if ($LatestSchema -notin @(2, 3) -or $Latest.market -ne $Market) {
             throw "Invalid latest pointer for $Market"
+        }
+        if ($LatestSchema -eq 3 -and $Market -ne 'TW') {
+            throw 'Manifest v3 is TW-only'
         }
         $ManifestRelative = [string]$Latest.manifest
         if ($ManifestRelative -notmatch '^manifests/[A-Z]+-[0-9TZ]+-[0-9a-f]{12}\.json$') {
             throw "Invalid manifest path for $Market"
         }
+        if (
+            [string]$Latest.manifest_sha256 -notmatch '^[0-9a-f]{64}$' -or
+            -not $ManifestRelative.EndsWith(
+                "-$(([string]$Latest.manifest_sha256).Substring(0, 12)).json"
+            )
+        ) { throw "Invalid content-addressed manifest for $Market" }
         $ManifestPath = Assert-AllowlistedPath (Join-Path $ResolvedRoot $ManifestRelative)
         if ((Get-FileHash -LiteralPath $ManifestPath -Algorithm SHA256).Hash.ToLowerInvariant() -ne $Latest.manifest_sha256) {
             throw "Manifest hash mismatch for $Market"
         }
         $Manifest = Get-Content -LiteralPath $ManifestPath -Raw -Encoding utf8 | ConvertFrom-Json
-        if ($Manifest.schema_version -ne 2 -or $Manifest.market -ne $Market) {
+        if (
+            [int]$Manifest.schema_version -ne $LatestSchema -or
+            $Manifest.market -ne $Market -or
+            [string]$Manifest.generated_at -ne [string]$Latest.generated_at
+        ) {
             throw "Invalid manifest for $Market"
+        }
+
+        $SymbolProperties = @($Manifest.symbols.PSObject.Properties)
+        if ($LatestSchema -eq 2) {
+            $FailureThreshold = if ($Market -eq 'TW') { 0.05 } else { 0.25 }
+            if (
+                -not (Test-JsonInteger $Manifest.universe_count) -or
+                -not (Test-JsonInteger $Manifest.symbol_count) -or
+                -not (Test-JsonInteger $Manifest.failure_count) -or
+                [long]$Manifest.universe_count -lt 1 -or
+                [long]$Manifest.symbol_count -ne $SymbolProperties.Count -or
+                [long]$Manifest.failure_count -ne
+                    ([long]$Manifest.universe_count - [long]$Manifest.symbol_count) -or
+                @($Manifest.failed_symbols).Count -ne [long]$Manifest.failure_count -or
+                [Math]::Abs(
+                    [double]$Manifest.coverage -
+                    ([double]$Manifest.symbol_count / [double]$Manifest.universe_count)
+                ) -gt 1e-12 -or
+                [Math]::Abs(
+                    [double]$Manifest.failure_rate -
+                    ([double]$Manifest.failure_count / [double]$Manifest.universe_count)
+                ) -gt 1e-12 -or
+                [double]$Manifest.failure_rate -ge $FailureThreshold
+            ) { throw "Invalid manifest arithmetic for $Market" }
+        } else {
+            $ExpectedProperties = @(
+                $Manifest.expected_non_price_symbols.PSObject.Properties
+            )
+            $OperationalFailures = @($Manifest.operational_failed_symbols)
+            $CountFields = @(
+                $Manifest.universe_count,
+                $Manifest.observation_count,
+                $Manifest.regular_price_symbol_count,
+                $Manifest.expected_non_price_symbol_count,
+                $Manifest.operational_failure_count,
+                $Manifest.regular_price_denominator
+            )
+            if (
+                $Manifest.PSObject.Properties['market_as_of'] -or
+                [string]$Manifest.target_market_date -notmatch '^\d{4}-\d{2}-\d{2}$' -or
+                [string]$Manifest.observation_as_of -ne
+                    [string]$Manifest.target_market_date -or
+                @($CountFields | Where-Object {
+                    -not (Test-JsonInteger $_) -or [long]$_ -lt 0
+                }).Count -ne 0 -or
+                [long]$Manifest.universe_count -lt 1 -or
+                [long]$Manifest.regular_price_denominator -lt 1 -or
+                [long]$Manifest.observation_count -ne $SymbolProperties.Count -or
+                [long]$Manifest.expected_non_price_symbol_count -ne
+                    $ExpectedProperties.Count -or
+                [long]$Manifest.operational_failure_count -ne
+                    $OperationalFailures.Count -or
+                [long]$Manifest.regular_price_symbol_count +
+                    [long]$Manifest.expected_non_price_symbol_count -ne
+                    [long]$Manifest.observation_count -or
+                [long]$Manifest.observation_count +
+                    [long]$Manifest.operational_failure_count -ne
+                    [long]$Manifest.universe_count -or
+                [long]$Manifest.regular_price_denominator -ne
+                    ([long]$Manifest.universe_count -
+                    [long]$Manifest.expected_non_price_symbol_count) -or
+                @($OperationalFailures | Select-Object -Unique).Count -ne
+                    $OperationalFailures.Count -or
+                [Math]::Abs(
+                    [double]$Manifest.regular_price_coverage -
+                    ([double]$Manifest.regular_price_symbol_count /
+                    [double]$Manifest.regular_price_denominator)
+                ) -gt 1e-12 -or
+                [Math]::Abs(
+                    [double]$Manifest.observation_coverage -
+                    ([double]$Manifest.observation_count /
+                    [double]$Manifest.universe_count)
+                ) -gt 1e-12 -or
+                [Math]::Abs(
+                    [double]$Manifest.operational_failure_rate -
+                    ([double]$Manifest.operational_failure_count /
+                    [double]$Manifest.universe_count)
+                ) -gt 1e-12 -or
+                [double]$Manifest.operational_failure_rate -ge 0.05
+            ) { throw 'Invalid manifest v3 arithmetic' }
+            $ExpectedBySymbol = @{}
+            foreach ($Property in $ExpectedProperties) {
+                $Symbol = [string]$Property.Name
+                $Status = $Property.Value
+                if (
+                    $Symbol -notmatch '^\d{4,6}$' -or
+                    $ExpectedBySymbol.ContainsKey($Symbol) -or
+                    [string]$Status.status -notin @(
+                        'official_no_regular_trade',
+                        'officially_suspended'
+                    ) -or
+                    [string]$Status.evidence_sha256 -notmatch '^[0-9a-f]{64}$' -or
+                    [string]$Status.artifact_sha256 -notmatch '^[0-9a-f]{64}$' -or
+                    [string]$Status.latest_regular_price_date -notmatch
+                        '^\d{4}-\d{2}-\d{2}$'
+                ) { throw 'Invalid expected_non_price_symbols entry' }
+                $ExpectedBySymbol[$Symbol] = $Status
+            }
+            foreach ($Symbol in $OperationalFailures) {
+                if (
+                    [string]$Symbol -notmatch '^\d{4,6}$' -or
+                    $ExpectedBySymbol.ContainsKey([string]$Symbol)
+                ) { throw 'Invalid operational_failed_symbols entry' }
+            }
         }
 
         # Upload objects only after validating every object in this manifest.
         $ValidatedObjectPaths = New-Object System.Collections.Generic.List[string]
-        foreach ($Property in $Manifest.symbols.PSObject.Properties) {
+        foreach ($Property in $SymbolProperties) {
+            $Symbol = [string]$Property.Name
             $Entry = $Property.Value
             $ObjectRelative = [string]$Entry.path
             if ($ObjectRelative -notmatch '^objects/[0-9a-f]{64}\.json\.gz$') {
                 throw "Invalid object path for $Market"
+            }
+            if ($ObjectRelative -ne "objects/$([string]$Entry.sha256).json.gz") {
+                throw "Object path hash mismatch for $Market"
             }
             $ObjectPath = Assert-AllowlistedPath (Join-Path $ResolvedRoot $ObjectRelative)
             $Object = Get-Item -LiteralPath $ObjectPath
@@ -458,9 +629,90 @@ try {
             if ((Get-FileHash -LiteralPath $ObjectPath -Algorithm SHA256).Hash.ToLowerInvariant() -ne $Entry.sha256) {
                 throw "Object hash mismatch for $Market"
             }
+            $Document = Read-VerifiedGzipJson `
+                -Path $ObjectPath `
+                -ExpectedSize ([long]$Entry.uncompressed_size)
+            if (
+                [string]$Document.market -ne $Market -or
+                [string]$Document.symbol -ne $Symbol -or
+                [string]$Document.as_of -ne [string]$Entry.as_of -or
+                [string]$Document.model_version -ne [string]$Entry.model_version -or
+                @($Document.daily).Count -eq 0
+            ) { throw "Object schema mismatch for $Market" }
+            $LatestDailyDate = [string]@($Document.daily)[-1].Date
+            if ($LatestDailyDate.Contains('T')) {
+                $LatestDailyDate = $LatestDailyDate.Split('T')[0]
+            }
+            if ($LatestDailyDate -ne [string]$Entry.as_of) {
+                throw "Object daily date mismatch for $Market"
+            }
+            if ($LatestSchema -eq 2) {
+                if (
+                    [int]$Document.schema_version -ne 1 -or
+                    [string]$Entry.as_of -ne [string]$Manifest.market_as_of -or
+                    $Entry.PSObject.Properties['observation_kind'] -or
+                    $Entry.PSObject.Properties['evidence_sha256'] -or
+                    $Document.PSObject.Properties['trading_status_evidence']
+                ) { throw "Object v2 contract mismatch for $Market" }
+            } else {
+                $LatestSummaryDate = [string]$Document.latest.Date
+                if ($LatestSummaryDate.Contains('T')) {
+                    $LatestSummaryDate = $LatestSummaryDate.Split('T')[0]
+                }
+                if (
+                    [int]$Document.schema_version -ne 2 -or
+                    $LatestSummaryDate -ne [string]$Entry.as_of -or
+                    [string]$Document.target_market_date -ne
+                        [string]$Manifest.target_market_date -or
+                    [string]$Document.observation_as_of -ne
+                        [string]$Manifest.observation_as_of -or
+                    [string]$Document.latest_regular_price_date -ne
+                        [string]$Entry.latest_regular_price_date -or
+                    [string]$Document.latest_regular_price_date -ne
+                        [string]$Entry.as_of -or
+                    [string]$Document.observation_kind -ne
+                        [string]$Entry.observation_kind
+                ) { throw 'Object v3 observation mismatch' }
+                $Expected = if ($ExpectedBySymbol.ContainsKey($Symbol)) {
+                    $ExpectedBySymbol[$Symbol]
+                } else { $null }
+                if ($null -eq $Expected) {
+                    if (
+                        [string]$Entry.observation_kind -ne 'regular_price' -or
+                        [string]$Entry.as_of -ne
+                            [string]$Manifest.target_market_date -or
+                        $null -ne $Document.trading_status_evidence -or
+                        $Entry.PSObject.Properties['evidence_sha256']
+                    ) { throw 'Regular price object v3 mismatch' }
+                } else {
+                    $Evidence = $Document.trading_status_evidence
+                    if (
+                        $null -eq $Evidence -or
+                        [int]$Evidence.schema_version -ne 1 -or
+                        [string]$Evidence.status -ne [string]$Expected.status -or
+                        [string]$Evidence.market -ne 'TW' -or
+                        [string]$Evidence.symbol -ne $Symbol -or
+                        [string]$Evidence.target_market_date -ne
+                            [string]$Manifest.target_market_date -or
+                        [string]$Evidence.evidence_sha256 -notmatch
+                            '^[0-9a-f]{64}$' -or
+                        [string]$Evidence.evidence_sha256 -ne
+                            [string]$Entry.evidence_sha256 -or
+                        [string]$Evidence.evidence_sha256 -ne
+                            [string]$Expected.evidence_sha256 -or
+                        [string]$Entry.sha256 -ne
+                            [string]$Expected.artifact_sha256 -or
+                        [string]$Entry.latest_regular_price_date -ne
+                            [string]$Expected.latest_regular_price_date -or
+                        [string]$Entry.observation_kind -ne
+                            [string]$Expected.status
+                    ) { throw 'Status object evidence mismatch' }
+                }
+            }
             $ValidatedObjectPaths.Add($ObjectPath) | Out-Null
         }
         for ($Offset = 0; $Offset -lt $ValidatedObjectPaths.Count; $Offset += $ObjectBatchSize) {
+            if ($PreflightDataRoot) { break }
             $Last = [Math]::Min($Offset + $ObjectBatchSize - 1, $ValidatedObjectPaths.Count - 1)
             Invoke-GcloudCopyBatch `
                 -Sources $ValidatedObjectPaths[$Offset..$Last] `
@@ -468,6 +720,10 @@ try {
         }
 
         # Upload manifest
+        if ($PreflightDataRoot) {
+            $UploadedMarkets += $Market
+            continue
+        }
         Invoke-GcloudCopy $ManifestPath "gs://$Bucket/quant/v1/$ManifestRelative" -NoClobber
         Assert-GcloudFileMatches `
             -Gcloud $Gcloud `
@@ -479,6 +735,11 @@ try {
             -Source $LatestPath `
             -Destination "gs://$Bucket/quant/v1/latest-$Market.json" | Out-Null
         $UploadedMarkets += $Market
+    }
+
+    if ($PreflightDataRoot) {
+        Write-Output "Validated quant snapshots: $($UploadedMarkets -join ',')"
+        return
     }
 
     $ReportUploaded = $false

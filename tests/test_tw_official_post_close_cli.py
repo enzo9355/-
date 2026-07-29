@@ -19,6 +19,7 @@ from stock_papi.batch import tw_official_post_close_cli as cli
 from stock_papi.batch.tw_official_post_close_cli import (
     _load_calendar_set,
     _patched_pipeline,
+    _required_symbols_by_exchange,
     _required_trading_dates,
     run,
 )
@@ -29,6 +30,7 @@ from stock_papi.integrations.market_data.tw_official_bulk import (
 from stock_papi.integrations.market_data.tw_official_historical import (
     OfficialSnapshotSeries,
 )
+from stock_papi.integrations.market_data.tw_trading_status import evidence_sha256
 from stock_papi.quant.tw_incremental import OfficialCompatFetcher
 from stock_papi.quant.tw_legacy_reconciliation import LegacyArtifactBackupStore
 
@@ -102,6 +104,50 @@ def snapshot_series(dates=(TARGET,), price_symbols=("2330", "2303")):
             6 * len(dates), 12 * len(dates), 6 * len(dates), 0,
             True, "capacity_proven",
         ),
+        source_schema_version="tw-official-historical-v2",
+    )
+
+
+def status_snapshot_series():
+    status = {
+        "schema_version": 1,
+        "status": "official_no_regular_trade",
+        "market": "TW",
+        "exchange": "TWSE",
+        "symbol": "2303",
+        "target_market_date": TARGET.isoformat(),
+        "source_id": "twse_price",
+        "payload_sha256": "d" * 64,
+        "raw_row_sha256": "e" * 64,
+        "raw_fields": {"symbol": "2303", "name": "聯電", "open": "--", "high": "--", "low": "--", "close": "--", "volume": "0"},
+        "parser_version": "tw-official-historical-parser-v3",
+    }
+    status["evidence_sha256"] = evidence_sha256(status)
+    snapshot = daily_snapshot(TARGET, ("2330",))
+    snapshot = OfficialDailySnapshot(
+        **{
+            **snapshot.__dict__,
+            "source_schema_version": "tw-official-historical-v3",
+            "trading_status_by_symbol": MappingProxyType({
+                "2303": MappingProxyType(status)
+            }),
+        }
+    )
+    document = {
+        "source_mode": snapshot.source_mode,
+        "source_schema_version": snapshot.source_schema_version,
+        "target_date": TARGET.isoformat(),
+        "snapshots": [{"date": TARGET.isoformat(), "manifest_sha256": snapshot.manifest_sha256}],
+    }
+    return OfficialSnapshotSeries(
+        target_date=TARGET,
+        snapshots=MappingProxyType({TARGET: snapshot}),
+        manifest_sha256=hashlib.sha256(
+            json.dumps(document, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest(),
+        request_count=8,
+        request_budget=OfficialRequestBudget(8, 16, 8, 0, True, "capacity_proven"),
+        source_schema_version="tw-official-historical-v3",
     )
 
 
@@ -260,6 +306,20 @@ class Pipeline:
 
 
 class TWOfficialPostCloseCLITests(unittest.TestCase):
+    def test_universe_exchange_partition_uses_catalog_metadata_not_symbols(self):
+        registry = {
+            "2330": types.SimpleNamespace(data_source="twse"),
+            "6488": types.SimpleNamespace(data_source="tpex"),
+        }
+
+        partition = _required_symbols_by_exchange(
+            ["6488", "2330"], registry=registry
+        )
+
+        self.assertEqual(partition, {"TWSE": {"2330"}, "TPEx": {"6488"}})
+        with self.assertRaisesRegex(RuntimeError, "exchange metadata"):
+            _required_symbols_by_exchange(["9999"], registry=registry)
+
     def _run_fake(
         self,
         root,
@@ -273,6 +333,7 @@ class TWOfficialPostCloseCLITests(unittest.TestCase):
         writer_call=None,
         symbols=("2303", "2330"),
         builder=None,
+        final_status_symbols=(),
     ):
         root = Path(root)
         pipeline = Pipeline()
@@ -289,6 +350,13 @@ class TWOfficialPostCloseCLITests(unittest.TestCase):
             )
         )
         observed = {}
+        module.publish_market_snapshot = lambda *args, **kwargs: (
+            observed.update(
+                published_args=args,
+                published_kwargs=kwargs,
+            )
+            or Path(root) / "publish" / "quant" / "v1" / "latest-TW.json"
+        )
 
         def original_batch(
             data_root,
@@ -308,12 +376,48 @@ class TWOfficialPostCloseCLITests(unittest.TestCase):
                 if as_of is None:
                     write_artifact(data_root, symbol).unlink()
                 else:
-                    write_artifact(
+                    path = write_artifact(
                         data_root,
                         symbol,
                         as_of,
-                        official_lineage(symbol, chosen_series),
+                        (
+                            None
+                            if chosen_series.source_schema_version
+                            == "tw-official-historical-v3"
+                            else official_lineage(symbol, chosen_series)
+                        ),
                     )
+                    if chosen_series.source_schema_version == "tw-official-historical-v3":
+                        with gzip.open(path, "rt", encoding="utf-8") as stream:
+                            document = json.load(stream)
+                        document.update(
+                            schema_version=2,
+                            target_market_date=TARGET.isoformat(),
+                            observation_as_of=TARGET.isoformat(),
+                            latest_regular_price_date=as_of,
+                            observation_kind="regular_price",
+                            source_lineage=pipeline.fetch_finmind_dataset.lineage_for(symbol),
+                        )
+                        with path.open("wb") as raw:
+                            with gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as stream:
+                                stream.write(json.dumps(document, separators=(",", ":")).encode())
+            for symbol in final_status_symbols:
+                path = Path(data_root) / "artifacts" / "stocks" / "TW" / f"{symbol}.json.gz"
+                with gzip.open(path, "rt", encoding="utf-8") as stream:
+                    document = json.load(stream)
+                status_evidence = pipeline.fetch_finmind_dataset.status_for(symbol)
+                document.update(
+                    schema_version=2,
+                    target_market_date=TARGET.isoformat(),
+                    observation_as_of=TARGET.isoformat(),
+                    latest_regular_price_date=document["as_of"],
+                    observation_kind=status_evidence["status"],
+                    trading_status_evidence=status_evidence,
+                    source_lineage=pipeline.fetch_finmind_dataset.lineage_for(symbol),
+                )
+                with path.open("wb") as raw:
+                    with gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as stream:
+                        stream.write(json.dumps(document, separators=(",", ":")).encode())
             state = {
                 "stage": "market_batch",
                 "market": "TW",
@@ -601,6 +705,58 @@ class TWOfficialPostCloseCLITests(unittest.TestCase):
             local.write_stock_artifact(Path("root"), "TW", "2330", payload)
         self.assertEqual(written["derived"], 42)
 
+    def test_cli_injects_verified_status_into_status_symbol_builder(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            for symbol in ("2303", "2330"):
+                write_artifact(temporary, symbol)
+            pipeline = Pipeline()
+            observed = {}
+            local = types.SimpleNamespace(
+                load_stock_pipeline=lambda _root: pipeline,
+                run_market_batch=lambda *_args, **_kwargs: None,
+                build_stock_snapshot=lambda *_args, **kwargs: observed.update(kwargs) or {},
+            )
+            fetcher = OfficialCompatFetcher(
+                Path(temporary), status_snapshot_series(), pd=pd
+            )
+            with _patched_pipeline(
+                local,
+                pipeline,
+                fetcher,
+                status_snapshot_series(),
+                Mock(),
+            ):
+                local.build_stock_snapshot(
+                    pipeline,
+                    "TW",
+                    "2303",
+                    target_market_date=TARGET,
+                    observation_only=True,
+                )
+
+        self.assertEqual(
+            observed["trading_status"]["status"],
+            "official_no_regular_trade",
+        )
+
+    def test_cli_publishes_verified_status_after_terminal_gate(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            write_artifact(temporary, "2303", "2026-07-23")
+            write_artifact(temporary, "2330", "2026-07-23")
+            write_exclusions(temporary, [exclusion_row("2303")])
+
+            result, observed, _builder, _module = self._run_fake(
+                temporary,
+                series=status_snapshot_series(),
+                final_dates={"2330": TARGET.isoformat()},
+                final_status_symbols=("2303",),
+            )
+
+        self.assertEqual(result, 0)
+        self.assertEqual(observed["published_args"][1:3], ("TW", ["2303", "2330"]))
+        self.assertEqual(observed["published_kwargs"]["target_market_date"], TARGET)
+        self.assertNotIn("2303", observed["published_kwargs"]["failed_symbols"])
+
     def test_cli_restores_all_patches_when_assignment_or_pipeline_fails(self):
         class RejectOnce(types.SimpleNamespace):
             armed = False
@@ -839,6 +995,20 @@ class TWOfficialPostCloseCLITests(unittest.TestCase):
             )
         self.assertEqual(result, 0)
 
+    def test_cli_accepts_only_hash_bound_target_status_for_stale_price_artifact(self):
+        series = status_snapshot_series()
+        with tempfile.TemporaryDirectory() as temporary:
+            for symbol in ("2303", "2330"):
+                write_artifact(temporary, symbol)
+            result, *_rest = self._run_fake(
+                temporary,
+                series=series,
+                final_dates={"2330": TARGET.isoformat()},
+                final_status_symbols={"2303"},
+            )
+
+        self.assertEqual(result, 0)
+
     def test_cli_post_run_checks_reconciliation_state_before_artifact_gate(self):
         with tempfile.TemporaryDirectory() as temporary:
             for symbol in ("2303", "2330"):
@@ -1004,6 +1174,10 @@ class TWOfficialPostCloseCLITests(unittest.TestCase):
             lambda _pipeline, market, symbol, *args, **kwargs: {"symbol": symbol}
         )
 
+        module.publish_market_snapshot = (
+            lambda *_args, **_kwargs: observed.update(published=True)
+        )
+
         def local_main(argv):
             self.assertIn("--observation-only", argv)
             data_root = Path(argv[argv.index("--root") + 1])
@@ -1086,7 +1260,7 @@ class TWOfficialPostCloseCLITests(unittest.TestCase):
                         calendar_artifacts=[calendar],
                         limit=1,
                         delay=0,
-                        series_builder=lambda *_args: (
+                        series_builder=lambda *_args, **_kwargs: (
                             _ for _ in ()
                         ).throw(RuntimeError("source unavailable")),
                     )

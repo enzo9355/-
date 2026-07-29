@@ -75,8 +75,8 @@ class OfficialHardeningTests(unittest.TestCase):
         self.assertEqual(caught.exception.source_id, "tpex_institutional")
         self.assertEqual(caught.exception.category, "cross_source_identity")
 
-    def test_hardened_source_contract_uses_v2_identity(self):
-        self.assertEqual(SOURCE_SCHEMA_VERSION, "tw-official-historical-v2")
+    def test_hardened_source_contract_uses_status_aware_v3_identity(self):
+        self.assertEqual(SOURCE_SCHEMA_VERSION, "tw-official-historical-v3")
 
 
 if __name__ == "__main__":

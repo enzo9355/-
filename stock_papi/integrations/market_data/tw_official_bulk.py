@@ -5,7 +5,8 @@ from __future__ import annotations
 import datetime as _datetime
 import math
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
 SOURCE_SCHEMA_VERSION = "tw-official-common-v1"
@@ -81,6 +82,12 @@ class OfficialDailySnapshot:
     request_budget: OfficialRequestBudget
     source_mode: str = "tw_official_bulk_v1"
     source_schema_version: str = SOURCE_SCHEMA_VERSION
+    trading_status_by_symbol: Mapping[str, Mapping[str, Any]] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
+    terminated_by_symbol: Mapping[str, Mapping[str, Any]] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
 
 
 _EMPTY_MARKERS = {

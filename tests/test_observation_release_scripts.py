@@ -133,10 +133,14 @@ class ObservationReleaseScriptTests(unittest.TestCase):
 
         for required in (
             "quant/v1/latest-TW.json",
+            "quant/v1/latest-insights.json",
             "dashboard/v1/latest-TW.json",
+            "reports/v1/index-TW.json",
+            "reports/v1/latest-TW.json",
             "reports/v2/index-TW.json",
             "reports/v2/latest-TW-post_close.json",
             "reports/v2/latest-TW-pre_market.json",
+            "reports/v2/latest-TW-weekly_model.json",
             "exists = $false",
             "generation",
             "sha256",

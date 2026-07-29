@@ -17,6 +17,7 @@ from stock_papi.integrations.market_data.tw_official_bulk import (
 from stock_papi.integrations.market_data.tw_official_historical import (
     OfficialSnapshotSeries,
 )
+from stock_papi.integrations.market_data.tw_trading_status import evidence_sha256
 from stock_papi.quant.tw_artifact_audit import audit_artifact_dates
 from stock_papi.quant.tw_incremental import (
     IncrementalHistoryError,
@@ -82,6 +83,7 @@ def series():
         manifest_sha256=digest,
         request_count=12,
         request_budget=OfficialRequestBudget(12, 24, 12, 0, True, "capacity_proven"),
+        source_schema_version="tw-official-historical-v2",
     )
 
 
@@ -322,6 +324,36 @@ def snapshot_without_price(*, institutional=True, margin=True, value=TARGET):
     )
 
 
+def status_snapshot(symbol="2330"):
+    status = {
+        "schema_version": 1,
+        "status": "official_no_regular_trade",
+        "market": "TW",
+        "exchange": "TWSE",
+        "symbol": symbol,
+        "target_market_date": TARGET.isoformat(),
+        "source_id": "twse_price",
+        "payload_sha256": "a" * 64,
+        "raw_row_sha256": "b" * 64,
+        "raw_fields": {"symbol": symbol, "name": symbol, "open": "--", "high": "--", "low": "--", "close": "--", "volume": "0"},
+        "parser_version": "tw-official-historical-parser-v3",
+    }
+    status["evidence_sha256"] = evidence_sha256(status)
+    return OfficialDailySnapshot(
+        target_date=TARGET,
+        price_by_symbol=MappingProxyType({}),
+        institutional_by_symbol=MappingProxyType({}),
+        margin_by_symbol=MappingProxyType({}),
+        source_results=MappingProxyType({}),
+        manifest_sha256="c" * 64,
+        request_count=8,
+        request_budget=OfficialRequestBudget(8, 16, 8, 0, True, "capacity_proven"),
+        source_mode="tw_official_bulk_v2",
+        source_schema_version="tw-official-historical-v3",
+        trading_status_by_symbol=MappingProxyType({symbol: MappingProxyType(status)}),
+    )
+
+
 def series_without_baseline_price():
     first_date = datetime.date(2026, 7, 23)
     first = snapshot_without_price(value=first_date)
@@ -343,6 +375,7 @@ def series_without_baseline_price():
         ).hexdigest(),
         request_count=12,
         request_budget=OfficialRequestBudget(12, 24, 12, 0, True, "capacity_proven"),
+        source_schema_version="tw-official-historical-v2",
     )
 
 
@@ -374,6 +407,26 @@ class TWOfficialIncrementalTests(unittest.TestCase):
                 "465df97b3dce102d52133e047071a045efae70e1e89a130bce29431a60a20104",
             )
             self.assertNotIn("token", json.dumps(lineage).lower())
+
+    def test_status_fetcher_preserves_history_and_exposes_target_evidence(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            write_artifact(temporary, daily=history())
+            fetcher = OfficialCompatFetcher(
+                Path(temporary), status_snapshot(), pd=pd
+            )
+            price = fetcher(
+                "TaiwanStockPrice", "2330", "2026-07-01", TARGET.isoformat()
+            )
+            status = fetcher.status_for("2330")
+            lineage = fetcher.lineage_for("2330")
+
+        self.assertEqual(list(price["date"]), ["2026-07-22"])
+        self.assertEqual(status["status"], "official_no_regular_trade")
+        self.assertEqual(lineage["observation_as_of"], TARGET.isoformat())
+        self.assertEqual(lineage["latest_regular_price_date"], "2026-07-22")
+        self.assertEqual(
+            lineage["trading_status_evidence_sha256"], status["evidence_sha256"]
+        )
 
     def test_snapshot_series_fills_each_missing_trading_session_in_order(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -428,6 +481,34 @@ class TWOfficialIncrementalTests(unittest.TestCase):
             write_artifact(temporary, daily=history(), as_of="2026-07-23")
             with self.assertRaises(IncrementalHistoryError):
                 load_incremental_artifact(Path(temporary), "2330")
+
+    def test_schema_v2_artifact_audits_observation_separately_from_price(self):
+        status = dict(status_snapshot().trading_status_by_symbol["2330"])
+        with tempfile.TemporaryDirectory() as temporary:
+            path = write_artifact(temporary, daily=history())
+            with gzip.open(path, "rt", encoding="utf-8") as stream:
+                document = json.load(stream)
+            document.update(
+                schema_version=2,
+                target_market_date=TARGET.isoformat(),
+                observation_as_of=TARGET.isoformat(),
+                latest_regular_price_date="2026-07-22",
+                observation_kind="official_no_regular_trade",
+                trading_status_evidence=status,
+            )
+            with path.open("wb") as raw:
+                with gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as stream:
+                    stream.write(json.dumps(document).encode())
+
+            artifact = load_incremental_artifact(Path(temporary), "2330")
+            audit = audit_artifact_dates(
+                Path(temporary), ["2330"], target_date=TARGET
+            )
+
+        self.assertEqual(artifact.latest_date, datetime.date(2026, 7, 22))
+        self.assertEqual(artifact.observation_date, TARGET)
+        self.assertEqual(audit.latest_by_symbol["2330"], datetime.date(2026, 7, 22))
+        self.assertEqual(audit.observation_by_symbol["2330"], TARGET)
 
     def test_audit_records_latest_dates_and_unavailable_symbols(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -1457,6 +1538,7 @@ class TWLegacyOverlapReconciliationTests(unittest.TestCase):
             ).hexdigest(),
             request_count=6,
             request_budget=OfficialRequestBudget(6, 12, 6, 0, True, "capacity_proven"),
+            source_schema_version="tw-official-historical-v2",
         )
         with tempfile.TemporaryDirectory() as temporary:
             write_artifact(

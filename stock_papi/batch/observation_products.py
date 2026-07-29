@@ -10,9 +10,28 @@ import statistics
 from collections import defaultdict
 from pathlib import Path
 
+from stock_papi.integrations.market_data.tw_trading_status import (
+    validate_status_evidence,
+)
+
 
 MIN_SOURCE_COVERAGE = 0.95
 MAX_SOURCE_AGE_DAYS = 7
+TRADING_STATUS_LABELS = {
+    "officially_suspended": "停止買賣",
+    "official_no_regular_trade": "當日無正常交易",
+}
+_STATUS_OBSERVATION_KEYS = frozenset(
+    {
+        "symbol",
+        "name",
+        "status",
+        "label",
+        "observation_as_of",
+        "latest_regular_price_date",
+        "evidence_sha256",
+    }
+)
 FORBIDDEN_OUTPUT_KEYS = frozenset(
     {
         "ai_p",
@@ -33,6 +52,59 @@ def _number(value):
         return None
     value = float(value)
     return value if math.isfinite(value) else None
+
+
+def validate_trading_status_observations(value, observation_as_of):
+    """Validate the compact, hash-bound status view shared by report surfaces."""
+    if value is None:
+        return []
+    try:
+        source_date = datetime.date.fromisoformat(str(observation_as_of))
+    except (TypeError, ValueError):
+        raise ValueError("trading status observation date is invalid") from None
+    if not isinstance(value, list) or len(value) > 10_000:
+        raise ValueError("trading status observations schema is invalid")
+    normalized = []
+    seen = set()
+    for item in value:
+        keys = set(item) if isinstance(item, dict) else set()
+        if keys not in (
+            set(_STATUS_OBSERVATION_KEYS),
+            set(_STATUS_OBSERVATION_KEYS) | {"last_regular_close"},
+        ):
+            raise ValueError("trading status observations schema is invalid")
+        try:
+            observed = datetime.date.fromisoformat(str(item["observation_as_of"]))
+            latest = datetime.date.fromisoformat(
+                str(item["latest_regular_price_date"])
+            )
+        except (KeyError, TypeError, ValueError):
+            raise ValueError("trading status observations schema is invalid") from None
+        symbol = str(item.get("symbol") or "")
+        status = item.get("status")
+        last_close = item.get("last_regular_close")
+        if (
+            re.fullmatch(r"[A-Z0-9.-]{1,16}", symbol) is None
+            or symbol in seen
+            or not isinstance(item.get("name"), str)
+            or not item["name"].strip()
+            or status not in TRADING_STATUS_LABELS
+            or item.get("label") != TRADING_STATUS_LABELS[status]
+            or observed != source_date
+            or latest >= observed
+            or re.fullmatch(
+                r"[0-9a-f]{64}", str(item.get("evidence_sha256") or "")
+            )
+            is None
+            or (
+                "last_regular_close" in item
+                and (_number(last_close) is None or float(last_close) <= 0)
+            )
+        ):
+            raise ValueError("trading status observations schema is invalid")
+        seen.add(symbol)
+        normalized.append(dict(item))
+    return normalized
 
 
 def _mean(values):
@@ -84,15 +156,72 @@ def _validate_source(source, today):
     stocks = getattr(source, "stocks", None)
     if (
         manifest is None
-        or manifest.schema_version != 2
+        or manifest.schema_version not in {2, 3}
         or manifest.market != "TW"
+        or not isinstance(manifest.market_as_of, datetime.date)
         or not isinstance(stocks, list)
         or not stocks
+        or any(
+            type(value) is not int or value < 0
+            for value in (
+                manifest.universe_count,
+                manifest.symbol_count,
+                manifest.failure_count,
+            )
+        )
         or manifest.symbol_count != len(stocks)
+        or type(manifest.coverage) not in (int, float)
+        or not math.isfinite(manifest.coverage)
         or manifest.coverage < MIN_SOURCE_COVERAGE
+        or type(manifest.failure_rate) not in (int, float)
+        or not math.isfinite(manifest.failure_rate)
         or not 0 <= manifest.failure_rate < 0.05
     ):
         raise ValueError("observation source coverage or schema is invalid")
+    target_date = manifest.market_as_of
+    if manifest.schema_version == 3:
+        regular_count = manifest.regular_price_symbol_count
+        status_count = manifest.expected_non_price_symbol_count
+        operational_count = manifest.operational_failure_count
+        denominator = manifest.regular_price_denominator
+        expected = manifest.expected_non_price_symbols
+        if (
+            manifest.target_market_date != target_date
+            or manifest.observation_as_of != target_date
+            or any(
+                type(value) is not int or value < 0
+                for value in (
+                    regular_count,
+                    status_count,
+                    operational_count,
+                    denominator,
+                )
+            )
+            or not isinstance(expected, dict)
+            or len(expected) != status_count
+            or regular_count + status_count != manifest.symbol_count
+            or operational_count != manifest.failure_count
+            or manifest.universe_count != manifest.symbol_count + operational_count
+            or denominator != manifest.universe_count - status_count
+            or denominator <= 0
+            or any(
+                type(value) not in (int, float) or not math.isfinite(value)
+                for value in (
+                    manifest.regular_price_coverage,
+                    manifest.observation_coverage,
+                )
+            )
+            or not math.isclose(
+                manifest.regular_price_coverage,
+                regular_count / denominator,
+            )
+            or not math.isclose(
+                manifest.observation_coverage,
+                manifest.symbol_count / manifest.universe_count,
+            )
+            or not math.isclose(manifest.coverage, manifest.observation_coverage)
+        ):
+            raise ValueError("observation source v3 counts are invalid")
     age = today - manifest.market_as_of
     if not 0 <= age.days <= MAX_SOURCE_AGE_DAYS:
         raise ValueError("observation source is stale or from the future")
@@ -106,11 +235,12 @@ def _validate_source(source, today):
     ):
         raise ValueError("observation source manifest identity is invalid")
     seen = set()
+    regular_symbols = set()
+    status_symbols = set()
     for stock in stocks:
         if (
             stock.sample_data
             or stock.market != "TW"
-            or stock.as_of != manifest.market_as_of
             or stock.symbol in seen
             or not isinstance(stock.daily, list)
             or not stock.daily
@@ -122,10 +252,79 @@ def _validate_source(source, today):
             if not isinstance(row, dict):
                 raise ValueError("observation stock rows are invalid")
             _finite_json(row)
-        if str(stock.daily[-1].get("Date") or "").split("T", 1)[0] != (
-            manifest.market_as_of.isoformat()
+        latest_row_date = str(stock.daily[-1].get("Date") or "").split("T", 1)[0]
+        if manifest.schema_version == 2:
+            if (
+                stock.as_of != target_date
+                or latest_row_date != target_date.isoformat()
+                or stock.observation_kind != "regular_price"
+                or stock.trading_status_evidence is not None
+            ):
+                raise ValueError("observation stock date is invalid")
+            regular_symbols.add(stock.symbol)
+            continue
+        if (
+            stock.observation_as_of != target_date
+            or stock.latest_regular_price_date != stock.as_of
+            or latest_row_date != stock.as_of.isoformat()
         ):
             raise ValueError("observation stock date is invalid")
+        if stock.observation_kind == "regular_price":
+            if stock.as_of != target_date or stock.trading_status_evidence is not None:
+                raise ValueError("observation regular price source is invalid")
+            regular_symbols.add(stock.symbol)
+            continue
+        if (
+            stock.observation_kind not in TRADING_STATUS_LABELS
+            or stock.as_of >= target_date
+        ):
+            raise ValueError("observation status source is invalid")
+        try:
+            evidence = validate_status_evidence(
+                stock.trading_status_evidence,
+                symbol=stock.symbol,
+                target_date=target_date,
+            )
+        except ValueError:
+            raise ValueError("observation status evidence is invalid") from None
+        expected = manifest.expected_non_price_symbols.get(stock.symbol)
+        if (
+            not isinstance(expected, dict)
+            or evidence["status"] != stock.observation_kind
+            or expected.get("status") != stock.observation_kind
+            or expected.get("evidence_sha256") != evidence["evidence_sha256"]
+            or expected.get("artifact_sha256") != stock.sha256
+            or expected.get("latest_regular_price_date")
+            != stock.as_of.isoformat()
+        ):
+            raise ValueError("observation status binding is invalid")
+        status_symbols.add(stock.symbol)
+    if manifest.schema_version == 3 and (
+        len(regular_symbols) != manifest.regular_price_symbol_count
+        or len(status_symbols) != manifest.expected_non_price_symbol_count
+        or status_symbols != set(manifest.expected_non_price_symbols)
+    ):
+        raise ValueError("observation source v3 partition is invalid")
+
+
+def _trading_status_observations(stocks):
+    observations = []
+    for stock in sorted(stocks, key=lambda item: item.symbol):
+        evidence = stock.trading_status_evidence
+        item = {
+            "symbol": stock.symbol,
+            "name": stock.name,
+            "status": stock.observation_kind,
+            "label": TRADING_STATUS_LABELS[stock.observation_kind],
+            "observation_as_of": stock.observation_as_of.isoformat(),
+            "latest_regular_price_date": stock.as_of.isoformat(),
+            "evidence_sha256": evidence["evidence_sha256"],
+        }
+        close = _number(stock.daily[-1].get("Close"))
+        if close is not None and close > 0:
+            item["last_regular_close"] = close
+        observations.append(item)
+    return observations
 
 
 def _market_daily_returns(stocks):
@@ -520,6 +719,35 @@ def validate_observation_dashboard(document):
         or capability.get("performance_endorsement_allowed") is not False
     ):
         raise ValueError("observation dashboard capability is invalid")
+    statuses = validate_trading_status_observations(
+        document.get("trading_status_observations"),
+        document["observation_as_of"],
+    )
+    quality = document["data_quality"]
+    count_keys = {
+        "universe_count",
+        "available_count",
+        "failure_count",
+        "regular_price_count",
+        "verified_status_count",
+        "operational_failure_count",
+    }
+    if {
+        "regular_price_count",
+        "verified_status_count",
+        "operational_failure_count",
+    }.intersection(quality):
+        if (
+            not count_keys.issubset(quality)
+            or any(type(quality[key]) is not int or quality[key] < 0 for key in count_keys)
+            or quality["regular_price_count"] + quality["verified_status_count"]
+            != quality["available_count"]
+            or quality["available_count"] + quality["operational_failure_count"]
+            != quality["universe_count"]
+            or quality["failure_count"] != quality["operational_failure_count"]
+            or quality["verified_status_count"] != len(statuses)
+        ):
+            raise ValueError("observation dashboard quality counts are invalid")
 
     def walk(value):
         if isinstance(value, dict):
@@ -564,8 +792,15 @@ def build_observation_dashboard(
         raise ValueError("industry map is invalid")
     _validate_source(source, current_date)
 
+    regular_stocks = [
+        stock for stock in source.stocks if stock.observation_kind == "regular_price"
+    ]
+    status_stocks = [
+        stock for stock in source.stocks if stock.observation_kind in TRADING_STATUS_LABELS
+    ]
+    status_symbols = {stock.symbol for stock in status_stocks}
     stock_by_symbol = {
-        stock.symbol: stock for stock in sorted(source.stocks, key=lambda item: item.symbol)
+        stock.symbol: stock for stock in sorted(regular_stocks, key=lambda item: item.symbol)
     }
     etf_symbols = {
         str(symbol) for symbol in industry_map.get("ETF專區", [])
@@ -578,7 +813,11 @@ def build_observation_dashboard(
     if not market_stocks:
         raise ValueError("observation market universe is empty")
     market = _market_observation(market_stocks)
-    industries = _industry_observations(industry_map, stock_by_symbol, market)
+    price_industry_map = {
+        name: [str(symbol) for symbol in symbols if str(symbol) not in status_symbols]
+        for name, symbols in industry_map.items()
+    }
+    industries = _industry_observations(price_industry_map, stock_by_symbol, market)
     events = _stock_events(market_stocks)
     etfs = _etf_observations(
         [
@@ -604,6 +843,7 @@ def build_observation_dashboard(
         "industry_observations": industries,
         "heatmap": _heatmap(industries),
         "stock_events": events,
+        "trading_status_observations": _trading_status_observations(status_stocks),
         "etf_observations": etfs,
         "daily_focus": _daily_focus(market, industries, events),
         "data_quality": {
@@ -614,6 +854,17 @@ def build_observation_dashboard(
             "failure_rate": _rounded(manifest.failure_rate, 6),
             "source_age_days": (current_date - manifest.market_as_of).days,
             "failed_symbols": list(manifest.failed_symbols),
+            "regular_price_count": len(regular_stocks),
+            "verified_status_count": len(status_stocks),
+            "operational_failure_count": manifest.failure_count,
+            "regular_price_coverage": _rounded(
+                manifest.regular_price_coverage
+                if manifest.schema_version == 3
+                else manifest.coverage,
+                6,
+            ),
+            "observation_coverage": _rounded(manifest.coverage, 6),
+            "operational_failed_symbols": list(manifest.failed_symbols),
         },
         "gates": {
             "source_identity": "PASS",

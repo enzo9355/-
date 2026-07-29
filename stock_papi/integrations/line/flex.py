@@ -19,8 +19,106 @@ def _observation_trend_label(value):
     }.get(value, "資料不足")
 
 
+def _stock_observation_bubble(code, name, body, url, watched):
+    return {
+        "type": "bubble",
+        "size": "mega",
+        "header": {
+            "type": "box",
+            "layout": "vertical",
+            "backgroundColor": ABSORB_NAVY,
+            "paddingAll": "20px",
+            "contents": [
+                {"type": "text", "text": "ABSORB｜市場觀察", "color": "#FFFFFF", "weight": "bold", "size": "xs"},
+                {"type": "text", "text": f"{name} ({code})", "color": "#FFFFFF", "weight": "bold", "size": "xl", "wrap": True},
+            ],
+        },
+        "body": {
+            "type": "box",
+            "layout": "vertical",
+            "backgroundColor": "#f8fafc",
+            "paddingAll": "20px",
+            "spacing": "md",
+            "contents": body,
+        },
+        "footer": {
+            "type": "box",
+            "layout": "vertical",
+            "backgroundColor": "#f8fafc",
+            "paddingAll": "16px",
+            "spacing": "sm",
+            "contents": [
+                {
+                    "type": "button",
+                    "style": "secondary",
+                    "action": {
+                        "type": "postback",
+                        "label": "移除關注" if watched else "加入關注",
+                        "data": f"watch:{'remove' if watched else 'add'}:{code}",
+                    },
+                },
+                {
+                    "type": "button",
+                    "style": "secondary",
+                    "action": {
+                        "type": "postback",
+                        "label": "設定實況提醒",
+                        "data": f"alert:menu:{code}",
+                    },
+                },
+                {
+                    "type": "button",
+                    "style": "primary",
+                    "color": ABSORB_NAVY,
+                    "action": {
+                        "type": "uri",
+                        "label": "查看完整觀察",
+                        "uri": url,
+                    },
+                },
+            ],
+        },
+    }
+
+
 def build_stock_observation_flex(code, name, data, url, watched=False):
     """Render verified actual-market fields without model or backtest content."""
+    if data.get("observation_kind") in {
+        "officially_suspended",
+        "official_no_regular_trade",
+    }:
+        body = [
+            {
+                "type": "text",
+                "text": str(data["status_label"]),
+                "color": "#b45309",
+                "size": "md",
+                "weight": "bold",
+                "wrap": True,
+            },
+            {
+                "type": "text",
+                "text": f"官方狀態驗證日 {data['observation_as_of']}",
+                "color": "#64748b",
+                "size": "xs",
+                "wrap": True,
+            },
+        ]
+        if data.get("last_regular_close") is not None:
+            body.append(
+                {
+                    "type": "text",
+                    "text": (
+                        "最後正常交易收盤 "
+                        f"{float(data['last_regular_close']):.2f}"
+                        f"（{data['latest_regular_price_date']}）"
+                    ),
+                    "color": "#64748b",
+                    "size": "sm",
+                    "wrap": True,
+                }
+            )
+        return _stock_observation_bubble(code, name, body, url, watched)
     risk_events = [
         str(value)[:120]
         for value in data.get("risk_events", [])
@@ -126,65 +224,7 @@ def build_stock_observation_flex(code, name, data, url, watched=False):
                 ],
             ]
         )
-    return {
-        "type": "bubble",
-        "size": "mega",
-        "header": {
-            "type": "box",
-            "layout": "vertical",
-            "backgroundColor": ABSORB_NAVY,
-            "paddingAll": "20px",
-            "contents": [
-                {"type": "text", "text": "ABSORB｜市場觀察", "color": "#FFFFFF", "weight": "bold", "size": "xs"},
-                {"type": "text", "text": f"{name} ({code})", "color": "#FFFFFF", "weight": "bold", "size": "xl", "wrap": True},
-            ],
-        },
-        "body": {
-            "type": "box",
-            "layout": "vertical",
-            "backgroundColor": "#f8fafc",
-            "paddingAll": "20px",
-            "spacing": "md",
-            "contents": body,
-        },
-        "footer": {
-            "type": "box",
-            "layout": "vertical",
-            "backgroundColor": "#f8fafc",
-            "paddingAll": "16px",
-            "spacing": "sm",
-            "contents": [
-                {
-                    "type": "button",
-                    "style": "secondary",
-                    "action": {
-                        "type": "postback",
-                        "label": "移除關注" if watched else "加入關注",
-                        "data": f"watch:{'remove' if watched else 'add'}:{code}",
-                    },
-                },
-                {
-                    "type": "button",
-                    "style": "secondary",
-                    "action": {
-                        "type": "postback",
-                        "label": "設定實況提醒",
-                        "data": f"alert:menu:{code}",
-                    },
-                },
-                {
-                    "type": "button",
-                    "style": "primary",
-                    "color": ABSORB_NAVY,
-                    "action": {
-                        "type": "uri",
-                        "label": "查看完整觀察",
-                        "uri": url,
-                    },
-                },
-            ],
-        },
-    }
+    return _stock_observation_bubble(code, name, body, url, watched)
 
 
 def build_stock_flex_message(code, name, data, url, watched=False):

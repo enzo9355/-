@@ -4,6 +4,8 @@ import hashlib
 import json
 from pathlib import Path
 
+from stock_papi.integrations.market_data.tw_trading_status import evidence_sha256
+
 
 def stock_document(
     symbol: str,
@@ -109,4 +111,127 @@ def write_quant_publish(root: Path, documents: list[dict]) -> Path:
     (publish / "latest-TW.json").write_text(
         json.dumps(latest, separators=(",", ":")), encoding="utf-8"
     )
+    return publish
+
+
+def status_stock_document(symbol: str = "2303") -> dict:
+    target = "2026-07-29"
+    latest = "2026-07-16"
+    status = {
+        "schema_version": 1,
+        "status": "official_no_regular_trade",
+        "market": "TW",
+        "exchange": "TWSE",
+        "symbol": symbol,
+        "target_market_date": target,
+        "source_id": "twse_price",
+        "payload_sha256": "a" * 64,
+        "raw_row_sha256": "b" * 64,
+        "raw_fields": {"symbol": symbol, "name": f"測試股票 {symbol}", "open": "--", "high": "--", "low": "--", "close": "--", "volume": "0"},
+        "parser_version": "tw-official-historical-parser-v3",
+    }
+    status["evidence_sha256"] = evidence_sha256(status)
+    return {
+        "schema_version": 2,
+        "market": "TW",
+        "symbol": symbol,
+        "name": f"測試股票 {symbol}",
+        "as_of": latest,
+        "target_market_date": target,
+        "observation_as_of": target,
+        "latest_regular_price_date": latest,
+        "observation_kind": status["status"],
+        "trading_status_evidence": status,
+        "model_version": "observation-source-v1",
+        "latest": {"Date": latest + "T00:00:00.000", "Close": 100.0},
+        "backtest": {},
+        "daily": [{"Date": latest + "T00:00:00.000", "Close": 100.0}],
+    }
+
+
+def regular_v3_stock_document(symbol: str = "2330") -> dict:
+    target = "2026-07-29"
+    return {
+        "schema_version": 2,
+        "market": "TW",
+        "symbol": symbol,
+        "name": f"測試股票 {symbol}",
+        "as_of": target,
+        "target_market_date": target,
+        "observation_as_of": target,
+        "latest_regular_price_date": target,
+        "observation_kind": "regular_price",
+        "trading_status_evidence": None,
+        "model_version": "observation-source-v1",
+        "latest": {"Date": target + "T00:00:00.000", "Close": 100.0},
+        "backtest": {},
+        "daily": [{"Date": target + "T00:00:00.000", "Close": 100.0}],
+    }
+
+
+def write_quant_publish_v3(root: Path) -> Path:
+    publish = root / "publish" / "quant" / "v1"
+    (publish / "objects").mkdir(parents=True, exist_ok=True)
+    documents = [regular_v3_stock_document(), status_stock_document()]
+    entries = {}
+    expected = {}
+    for document in documents:
+        encoded = json.dumps(document, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8")
+        compressed = gzip.compress(encoded, mtime=0)
+        digest = hashlib.sha256(compressed).hexdigest()
+        relative = f"objects/{digest}.json.gz"
+        (publish / relative).write_bytes(compressed)
+        entry = {
+            "path": relative,
+            "sha256": digest,
+            "size": len(compressed),
+            "uncompressed_size": len(encoded),
+            "as_of": document["as_of"],
+            "observation_as_of": document["observation_as_of"],
+            "latest_regular_price_date": document["latest_regular_price_date"],
+            "observation_kind": document["observation_kind"],
+            "model_version": document["model_version"],
+        }
+        status = document["trading_status_evidence"]
+        if status is not None:
+            entry["evidence_sha256"] = status["evidence_sha256"]
+            expected[document["symbol"]] = {
+                "status": status["status"],
+                "evidence_sha256": status["evidence_sha256"],
+                "artifact_sha256": digest,
+                "latest_regular_price_date": document["latest_regular_price_date"],
+            }
+        entries[document["symbol"]] = entry
+    manifest = {
+        "schema_version": 3,
+        "market": "TW",
+        "generated_at": "2026-07-30T01:00:00Z",
+        "target_market_date": "2026-07-29",
+        "observation_as_of": "2026-07-29",
+        "universe_count": 2,
+        "observation_count": 2,
+        "regular_price_symbol_count": 1,
+        "expected_non_price_symbol_count": 1,
+        "operational_failure_count": 0,
+        "regular_price_denominator": 1,
+        "regular_price_coverage": 1.0,
+        "observation_coverage": 1.0,
+        "operational_failure_rate": 0.0,
+        "expected_non_price_symbols": expected,
+        "operational_failed_symbols": [],
+        "symbols": entries,
+    }
+    manifest_bytes = json.dumps(manifest, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    digest = hashlib.sha256(manifest_bytes).hexdigest()
+    relative = f"manifests/TW-20260730T010000Z-{digest[:12]}.json"
+    path = publish / relative
+    path.parent.mkdir(exist_ok=True)
+    path.write_bytes(manifest_bytes)
+    (publish / "latest-TW.json").write_text(json.dumps({
+        "schema_version": 3,
+        "market": "TW",
+        "generated_at": "2026-07-30T01:00:00Z",
+        "manifest": relative,
+        "manifest_sha256": digest,
+    }, separators=(",", ":")), encoding="utf-8")
     return publish

@@ -154,6 +154,28 @@ File Creation Time: 07082026||||||
             self.assertEqual(document["symbol"], "2330")
             self.assertFalse(target.with_suffix(target.suffix + ".tmp").exists())
 
+    def test_stock_artifact_writer_preserves_explicit_tw_schema_v2(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            ensure_layout(root)
+            target = write_stock_artifact(
+                root,
+                "TW",
+                "2330",
+                {
+                    "schema_version": 2,
+                    "as_of": "2026-07-16",
+                    "target_market_date": "2026-07-17",
+                    "observation_as_of": "2026-07-17",
+                    "latest_regular_price_date": "2026-07-16",
+                    "observation_kind": "official_no_regular_trade",
+                },
+            )
+
+            with gzip.open(target, "rt", encoding="utf-8") as stream:
+                document = json.load(stream)
+        self.assertEqual(document["schema_version"], 2)
+
     def test_stock_artifact_rejects_invalid_symbols_and_nonfinite_values(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -743,6 +765,51 @@ File Creation Time: 07082026||||||
                 "2330",
                 target_market_date=datetime.date(2026, 7, 17),
             )
+
+    def test_taiwan_status_snapshot_preserves_last_regular_price_date(self):
+        from stock_papi.integrations.market_data.tw_trading_status import evidence_sha256
+
+        frame = pd.DataFrame(
+            {"Close": [100.0], "Volume": [1000.0]},
+            index=pd.to_datetime(["2026-07-16"]),
+        )
+        frame.index.name = "Date"
+        pipeline = SimpleNamespace(
+            get_data=lambda _symbol, _days: frame.copy(),
+            calc_all=lambda data: data,
+            get_stock_name=lambda symbol: symbol,
+        )
+        status = {
+            "schema_version": 1,
+            "status": "official_no_regular_trade",
+            "market": "TW",
+            "exchange": "TPEx",
+            "symbol": "2330",
+            "target_market_date": "2026-07-17",
+            "source_id": "tpex_price",
+            "payload_sha256": "a" * 64,
+            "raw_row_sha256": "b" * 64,
+            "raw_fields": {"symbol": "2330", "name": "台積電", "open": "---", "high": "---", "low": "---", "close": "---", "volume": "0"},
+            "parser_version": "tw-official-historical-parser-v3",
+        }
+        status["evidence_sha256"] = evidence_sha256(status)
+
+        payload = build_stock_snapshot(
+            pipeline,
+            "TW",
+            "2330",
+            target_market_date=datetime.date(2026, 7, 17),
+            observation_only=True,
+            trading_status=status,
+        )
+
+        self.assertEqual(payload["schema_version"], 2)
+        self.assertEqual(payload["as_of"], "2026-07-16")
+        self.assertEqual(payload["latest_regular_price_date"], "2026-07-16")
+        self.assertEqual(payload["observation_as_of"], "2026-07-17")
+        self.assertEqual(payload["observation_kind"], "official_no_regular_trade")
+        self.assertEqual(payload["trading_status_evidence"], status)
+        self.assertEqual(len(payload["daily"]), 1)
 
     def test_taiwan_snapshot_fast_lane_uses_promoted_backtest_without_walk_forward(self):
         frame = pd.DataFrame(
