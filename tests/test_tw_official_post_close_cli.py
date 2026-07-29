@@ -1231,7 +1231,7 @@ class TWOfficialPostCloseCLITests(unittest.TestCase):
                         calendar_artifacts=[calendar],
                         limit=1,
                         delay=0,
-                        series_builder=lambda *_args: (
+                        series_builder=lambda *_args, **_kwargs: (
                             _ for _ in ()
                         ).throw(RuntimeError("source unavailable")),
                     )

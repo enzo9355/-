@@ -83,6 +83,7 @@ def series():
         manifest_sha256=digest,
         request_count=12,
         request_budget=OfficialRequestBudget(12, 24, 12, 0, True, "capacity_proven"),
+        source_schema_version="tw-official-historical-v2",
     )
 
 
@@ -374,6 +375,7 @@ def series_without_baseline_price():
         ).hexdigest(),
         request_count=12,
         request_budget=OfficialRequestBudget(12, 24, 12, 0, True, "capacity_proven"),
+        source_schema_version="tw-official-historical-v2",
     )
 
 
@@ -1536,6 +1538,7 @@ class TWLegacyOverlapReconciliationTests(unittest.TestCase):
             ).hexdigest(),
             request_count=6,
             request_budget=OfficialRequestBudget(6, 12, 6, 0, True, "capacity_proven"),
+            source_schema_version="tw-official-historical-v2",
         )
         with tempfile.TemporaryDirectory() as temporary:
             write_artifact(

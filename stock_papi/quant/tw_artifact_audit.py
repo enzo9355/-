@@ -17,6 +17,7 @@ from stock_papi.quant.tw_incremental import (
 @dataclass(frozen=True)
 class ArtifactDateAudit:
     latest_by_symbol: Mapping[str, _datetime.date]
+    observation_by_symbol: Mapping[str, _datetime.date]
     unavailable_symbols: tuple[str, ...]
     earliest_latest_date: _datetime.date | None
     latest_date_counts: Mapping[str, int]
@@ -38,6 +39,7 @@ def audit_artifact_dates(
     ):
         raise TypeError("target_date must be a date")
     latest_by_symbol: dict[str, _datetime.date] = {}
+    observation_by_symbol: dict[str, _datetime.date] = {}
     unavailable = []
     counts: dict[str, int] = {}
     for raw_symbol in symbols:
@@ -52,11 +54,13 @@ def audit_artifact_dates(
                 f"historical artifact is newer than target for TW:{symbol}"
             )
         latest_by_symbol[symbol] = artifact.latest_date
+        observation_by_symbol[symbol] = artifact.observation_date
         key = artifact.latest_date.isoformat()
         counts[key] = counts.get(key, 0) + 1
     earliest = min(latest_by_symbol.values()) if latest_by_symbol else None
     return ArtifactDateAudit(
         latest_by_symbol=MappingProxyType(latest_by_symbol),
+        observation_by_symbol=MappingProxyType(observation_by_symbol),
         unavailable_symbols=tuple(sorted(set(unavailable))),
         earliest_latest_date=earliest,
         latest_date_counts=MappingProxyType(dict(sorted(counts.items()))),

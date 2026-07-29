@@ -842,7 +842,10 @@ def build_official_snapshot_series(
     minimum = 0
     worst_case = 0
     for value in dates:
-        snapshot = snapshot_builder(root, value, **kwargs)
+        snapshot_kwargs = dict(kwargs)
+        if value != dates[-1]:
+            snapshot_kwargs.pop("required_symbols_by_exchange", None)
+        snapshot = snapshot_builder(root, value, **snapshot_kwargs)
         if snapshot.target_date != value:
             raise ValueError("official snapshot series date mismatch")
         if snapshot.source_schema_version != SOURCE_SCHEMA_VERSION:

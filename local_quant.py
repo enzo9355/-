@@ -403,7 +403,12 @@ def write_stock_artifact(root, market, symbol, payload):
     if not isinstance(payload, dict):
         raise TypeError("stock artifact payload must be a dictionary")
     document = dict(payload)
-    document.update(schema_version=1, market=market, symbol=symbol)
+    schema_version = document.get("schema_version", 1)
+    if schema_version not in {1, 2} or (schema_version == 2 and market != "TW"):
+        raise ValueError("stock artifact schema version is invalid")
+    document.update(
+        schema_version=schema_version, market=market, symbol=symbol
+    )
     _validate_json_value(document)
     target = Path(root) / "artifacts" / "stocks" / market / f"{symbol}.json.gz"
     _write_gzip_json_atomic(target, document)
@@ -1400,10 +1405,32 @@ def build_stock_snapshot(
     promoted_backtest=None,
     degraded_bootstrap=False,
     observation_only=False,
+    trading_status=None,
 ):
     if target_market_date is not None and type(target_market_date) is not datetime.date:
         raise TypeError("target_market_date must be a date")
     symbol = validate_market_symbol(market, symbol)
+    if trading_status is not None:
+        from stock_papi.integrations.market_data.tw_trading_status import (
+            evidence_sha256,
+        )
+
+        trading_status = dict(trading_status)
+        if (
+            market != "TW"
+            or not observation_only
+            or target_market_date is None
+            or trading_status.get("status") not in {
+                "official_no_regular_trade", "officially_suspended"
+            }
+            or trading_status.get("market") != "TW"
+            or trading_status.get("symbol") != symbol
+            or trading_status.get("target_market_date")
+            != target_market_date.isoformat()
+            or trading_status.get("evidence_sha256")
+            != evidence_sha256(trading_status)
+        ):
+            raise ValueError("trading status evidence is invalid")
     frame = pipeline.get_data(symbol, 730)
     if frame is None or frame.empty:
         raise ValueError("price history is unavailable")
@@ -1489,8 +1516,11 @@ def build_stock_snapshot(
     as_of = str(latest.get("Date", "")).split("T", 1)[0]
     if not as_of:
         raise ValueError("latest market date is unavailable")
-    if target_market_date is not None and as_of != target_market_date.isoformat():
-        raise ValueError("target market date mismatch")
+    if target_market_date is not None:
+        if trading_status is None and as_of != target_market_date.isoformat():
+            raise ValueError("target market date mismatch")
+        if trading_status is not None and as_of >= target_market_date.isoformat():
+            raise ValueError("trading status conflicts with regular price date")
     result = {
         "as_of": as_of,
         "name": pipeline.get_stock_name(symbol),
@@ -1500,6 +1530,20 @@ def build_stock_snapshot(
         "backtest": backtest,
         "daily": daily,
     }
+    if market == "TW" and target_market_date is not None:
+        result.update(
+            schema_version=2,
+            target_market_date=target_market_date.isoformat(),
+            observation_as_of=target_market_date.isoformat(),
+            latest_regular_price_date=as_of,
+            observation_kind=(
+                trading_status["status"]
+                if trading_status is not None
+                else "regular_price"
+            ),
+        )
+        if trading_status is not None:
+            result["trading_status"] = trading_status
     if not observation_only:
         result["feature_schema_version"] = FEATURE_SCHEMA_VERSION
         result["recommendation_policy_version"] = (

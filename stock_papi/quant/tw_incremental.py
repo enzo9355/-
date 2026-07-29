@@ -14,6 +14,7 @@ from types import MappingProxyType
 from typing import Any, Iterable, Mapping
 
 from stock_papi.integrations.market_data.tw_official_bulk import OfficialDailySnapshot
+from stock_papi.integrations.market_data.tw_trading_status import evidence_sha256
 
 MAX_COMPRESSED_BYTES = 5 * 1024 * 1024
 MAX_UNCOMPRESSED_BYTES = 20 * 1024 * 1024
@@ -22,6 +23,7 @@ LEGACY_OVERLAP_POLICIES = frozenset({"strict", "replace_verified_legacy"})
 KNOWN_OFFICIAL_SCHEMA_VERSIONS = frozenset({
     "tw-official-historical-v1",
     "tw-official-historical-v2",
+    "tw-official-historical-v3",
 })
 _MISSING = object()
 _RECONCILIATION_HISTORY_FIELDS = frozenset({
@@ -43,11 +45,14 @@ class IncrementalArtifact:
     document: dict[str, Any]
     compressed_sha256: str
     latest_date: _datetime.date
+    observation_date: _datetime.date
+    trading_status: Mapping[str, Any] | None
 
 
 @dataclass(frozen=True)
 class ArtifactDateAudit:
     latest_by_symbol: Mapping[str, _datetime.date]
+    observation_by_symbol: Mapping[str, _datetime.date]
     unavailable_symbols: tuple[str, ...]
     earliest_latest_date: _datetime.date | None
     latest_date_counts: Mapping[str, int]
@@ -87,7 +92,7 @@ def load_incremental_artifact(root: Path, symbol: str) -> IncrementalArtifact:
         document = json.loads(decoded.decode("utf-8"))
         if (
             not isinstance(document, dict)
-            or document.get("schema_version") != 1
+            or document.get("schema_version") not in {1, 2}
             or document.get("market") != "TW"
             or document.get("symbol") != symbol
             or not isinstance(document.get("daily"), list)
@@ -105,6 +110,49 @@ def load_incremental_artifact(root: Path, symbol: str) -> IncrementalArtifact:
         latest_date = max(dates)
         if declared_as_of != latest_date:
             raise ValueError("artifact as_of mismatch")
+        if document["schema_version"] == 1:
+            observation_date = latest_date
+            trading_status = None
+        else:
+            target_date = _datetime.date.fromisoformat(
+                str(document["target_market_date"])
+            )
+            observation_date = _datetime.date.fromisoformat(
+                str(document["observation_as_of"])
+            )
+            latest_regular_price_date = _datetime.date.fromisoformat(
+                str(document["latest_regular_price_date"])
+            )
+            observation_kind = document.get("observation_kind")
+            status_value = document.get("trading_status")
+            if (
+                target_date != observation_date
+                or latest_regular_price_date != latest_date
+                or latest_date > observation_date
+                or observation_kind not in {
+                    "regular_price",
+                    "official_no_regular_trade",
+                    "officially_suspended",
+                }
+            ):
+                raise ValueError("artifact observation dates mismatch")
+            if observation_kind == "regular_price":
+                if latest_date != observation_date or status_value is not None:
+                    raise ValueError("regular artifact observation is invalid")
+                trading_status = None
+            else:
+                if (
+                    not isinstance(status_value, dict)
+                    or status_value.get("status") != observation_kind
+                    or status_value.get("market") != "TW"
+                    or status_value.get("symbol") != symbol
+                    or status_value.get("target_market_date")
+                    != observation_date.isoformat()
+                    or status_value.get("evidence_sha256")
+                    != evidence_sha256(status_value)
+                ):
+                    raise ValueError("artifact trading status is invalid")
+                trading_status = status_value
     except (KeyError, OSError, TypeError, UnicodeError, ValueError, gzip.BadGzipFile) as exc:
         raise IncrementalHistoryError(
             f"historical artifact is unavailable for TW:{symbol}"
@@ -114,6 +162,8 @@ def load_incremental_artifact(root: Path, symbol: str) -> IncrementalArtifact:
         document=document,
         compressed_sha256=hashlib.sha256(compressed).hexdigest(),
         latest_date=latest_date,
+        observation_date=observation_date,
+        trading_status=trading_status,
     )
 
 
@@ -126,6 +176,7 @@ def audit_artifact_dates(
     if not isinstance(target_date, _datetime.date) or isinstance(target_date, _datetime.datetime):
         raise TypeError("target_date must be a date")
     latest_by_symbol: dict[str, _datetime.date] = {}
+    observation_by_symbol: dict[str, _datetime.date] = {}
     unavailable = []
     counts: dict[str, int] = {}
     for raw_symbol in symbols:
@@ -140,11 +191,13 @@ def audit_artifact_dates(
             unavailable.append(symbol)
             continue
         latest_by_symbol[symbol] = artifact.latest_date
+        observation_by_symbol[symbol] = artifact.observation_date
         key = artifact.latest_date.isoformat()
         counts[key] = counts.get(key, 0) + 1
     earliest = min(latest_by_symbol.values()) if latest_by_symbol else None
     return ArtifactDateAudit(
         latest_by_symbol=MappingProxyType(latest_by_symbol),
+        observation_by_symbol=MappingProxyType(observation_by_symbol),
         unavailable_symbols=tuple(sorted(set(unavailable))),
         earliest_latest_date=earliest,
         latest_date_counts=MappingProxyType(dict(sorted(counts.items()))),
@@ -428,13 +481,48 @@ class OfficialCompatFetcher:
         except (KeyError, TypeError, ValueError):
             return False
         snapshot_dates = cls._date_list(lineage.get("official_snapshot_dates"))
+        status_aware = (
+            lineage.get("source_schema_version")
+            == "tw-official-historical-v3"
+        )
         if (
             snapshot_dates is None
-            or target_date != artifact.latest_date
+            or (
+                target_date
+                != (
+                    artifact.observation_date
+                    if status_aware
+                    else artifact.latest_date
+                )
+            )
             or historical_as_of > target_date
             or snapshot_dates[-1] != target_date
         ):
             return False
+        if status_aware:
+            status = artifact.trading_status
+            observation_kind = (
+                status.get("status") if status is not None else "regular_price"
+            )
+            if (
+                artifact.document.get("schema_version") != 2
+                or lineage.get("observation_as_of") != target_date.isoformat()
+                or lineage.get("latest_regular_price_date")
+                != artifact.latest_date.isoformat()
+                or lineage.get("observation_kind") != observation_kind
+                or lineage.get("official_target_price_available")
+                != (status is None)
+                or (
+                    status is None
+                    and "trading_status_evidence_sha256" in lineage
+                )
+                or (
+                    status is not None
+                    and lineage.get("trading_status_evidence_sha256")
+                    != status.get("evidence_sha256")
+                )
+            ):
+                return False
         manifests = lineage.get("official_snapshot_manifests")
         if not isinstance(manifests, list) or len(manifests) != len(snapshot_dates):
             return False
@@ -704,6 +792,31 @@ class OfficialCompatFetcher:
             symbol,
         )
         return dict(row)
+
+    def status_for(self, symbol: str) -> dict[str, Any] | None:
+        symbol = str(symbol)
+        snapshot = self.snapshots[self.target_date]
+        status = snapshot.trading_status_by_symbol.get(symbol)
+        if status is None:
+            return None
+        document = json.loads(
+            json.dumps(dict(status), ensure_ascii=False, allow_nan=False)
+        )
+        if (
+            document.get("status") not in {
+                "official_no_regular_trade", "officially_suspended"
+            }
+            or document.get("market") != "TW"
+            or document.get("symbol") != symbol
+            or document.get("target_market_date") != self.target_date.isoformat()
+            or document.get("evidence_sha256") != evidence_sha256(document)
+            or symbol in snapshot.price_by_symbol
+            or symbol in snapshot.terminated_by_symbol
+        ):
+            raise IncrementalHistoryError(
+                f"official status is invalid for TW:{symbol}"
+            )
+        return document
 
     def _record_reconciliation(
         self,
@@ -989,6 +1102,7 @@ class OfficialCompatFetcher:
     def lineage_for(self, symbol: str) -> dict[str, Any]:
         artifact = self._load_artifact(symbol)
         self._lineage_kind(symbol)
+        status = self.status_for(symbol)
         lineage = {
             "source_mode": self.source_mode,
             "source_schema_version": self.source_schema_version,
@@ -1008,7 +1122,20 @@ class OfficialCompatFetcher:
             "official_target_price_available": (
                 symbol in self.snapshots[self.target_date].price_by_symbol
             ),
+            "observation_as_of": self.target_date.isoformat(),
+            "latest_regular_price_date": (
+                self.target_date.isoformat()
+                if status is None
+                else artifact.latest_date.isoformat()
+            ),
+            "observation_kind": (
+                status["status"] if status is not None else "regular_price"
+            ),
         }
+        if status is not None:
+            lineage["trading_status_evidence_sha256"] = status[
+                "evidence_sha256"
+            ]
         reconciliation = self.reconciliation_for(symbol)
         existing_reconciliation = self._existing_reconciliations.get(symbol)
         if reconciliation is None and existing_reconciliation is not None:
