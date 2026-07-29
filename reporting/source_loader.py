@@ -281,6 +281,7 @@ def _load_manifest_source(
         if (
             re.fullmatch(r"objects/[0-9a-f]{64}\.json\.gz", relative) is None
             or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+            or relative != f"objects/{digest}.json.gz"
             or type(size) is not int
             or not 0 < size <= settings.max_gzip_bytes
         ):

@@ -620,6 +620,9 @@ try {
             if ($ObjectRelative -notmatch '^objects/[0-9a-f]{64}\.json\.gz$') {
                 throw "Invalid object path for $Market"
             }
+            if ($ObjectRelative -ne "objects/$([string]$Entry.sha256).json.gz") {
+                throw "Object path hash mismatch for $Market"
+            }
             $ObjectPath = Assert-AllowlistedPath (Join-Path $ResolvedRoot $ObjectRelative)
             $Object = Get-Item -LiteralPath $ObjectPath
             if ($Object.Length -ne [long]$Entry.size) { throw "Object size mismatch for $Market" }

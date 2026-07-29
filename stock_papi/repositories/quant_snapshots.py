@@ -181,6 +181,7 @@ def fetch_quant_snapshot(
         if (
             re.fullmatch(r"objects/[0-9a-f]{64}\.json\.gz", path) is None
             or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+            or path != f"objects/{digest}.json.gz"
             or type(size) is not int
             or not 0 < size <= MAX_QUANT_ARTIFACT_COMPRESSED_BYTES
             or type(uncompressed_size) is not int
