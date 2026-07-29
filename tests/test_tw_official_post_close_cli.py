@@ -19,6 +19,7 @@ from stock_papi.batch import tw_official_post_close_cli as cli
 from stock_papi.batch.tw_official_post_close_cli import (
     _load_calendar_set,
     _patched_pipeline,
+    _required_symbols_by_exchange,
     _required_trading_dates,
     run,
 )
@@ -305,6 +306,20 @@ class Pipeline:
 
 
 class TWOfficialPostCloseCLITests(unittest.TestCase):
+    def test_universe_exchange_partition_uses_catalog_metadata_not_symbols(self):
+        registry = {
+            "2330": types.SimpleNamespace(data_source="twse"),
+            "6488": types.SimpleNamespace(data_source="tpex"),
+        }
+
+        partition = _required_symbols_by_exchange(
+            ["6488", "2330"], registry=registry
+        )
+
+        self.assertEqual(partition, {"TWSE": {"2330"}, "TPEx": {"6488"}})
+        with self.assertRaisesRegex(RuntimeError, "exchange metadata"):
+            _required_symbols_by_exchange(["9999"], registry=registry)
+
     def _run_fake(
         self,
         root,
@@ -354,12 +369,31 @@ class TWOfficialPostCloseCLITests(unittest.TestCase):
                 if as_of is None:
                     write_artifact(data_root, symbol).unlink()
                 else:
-                    write_artifact(
+                    path = write_artifact(
                         data_root,
                         symbol,
                         as_of,
-                        official_lineage(symbol, chosen_series),
+                        (
+                            None
+                            if chosen_series.source_schema_version
+                            == "tw-official-historical-v3"
+                            else official_lineage(symbol, chosen_series)
+                        ),
                     )
+                    if chosen_series.source_schema_version == "tw-official-historical-v3":
+                        with gzip.open(path, "rt", encoding="utf-8") as stream:
+                            document = json.load(stream)
+                        document.update(
+                            schema_version=2,
+                            target_market_date=TARGET.isoformat(),
+                            observation_as_of=TARGET.isoformat(),
+                            latest_regular_price_date=as_of,
+                            observation_kind="regular_price",
+                            source_lineage=pipeline.fetch_finmind_dataset.lineage_for(symbol),
+                        )
+                        with path.open("wb") as raw:
+                            with gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as stream:
+                                stream.write(json.dumps(document, separators=(",", ":")).encode())
             for symbol in final_status_symbols:
                 path = Path(data_root) / "artifacts" / "stocks" / "TW" / f"{symbol}.json.gz"
                 with gzip.open(path, "rt", encoding="utf-8") as stream:
