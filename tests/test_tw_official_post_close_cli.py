@@ -318,6 +318,7 @@ class TWOfficialPostCloseCLITests(unittest.TestCase):
         writer_call=None,
         symbols=("2303", "2330"),
         builder=None,
+        final_status_symbols=(),
     ):
         root = Path(root)
         pipeline = Pipeline()
@@ -359,6 +360,23 @@ class TWOfficialPostCloseCLITests(unittest.TestCase):
                         as_of,
                         official_lineage(symbol, chosen_series),
                     )
+            for symbol in final_status_symbols:
+                path = Path(data_root) / "artifacts" / "stocks" / "TW" / f"{symbol}.json.gz"
+                with gzip.open(path, "rt", encoding="utf-8") as stream:
+                    document = json.load(stream)
+                status_evidence = pipeline.fetch_finmind_dataset.status_for(symbol)
+                document.update(
+                    schema_version=2,
+                    target_market_date=TARGET.isoformat(),
+                    observation_as_of=TARGET.isoformat(),
+                    latest_regular_price_date=document["as_of"],
+                    observation_kind=status_evidence["status"],
+                    trading_status=status_evidence,
+                    source_lineage=pipeline.fetch_finmind_dataset.lineage_for(symbol),
+                )
+                with path.open("wb") as raw:
+                    with gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as stream:
+                        stream.write(json.dumps(document, separators=(",", ":")).encode())
             state = {
                 "stage": "market_batch",
                 "market": "TW",
@@ -916,6 +934,20 @@ class TWOfficialPostCloseCLITests(unittest.TestCase):
                     "2303": TARGET.isoformat(), "2330": TARGET.isoformat()
                 },
             )
+        self.assertEqual(result, 0)
+
+    def test_cli_accepts_only_hash_bound_target_status_for_stale_price_artifact(self):
+        series = status_snapshot_series()
+        with tempfile.TemporaryDirectory() as temporary:
+            for symbol in ("2303", "2330"):
+                write_artifact(temporary, symbol)
+            result, *_rest = self._run_fake(
+                temporary,
+                series=series,
+                final_dates={"2330": TARGET.isoformat()},
+                final_status_symbols={"2303"},
+            )
+
         self.assertEqual(result, 0)
 
     def test_cli_post_run_checks_reconciliation_state_before_artifact_gate(self):
