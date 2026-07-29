@@ -10,6 +10,7 @@ from stock_papi.integrations.market_data.tw_trading_status import (
     evidence_sha256,
     load_lifecycle_snapshot,
     resolve_lifecycle_status,
+    validate_status_evidence,
 )
 
 
@@ -134,6 +135,22 @@ class LifecycleSession:
 
 
 class TwTradingStatusTests(unittest.TestCase):
+    def test_status_validator_rejects_rehashed_incomplete_raw_evidence(self):
+        status = classify([
+            "4804", "大略-KY", "---", "", "---", "---", "---", "", "0"
+        ]).status
+        self.assertEqual(
+            validate_status_evidence(status, symbol="4804", target_date=TARGET),
+            status,
+        )
+        invalid = dict(status)
+        invalid["raw_fields"] = dict(status["raw_fields"])
+        del invalid["raw_fields"]["name"]
+        invalid["evidence_sha256"] = evidence_sha256(invalid)
+
+        with self.assertRaisesRegex(ValueError, "evidence is invalid"):
+            validate_status_evidence(invalid, symbol="4804", target_date=TARGET)
+
     def test_blank_ohlc_with_positive_official_volume_is_no_regular_trade(self):
         result = classify(
             ["00886", "永豐美國科技", " ---", "--- ", "---", "---", "---", "44.11", "435"]

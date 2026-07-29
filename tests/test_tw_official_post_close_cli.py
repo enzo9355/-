@@ -119,7 +119,7 @@ def status_snapshot_series():
         "source_id": "twse_price",
         "payload_sha256": "d" * 64,
         "raw_row_sha256": "e" * 64,
-        "raw_fields": {"open": "--", "high": "--", "low": "--", "close": "--", "volume": "0"},
+        "raw_fields": {"symbol": "2303", "name": "聯電", "open": "--", "high": "--", "low": "--", "close": "--", "volume": "0"},
         "parser_version": "tw-official-historical-parser-v3",
     }
     status["evidence_sha256"] = evidence_sha256(status)
@@ -350,6 +350,13 @@ class TWOfficialPostCloseCLITests(unittest.TestCase):
             )
         )
         observed = {}
+        module.publish_market_snapshot = lambda *args, **kwargs: (
+            observed.update(
+                published_args=args,
+                published_kwargs=kwargs,
+            )
+            or Path(root) / "publish" / "quant" / "v1" / "latest-TW.json"
+        )
 
         def original_batch(
             data_root,
@@ -731,6 +738,24 @@ class TWOfficialPostCloseCLITests(unittest.TestCase):
             observed["trading_status"]["status"],
             "official_no_regular_trade",
         )
+
+    def test_cli_publishes_verified_status_after_terminal_gate(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            write_artifact(temporary, "2303", "2026-07-23")
+            write_artifact(temporary, "2330", "2026-07-23")
+            write_exclusions(temporary, [exclusion_row("2303")])
+
+            result, observed, _builder, _module = self._run_fake(
+                temporary,
+                series=status_snapshot_series(),
+                final_dates={"2330": TARGET.isoformat()},
+                final_status_symbols=("2303",),
+            )
+
+        self.assertEqual(result, 0)
+        self.assertEqual(observed["published_args"][1:3], ("TW", ["2303", "2330"]))
+        self.assertEqual(observed["published_kwargs"]["target_market_date"], TARGET)
+        self.assertNotIn("2303", observed["published_kwargs"]["failed_symbols"])
 
     def test_cli_restores_all_patches_when_assignment_or_pipeline_fails(self):
         class RejectOnce(types.SimpleNamespace):
@@ -1147,6 +1172,10 @@ class TWOfficialPostCloseCLITests(unittest.TestCase):
         module.run_market_batch = original_batch
         module.build_stock_snapshot = (
             lambda _pipeline, market, symbol, *args, **kwargs: {"symbol": symbol}
+        )
+
+        module.publish_market_snapshot = (
+            lambda *_args, **_kwargs: observed.update(published=True)
         )
 
         def local_main(argv):

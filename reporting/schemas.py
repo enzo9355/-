@@ -300,6 +300,18 @@ class ReportSourceManifest:
     failed_symbols: list[str]
     manifest_path: str
     manifest_sha256: str
+    target_market_date: datetime.date | None = None
+    observation_as_of: datetime.date | None = None
+    regular_price_symbol_count: int | None = None
+    expected_non_price_symbol_count: int | None = None
+    operational_failure_count: int | None = None
+    regular_price_denominator: int | None = None
+    regular_price_coverage: float | None = None
+    observation_coverage: float | None = None
+    expected_non_price_symbols: dict[str, dict[str, Any]] = field(
+        default_factory=dict
+    )
+    operational_failed_symbols: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -316,21 +328,43 @@ class StockSnapshot:
     sha256: str
     size: int
     sample_data: bool = False
+    observation_as_of: datetime.date | None = None
+    latest_regular_price_date: datetime.date | None = None
+    observation_kind: str = "regular_price"
+    trading_status_evidence: dict[str, Any] | None = None
 
     @classmethod
     def from_document(cls, document: dict[str, Any], sha256: str, size: int) -> "StockSnapshot":
         """從已驗證的 JSON 文件建立股票快照。"""
+        as_of = datetime.date.fromisoformat(str(document["as_of"]))
         return cls(
             symbol=str(document["symbol"]),
             name=str(document.get("name") or document["symbol"]),
             market=str(document["market"]),
-            as_of=datetime.date.fromisoformat(str(document["as_of"])),
+            as_of=as_of,
             model_version=str(document.get("model_version") or "unknown"),
             daily=[dict(row) for row in document["daily"]],
             backtest=dict(document["backtest"]),
             sha256=sha256,
             size=size,
             sample_data=document.get("sample_data") is True,
+            observation_as_of=datetime.date.fromisoformat(
+                str(document.get("observation_as_of") or document["as_of"])
+            ),
+            latest_regular_price_date=datetime.date.fromisoformat(
+                str(
+                    document.get("latest_regular_price_date")
+                    or document["as_of"]
+                )
+            ),
+            observation_kind=str(
+                document.get("observation_kind") or "regular_price"
+            ),
+            trading_status_evidence=(
+                dict(document["trading_status_evidence"])
+                if isinstance(document.get("trading_status_evidence"), dict)
+                else None
+            ),
         )
 
     @property

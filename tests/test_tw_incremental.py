@@ -335,7 +335,7 @@ def status_snapshot(symbol="2330"):
         "source_id": "twse_price",
         "payload_sha256": "a" * 64,
         "raw_row_sha256": "b" * 64,
-        "raw_fields": {"open": "--", "high": "--", "low": "--", "close": "--", "volume": "0"},
+        "raw_fields": {"symbol": symbol, "name": symbol, "open": "--", "high": "--", "low": "--", "close": "--", "volume": "0"},
         "parser_version": "tw-official-historical-parser-v3",
     }
     status["evidence_sha256"] = evidence_sha256(status)

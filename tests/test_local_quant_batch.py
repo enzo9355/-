@@ -789,7 +789,7 @@ File Creation Time: 07082026||||||
             "source_id": "tpex_price",
             "payload_sha256": "a" * 64,
             "raw_row_sha256": "b" * 64,
-            "raw_fields": {"open": "---", "high": "---", "low": "---", "close": "---", "volume": "0"},
+            "raw_fields": {"symbol": "2330", "name": "台積電", "open": "---", "high": "---", "low": "---", "close": "---", "volume": "0"},
             "parser_version": "tw-official-historical-parser-v3",
         }
         status["evidence_sha256"] = evidence_sha256(status)

@@ -59,7 +59,7 @@ def no_trade_status(symbol="2303"):
         "source_id": "twse_price",
         "payload_sha256": "a" * 64,
         "raw_row_sha256": "b" * 64,
-        "raw_fields": {"open": "--", "high": "--", "low": "--", "close": "--", "volume": "0"},
+        "raw_fields": {"symbol": symbol, "name": symbol, "open": "--", "high": "--", "low": "--", "close": "--", "volume": "0"},
         "parser_version": "tw-official-historical-parser-v3",
     }
     status["evidence_sha256"] = evidence_sha256(status)
@@ -67,6 +67,44 @@ def no_trade_status(symbol="2303"):
 
 
 class LocalQuantPublishTests(unittest.TestCase):
+    def test_v3_manifest_partitions_regular_status_and_operational_symbols(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            ensure_layout(root)
+            symbols = [f"{number:04d}" for number in range(1000, 1021)]
+            status_symbol = symbols[-2]
+            failed_symbol = symbols[-1]
+            status = no_trade_status(status_symbol)
+            for symbol in symbols[:-2]:
+                write_stock_artifact(root, "TW", symbol, v3_document(symbol))
+            write_stock_artifact(
+                root,
+                "TW",
+                status_symbol,
+                v3_document(status_symbol, status=status),
+            )
+
+            latest_path = publish_market_snapshot(
+                root,
+                "TW",
+                symbols,
+                generated_at=datetime.datetime(2026, 7, 30, 6, tzinfo=TAIPEI),
+                failed_symbols=[failed_symbol],
+                target_market_date=TARGET,
+            )
+            latest = json.loads(latest_path.read_text(encoding="utf-8"))
+            manifest = json.loads(
+                (latest_path.parent / latest["manifest"]).read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(manifest["observation_count"], 20)
+        self.assertEqual(manifest["regular_price_symbol_count"], 19)
+        self.assertEqual(manifest["expected_non_price_symbol_count"], 1)
+        self.assertEqual(manifest["operational_failure_count"], 1)
+        self.assertEqual(manifest["regular_price_denominator"], 20)
+        self.assertEqual(manifest["regular_price_coverage"], 19 / 20)
+        self.assertEqual(manifest["operational_failed_symbols"], [failed_symbol])
+
     def test_v3_manifest_partitions_regular_and_status_symbols(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -107,6 +145,56 @@ class LocalQuantPublishTests(unittest.TestCase):
         self.assertEqual(expected["artifact_sha256"], manifest["symbols"]["2303"]["sha256"])
         self.assertEqual(expected["latest_regular_price_date"], "2026-07-16")
         self.assertEqual(manifest["operational_failed_symbols"], [])
+
+    def test_v3_publish_rejects_status_date_mismatch(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            ensure_layout(root)
+            status = no_trade_status()
+            status["target_market_date"] = "2026-07-28"
+            status["evidence_sha256"] = evidence_sha256(status)
+            write_stock_artifact(
+                root, "TW", "2303", v3_document("2303", status=status)
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "artifact is invalid"):
+                publish_market_snapshot(
+                    root,
+                    "TW",
+                    ["2303"],
+                    generated_at=datetime.datetime(2026, 7, 30, 6, tzinfo=TAIPEI),
+                    target_market_date=TARGET,
+                )
+
+    def test_v3_unknown_missing_price_preserves_previous_latest(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            ensure_layout(root)
+            write_stock_artifact(
+                root,
+                "TW",
+                "2330",
+                {"as_of": "2026-07-28", "model_version": "lgbm-5d-v1"},
+            )
+            latest_path = publish_market_snapshot(
+                root,
+                "TW",
+                ["2330"],
+                generated_at=datetime.datetime(2026, 7, 29, 6, tzinfo=TAIPEI),
+            )
+            before = latest_path.read_bytes()
+            write_stock_artifact(root, "TW", "2330", v3_document("2330"))
+
+            with self.assertRaisesRegex(RuntimeError, "artifact is missing"):
+                publish_market_snapshot(
+                    root,
+                    "TW",
+                    ["2303", "2330"],
+                    generated_at=datetime.datetime(2026, 7, 30, 6, tzinfo=TAIPEI),
+                    target_market_date=TARGET,
+                )
+
+            self.assertEqual(latest_path.read_bytes(), before)
 
     def test_market_insights_publish_content_addressed_gzip_and_latest(self):
         with tempfile.TemporaryDirectory() as temporary:

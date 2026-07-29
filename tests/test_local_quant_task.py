@@ -1,5 +1,11 @@
+import hashlib
+import json
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
+
+from tests.report_fixtures import write_quant_publish_v3
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -77,6 +83,111 @@ class LocalQuantTaskTests(unittest.TestCase):
             source.index("expected_non_price_symbols"),
             source.index("# Upload objects"),
         )
+
+    def _run_uploader_preflight(self, root: Path):
+        fake_bin = root / "fake-bin"
+        fake_bin.mkdir()
+        call_log = root / "gcloud-called.txt"
+        (fake_bin / "gcloud.cmd").write_text(
+            f'@echo called>>"{call_log}"\r\n@exit /b 99\r\n',
+            encoding="ascii",
+        )
+        quoted_data_root = str(root / "AbsorbData").replace("'", "''")
+        quoted_bin = str(fake_bin).replace("'", "''")
+        quoted_script = str(UPLOADER).replace("'", "''")
+        command = (
+            "$ErrorActionPreference='Stop';"
+            "Import-Module Microsoft.PowerShell.Utility;"
+            f"$env:Path='{quoted_bin};'+$env:Path;"
+            "try {"
+            f"& '{quoted_script}' -PreflightDataRoot '{quoted_data_root}'"
+            "} catch {"
+            "Write-Error ($_.Exception.Message + [Environment]::NewLine + $_.ScriptStackTrace);"
+            "exit 1}"
+        )
+        result = subprocess.run(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                command,
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+        )
+        return result, call_log
+
+    def test_uploader_rejects_unknown_or_mixed_schema_without_gcloud_copy(self):
+        cases = ((9, 3, "Invalid latest pointer"), (2, 3, "Invalid manifest"))
+        for pointer_schema, manifest_schema, expected_error in cases:
+            with self.subTest(pointer_schema=pointer_schema), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                data_root = root / "AbsorbData"
+                publish = write_quant_publish_v3(data_root)
+                latest_path = publish / "latest-TW.json"
+                latest = json.loads(latest_path.read_text(encoding="utf-8"))
+                latest["schema_version"] = pointer_schema
+                if manifest_schema != 3:
+                    raise AssertionError("test fixture schema is invalid")
+                latest_path.write_text(json.dumps(latest), encoding="utf-8")
+
+                result, call_log = self._run_uploader_preflight(root)
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(call_log.exists(), result.stdout + result.stderr)
+                self.assertIn(expected_error, result.stdout + result.stderr)
+
+    def test_uploader_validates_v3_partition_and_status_hashes_before_copy(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            data_root = root / "AbsorbData"
+            publish = write_quant_publish_v3(data_root)
+            latest_path = publish / "latest-TW.json"
+            latest = json.loads(latest_path.read_text(encoding="utf-8"))
+            manifest = json.loads(
+                (publish / latest["manifest"]).read_text(encoding="utf-8")
+            )
+            manifest["expected_non_price_symbols"]["2303"][
+                "evidence_sha256"
+            ] = "0" * 64
+            encoded = json.dumps(
+                manifest,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+            digest = hashlib.sha256(encoded).hexdigest()
+            relative = latest["manifest"].rsplit("-", 1)[0] + f"-{digest[:12]}.json"
+            (publish / relative).write_bytes(encoded)
+            latest.update(manifest=relative, manifest_sha256=digest)
+            latest_path.write_text(json.dumps(latest), encoding="utf-8")
+
+            result, call_log = self._run_uploader_preflight(root)
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertFalse(call_log.exists(), result.stdout + result.stderr)
+            self.assertIn("Status object evidence mismatch", result.stdout + result.stderr)
+
+    def test_uploader_valid_v3_passes_without_gcloud_copy(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            write_quant_publish_v3(root / "AbsorbData")
+
+            result, call_log = self._run_uploader_preflight(root)
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertFalse(call_log.exists(), result.stdout + result.stderr)
+
+    def test_uploader_uploads_v3_objects_and_manifest_before_pointer(self):
+        source = UPLOADER.read_text(encoding="utf-8")
+        self.assertLess(source.index("Read-VerifiedGzipJson"), source.index("# Upload objects"))
+        self.assertLess(source.index("# Upload objects"), source.index("# Upload manifest"))
+        self.assertLess(source.index("# Upload manifest"), source.index("# Upload latest pointer"))
 
     def test_uploader_sends_market_insights_before_large_market_snapshots(self):
         source = UPLOADER.read_text(encoding="utf-8")

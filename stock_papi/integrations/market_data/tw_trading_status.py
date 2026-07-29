@@ -314,6 +314,69 @@ def resolve_lifecycle_status(
     return result
 
 
+def validate_status_evidence(
+    document: Mapping[str, Any],
+    *,
+    symbol: str | None = None,
+    target_date: _datetime.date | None = None,
+) -> dict[str, Any]:
+    value = dict(document)
+    try:
+        evidence_target = _datetime.date.fromisoformat(
+            str(value["target_market_date"])
+        )
+    except (KeyError, TypeError, ValueError):
+        raise ValueError("trading status evidence is invalid") from None
+    if (
+        value.get("schema_version") != STATUS_SCHEMA_VERSION
+        or value.get("status")
+        not in {"official_no_regular_trade", "officially_suspended"}
+        or value.get("market") != "TW"
+        or value.get("exchange") not in {"TWSE", "TPEx"}
+        or normalize_symbol(value.get("symbol")) != str(value.get("symbol"))
+        or (symbol is not None and value.get("symbol") != normalize_symbol(symbol))
+        or (target_date is not None and evidence_target != target_date)
+        or value.get("evidence_sha256") != evidence_sha256(value)
+    ):
+        raise ValueError("trading status evidence is invalid")
+    if value["status"] == "official_no_regular_trade":
+        raw_fields = value.get("raw_fields")
+        expected_source = {"TWSE": "twse_price", "TPEx": "tpex_price"}[
+            value["exchange"]
+        ]
+        if (
+            value.get("source_id") != expected_source
+            or not _SHA256.fullmatch(str(value.get("payload_sha256") or ""))
+            or not _SHA256.fullmatch(str(value.get("raw_row_sha256") or ""))
+            or value.get("parser_version") != STATUS_PARSER_VERSION
+            or not isinstance(raw_fields, dict)
+            or set(raw_fields)
+            != {"symbol", "name", "open", "high", "low", "close", "volume"}
+            or normalize_symbol(raw_fields.get("symbol")) != value["symbol"]
+            or not all(
+                _is_empty_price(raw_fields[name])
+                for name in ("open", "high", "low", "close")
+            )
+        ):
+            raise ValueError("trading status evidence is invalid")
+        if not _is_empty_price(raw_fields["volume"]):
+            try:
+                if float(parse_number(raw_fields["volume"])) < 0:
+                    raise ValueError
+            except (TypeError, ValueError):
+                raise ValueError("trading status evidence is invalid") from None
+        return value
+    events = value.get("lifecycle_events")
+    if (
+        value.get("parser_version") != LIFECYCLE_PARSER_VERSION
+        or not isinstance(events, list)
+        or not events
+        or resolve_lifecycle_status(events, evidence_target, active=True) != value
+    ):
+        raise ValueError("trading status evidence is invalid")
+    return value
+
+
 def _lifecycle_params(
     source_id: str,
     target_date: _datetime.date,
