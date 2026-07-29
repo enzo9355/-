@@ -27,6 +27,8 @@ from stock_papi.integrations.market_data.tw_official_historical import (
 from stock_papi.integrations.market_data.tw_trading_status import (
     LifecycleSnapshot,
     evidence_sha256,
+    resolve_lifecycle_status,
+    validate_status_evidence,
 )
 
 TARGET = datetime.date(2026, 7, 24)
@@ -197,21 +199,20 @@ def lifecycle_snapshot(*, statuses=None, terminated=None):
 
 
 def suspended_status(symbol, exchange="TPEx"):
-    document = {
+    event = {
         "schema_version": 1,
-        "status": "officially_suspended",
-        "market": "TW",
         "exchange": exchange,
         "symbol": symbol,
-        "target_market_date": CONTRACT_TARGET.isoformat(),
-        "valid_from": CONTRACT_TARGET.isoformat(),
-        "valid_through_exclusive": None,
-        "evaluated_through": CONTRACT_TARGET.isoformat(),
-        "lifecycle_events": [],
+        "event_type": "suspend",
+        "effective_date": CONTRACT_TARGET.isoformat(),
+        "source_id": "tpex_suspend_history",
+        "payload_sha256": "b" * 64,
+        "raw_row_sha256": "c" * 64,
+        "raw_fields": {"symbol": symbol, "date": CONTRACT_TARGET.isoformat()},
         "parser_version": "tw-lifecycle-parser-v2",
     }
-    document["evidence_sha256"] = evidence_sha256(document)
-    return document
+    event["evidence_sha256"] = evidence_sha256(event)
+    return resolve_lifecycle_status([event], CONTRACT_TARGET, active=True)
 
 
 class HistoricalParserTests(unittest.TestCase):
@@ -447,6 +448,31 @@ class HistoricalStatusSnapshotTests(unittest.TestCase):
         self.assertEqual(
             snapshot.trading_status_by_symbol["00886"]["raw_fields"]["volume"],
             "435",
+        )
+
+    def test_lifecycle_suspension_takes_precedence_without_mixing_price_row_identity(self):
+        lifecycle_status = suspended_status("00886")
+        with tempfile.TemporaryDirectory() as temporary, mock.patch(
+            "stock_papi.integrations.market_data.tw_official_historical.load_lifecycle_snapshot",
+            return_value=lifecycle_snapshot(statuses={"00886": lifecycle_status}),
+        ):
+            snapshot = build_historical_daily_snapshot(
+                Path(temporary),
+                CONTRACT_TARGET,
+                session=BlankPriceSession(),
+                minimum_price_symbols={"TWSE": 2, "TPEx": 2},
+                minimum_chip_symbols=1,
+                required_symbols_by_exchange={"TWSE": {"2330"}, "TPEx": {"6488", "00886"}},
+            )
+
+        status = dict(snapshot.trading_status_by_symbol["00886"])
+        self.assertEqual(status, lifecycle_status)
+        self.assertNotIn("price_row_evidence", status)
+        self.assertEqual(
+            validate_status_evidence(
+                status, symbol="00886", target_date=CONTRACT_TARGET
+            ),
+            lifecycle_status,
         )
 
     def test_absent_price_requires_covering_suspension_or_fails_closed(self):
