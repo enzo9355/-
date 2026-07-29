@@ -26,12 +26,20 @@ from stock_papi.integrations.market_data.tw_official_bulk import (
 )
 from stock_papi.integrations.market_data.tw_official_cache import (
     OfficialCacheError,
+    load_cached_raw_source,
     load_cached_source,
+    store_cached_raw_source,
     store_cached_source,
+)
+from stock_papi.integrations.market_data.tw_trading_status import (
+    STATUS_PARSER_VERSION,
+    classify_price_row,
+    evidence_sha256,
+    load_lifecycle_snapshot,
 )
 
 SOURCE_MODE = "tw_official_bulk_v2"
-SOURCE_SCHEMA_VERSION = "tw-official-historical-v2"
+SOURCE_SCHEMA_VERSION = "tw-official-historical-v3"
 PARSER_VERSION = "tw-official-historical-parser-v2"
 DEFAULT_TIMEOUT_SECONDS = 30
 DEFAULT_RETRY_ATTEMPTS = 2
@@ -190,7 +198,11 @@ def _price_row(target_date: _datetime.date, source: Sequence[Any], *, symbol_ind
     return values
 
 
-def parse_twse_price_report(payload: Any, target_date: _datetime.date) -> tuple[dict[str, Any], ...]:
+def parse_twse_price_report_with_status(
+    payload: Any,
+    target_date: _datetime.date,
+    payload_sha256: str,
+) -> tuple[tuple[dict[str, Any], ...], dict[str, dict[str, Any]]]:
     document = _status_date(payload, target_date, "TWSE price")
     fields, data, _ = _table(
         document,
@@ -202,18 +214,47 @@ def parse_twse_price_report(payload: Any, target_date: _datetime.date) -> tuple[
         "TWSE price",
     )
     rows = []
+    statuses = {}
     for source in data:
         if not isinstance(source, list) or len(source) != len(fields):
             continue
         try:
-            row = _price_row(target_date, source, symbol_index=0, volume_index=2, open_index=5, high_index=6, low_index=7, close_index=8)
+            result = classify_price_row(
+                target_date,
+                "twse_price",
+                "TWSE",
+                fields,
+                source,
+                {
+                    "symbol": 0,
+                    "name": 1,
+                    "volume": 2,
+                    "open": 5,
+                    "high": 6,
+                    "low": 7,
+                    "close": 8,
+                },
+                payload_sha256,
+            )
         except ValueError:
             if not re.fullmatch(r"\d{4,6}", re.sub(r"<[^>]*>", "", str(source[0] or "")).strip()):
                 continue
             raise
-        if row is not None:
-            rows.append(row)
-    return _dedupe(rows, lambda row: (row["stock_id"], row["date"]))
+        if result.price is not None:
+            rows.append(result.price)
+        elif result.status is not None:
+            symbol = result.status["symbol"]
+            if symbol in statuses and statuses[symbol] != result.status:
+                raise ValueError("official source contains conflicting duplicate rows")
+            statuses[symbol] = result.status
+    return _dedupe(rows, lambda row: (row["stock_id"], row["date"])), statuses
+
+
+def parse_twse_price_report(
+    payload: Any, target_date: _datetime.date
+) -> tuple[dict[str, Any], ...]:
+    rows, _ = parse_twse_price_report_with_status(payload, target_date, "0" * 64)
+    return rows
 
 
 def parse_twse_margin_report(payload: Any, target_date: _datetime.date) -> tuple[dict[str, Any], ...]:
@@ -240,7 +281,11 @@ def parse_twse_margin_report(payload: Any, target_date: _datetime.date) -> tuple
     return _dedupe(rows, lambda row: (row["stock_id"], row["date"]))
 
 
-def parse_tpex_price_report(payload: Any, target_date: _datetime.date) -> tuple[dict[str, Any], ...]:
+def parse_tpex_price_report_with_status(
+    payload: Any,
+    target_date: _datetime.date,
+    payload_sha256: str,
+) -> tuple[tuple[dict[str, Any], ...], dict[str, dict[str, Any]]]:
     document = _status_date(payload, target_date, "TPEx price")
     fields, data, table = _table(
         document,
@@ -250,18 +295,47 @@ def parse_tpex_price_report(payload: Any, target_date: _datetime.date) -> tuple[
     if normalize_market_date(table.get("date")) != target_date:
         raise ValueError("TPEx price table date mismatch")
     rows = []
+    statuses = {}
     for source in data:
         if not isinstance(source, list) or len(source) != len(fields):
             continue
         try:
-            row = _price_row(target_date, source, symbol_index=0, volume_index=8, open_index=4, high_index=5, low_index=6, close_index=2)
+            result = classify_price_row(
+                target_date,
+                "tpex_price",
+                "TPEx",
+                fields,
+                source,
+                {
+                    "symbol": 0,
+                    "name": 1,
+                    "close": 2,
+                    "open": 4,
+                    "high": 5,
+                    "low": 6,
+                    "volume": 8,
+                },
+                payload_sha256,
+            )
         except ValueError:
             if not re.fullmatch(r"\d{4,6}", re.sub(r"<[^>]*>", "", str(source[0] or "")).strip()):
                 continue
             raise
-        if row is not None:
-            rows.append(row)
-    return _dedupe(rows, lambda row: (row["stock_id"], row["date"]))
+        if result.price is not None:
+            rows.append(result.price)
+        elif result.status is not None:
+            symbol = result.status["symbol"]
+            if symbol in statuses and statuses[symbol] != result.status:
+                raise ValueError("official source contains conflicting duplicate rows")
+            statuses[symbol] = result.status
+    return _dedupe(rows, lambda row: (row["stock_id"], row["date"])), statuses
+
+
+def parse_tpex_price_report(
+    payload: Any, target_date: _datetime.date
+) -> tuple[dict[str, Any], ...]:
+    rows, _ = parse_tpex_price_report_with_status(payload, target_date, "0" * 64)
+    return rows
 
 
 def parse_tpex_margin_report(payload: Any, target_date: _datetime.date) -> tuple[dict[str, Any], ...]:
@@ -307,7 +381,7 @@ def _request_headers(source_id: str) -> dict[str, str]:
     return headers
 
 
-def _request_payload(definition: OfficialSourceDefinition, target_date: _datetime.date, *, session: Any, timeout: int, retry_attempts: int, sleep_fn: Callable[[float], None]) -> tuple[Any, int, int]:
+def _request_payload(definition: OfficialSourceDefinition, target_date: _datetime.date, *, session: Any, timeout: int, retry_attempts: int, sleep_fn: Callable[[float], None]) -> tuple[Any, bytes, int]:
     attempts = 0
     for attempt in range(retry_attempts):
         attempts += 1
@@ -340,7 +414,7 @@ def _request_payload(definition: OfficialSourceDefinition, target_date: _datetim
         if not content or len(content) > definition.max_bytes:
             raise OfficialSourceFailure(definition.source_id, "response_too_large", safe_message="response size is invalid")
         try:
-            return json.loads(content.decode("utf-8-sig")), len(content), attempts
+            return json.loads(content.decode("utf-8-sig")), content, attempts
         except (UnicodeError, ValueError):
             raise OfficialSourceFailure(definition.source_id, "invalid_json", safe_message="response JSON is invalid") from None
     raise AssertionError("unreachable")
@@ -364,6 +438,7 @@ def build_historical_daily_snapshot(
     sleep_fn: Callable[[float], None] = time.sleep,
     minimum_price_symbols: Mapping[str, int] | None = None,
     minimum_chip_symbols: int | None = None,
+    required_symbols_by_exchange: Mapping[str, Iterable[str]] | None = None,
 ) -> OfficialDailySnapshot:
     if not isinstance(target_date, _datetime.date) or isinstance(target_date, _datetime.datetime):
         raise TypeError("target_date must be a date")
@@ -372,6 +447,16 @@ def build_historical_daily_snapshot(
         session = requests.Session()
     checked_at = now or _datetime.datetime.now(_datetime.timezone.utc)
     minimum_price_symbols = dict(minimum_price_symbols or {"TWSE": 500, "TPEx": 500})
+    try:
+        required_by_exchange = {
+            str(exchange): {normalize_symbol(symbol) for symbol in symbols}
+            for exchange, symbols in (required_symbols_by_exchange or {}).items()
+        }
+    except (TypeError, ValueError) as exc:
+        raise ValueError("required official symbols are invalid") from exc
+    if not set(required_by_exchange) <= {"TWSE", "TPEx"}:
+        raise ValueError("required official exchange is invalid")
+    status_aware = any(required_by_exchange.values())
     if (
         minimum_chip_symbols is not None
         and (
@@ -395,15 +480,105 @@ def build_historical_daily_snapshot(
     results: dict[str, OfficialSourceResult] = {}
     request_count = 0
     cold_sources = 0
+    price_status_candidates: dict[str, dict[str, Any]] = {}
+    raw_price_source_hashes: dict[str, str] = {}
 
     for source_id, definition in HISTORICAL_SOURCE_DEFINITIONS.items():
         try:
             cached = load_cached_source(root, source_id=source_id, target_date=target_date, parser_version=PARSER_VERSION)
         except OfficialCacheError as exc:
             raise OfficialSourceFailure(source_id, "cache_invalid", safe_message=str(exc)) from None
-        if cached is None:
+        cached_symbols = {
+            str(row.get("stock_id")) for row in cached.rows if row.get("stock_id")
+        } if cached is not None else set()
+        use_raw_price = (
+            definition.dataset == "price"
+            and status_aware
+            and not required_by_exchange.get(definition.market, set()) <= cached_symbols
+        )
+        if use_raw_price:
+            try:
+                raw_cached = load_cached_raw_source(
+                    root,
+                    source_id=source_id,
+                    target_date=target_date,
+                    parser_version=STATUS_PARSER_VERSION,
+                )
+            except OfficialCacheError as exc:
+                raise OfficialSourceFailure(source_id, "cache_invalid", safe_message=str(exc)) from None
+            raw_cache_hit = raw_cached is not None
+            if raw_cached is None:
+                cold_sources += 1
+                payload, content, attempts = _request_payload(
+                    definition,
+                    target_date,
+                    session=session,
+                    timeout=timeout,
+                    retry_attempts=retry_attempts,
+                    sleep_fn=sleep_fn,
+                )
+                request_count += attempts
+                try:
+                    raw_cached = store_cached_raw_source(
+                        root,
+                        source_id=source_id,
+                        target_date=target_date,
+                        payload=content,
+                        parser_version=STATUS_PARSER_VERSION,
+                        source_url=definition.url,
+                        fetched_at=checked_at,
+                        date_verification="explicit",
+                    )
+                except (OfficialCacheError, OSError, ValueError) as exc:
+                    raise OfficialSourceFailure(source_id, "cache_invalid", safe_message=str(exc)) from None
+            else:
+                try:
+                    payload = json.loads(raw_cached.payload.decode("utf-8-sig"))
+                except (UnicodeError, ValueError):
+                    raise OfficialSourceFailure(
+                        source_id, "schema_validation", safe_message="response JSON is invalid"
+                    ) from None
+            try:
+                if source_id == "twse_price":
+                    rows, statuses = parse_twse_price_report_with_status(
+                        payload, target_date, raw_cached.payload_sha256
+                    )
+                else:
+                    rows, statuses = parse_tpex_price_report_with_status(
+                        payload, target_date, raw_cached.payload_sha256
+                    )
+                minimum = minimum_for_source(source_id, definition)
+                symbol_count = _coverage(definition.dataset, rows, int(minimum))
+            except (KeyError, TypeError, ValueError) as exc:
+                raise OfficialSourceFailure(source_id, "schema_validation", safe_message=str(exc)) from None
+            for symbol, status in statuses.items():
+                previous = price_status_candidates.get(symbol)
+                if previous is not None and previous != status:
+                    raise OfficialSourceFailure(
+                        source_id, "cross_source_duplicate",
+                        safe_message=f"conflicting non-price row {symbol}",
+                    )
+                price_status_candidates[symbol] = status
+            raw_price_source_hashes[source_id] = raw_cached.payload_sha256
+            try:
+                cached = store_cached_source(
+                    root,
+                    source_id=source_id,
+                    target_date=target_date,
+                    rows=rows,
+                    symbol_count=symbol_count,
+                    parser_version=PARSER_VERSION,
+                    source_url=definition.url,
+                    fetched_at=checked_at,
+                    date_verification="explicit",
+                )
+            except (OfficialCacheError, OSError, ValueError) as exc:
+                raise OfficialSourceFailure(source_id, "cache_invalid", safe_message=str(exc)) from None
+            response_size = raw_cached.compressed_size
+            cache_hit = raw_cache_hit
+        elif cached is None:
             cold_sources += 1
-            payload, response_size, attempts = _request_payload(
+            payload, content, attempts = _request_payload(
                 definition,
                 target_date,
                 session=session,
@@ -412,6 +587,7 @@ def build_historical_daily_snapshot(
                 sleep_fn=sleep_fn,
             )
             request_count += attempts
+            response_size = len(content)
             try:
                 rows = HISTORICAL_PARSERS[source_id](payload, target_date)
                 minimum = minimum_for_source(source_id, definition)
@@ -486,6 +662,7 @@ def build_historical_daily_snapshot(
             )
 
     price: dict[str, dict[str, Any]] = {}
+    price_exchange: dict[str, str] = {}
     institutional: dict[str, list[dict[str, Any]]] = {}
     institutional_keys: set[tuple[str, str]] = set()
     margin: dict[str, dict[str, Any]] = {}
@@ -497,6 +674,7 @@ def build_historical_daily_snapshot(
                 if symbol in price and price[symbol] != row:
                     raise OfficialSourceFailure(result.source_id, "cross_source_duplicate", safe_message=f"duplicate price symbol {symbol}")
                 price[symbol] = row
+                price_exchange[symbol] = result.market
             elif result.dataset == "institutional":
                 identity = (symbol, str(row["name"]))
                 if identity in institutional_keys:
@@ -511,6 +689,77 @@ def build_historical_daily_snapshot(
                 if symbol in margin and margin[symbol] != row:
                     raise OfficialSourceFailure(result.source_id, "cross_source_duplicate", safe_message=f"duplicate margin symbol {symbol}")
                 margin[symbol] = row
+
+    trading_status: dict[str, Mapping[str, Any]] = {}
+    terminated: dict[str, Mapping[str, Any]] = {}
+    lifecycle_source_hashes: Mapping[str, str] = MappingProxyType({})
+    required_symbols = set().union(*required_by_exchange.values()) if status_aware else set()
+    missing_symbols = required_symbols - set(price)
+    if missing_symbols:
+        lifecycle = load_lifecycle_snapshot(
+            root,
+            target_date,
+            session=session,
+            required_symbols_by_exchange=required_by_exchange,
+            now=checked_at,
+            timeout=timeout,
+        )
+        if lifecycle.target_date != target_date:
+            raise OfficialSourceFailure(
+                "tw_lifecycle", "schema_validation",
+                safe_message="lifecycle target date mismatch",
+            )
+        request_count += lifecycle.request_count
+        cold_sources += lifecycle.request_count
+        lifecycle_source_hashes = lifecycle.source_hashes
+        for symbol in set(price) & (
+            set(lifecycle.status_by_symbol) | set(lifecycle.terminated_by_symbol)
+        ):
+            lifecycle_row = (
+                lifecycle.status_by_symbol.get(symbol)
+                or lifecycle.terminated_by_symbol[symbol]
+            )
+            if lifecycle_row.get("exchange") == price_exchange.get(symbol):
+                raise OfficialSourceFailure(
+                    "tw_lifecycle", "price_status_conflict",
+                    safe_message=f"regular price conflicts with lifecycle status {symbol}",
+                )
+        for symbol in sorted(missing_symbols):
+            disposition = lifecycle.terminated_by_symbol.get(symbol)
+            status = lifecycle.status_by_symbol.get(symbol)
+            candidate = price_status_candidates.get(symbol)
+            if disposition is not None:
+                terminated[symbol] = disposition
+                continue
+            if status is not None:
+                document = dict(status)
+                if candidate is not None:
+                    document["price_row_evidence"] = candidate
+                    document["evidence_sha256"] = evidence_sha256(document)
+                trading_status[symbol] = document
+                continue
+            if candidate is not None:
+                document = dict(candidate)
+                document["lifecycle_source_hashes"] = dict(
+                    sorted(lifecycle_source_hashes.items())
+                )
+                document["evidence_sha256"] = evidence_sha256(document)
+                trading_status[symbol] = document
+                continue
+            raise OfficialSourceFailure(
+                "tw_lifecycle", "unrecognized_missing_price",
+                safe_message=f"unrecognized missing official price {symbol}",
+            )
+    if set(price) & set(trading_status) or set(price) & set(terminated) or set(trading_status) & set(terminated):
+        raise OfficialSourceFailure(
+            "tw_lifecycle", "schema_validation",
+            safe_message="official price/status partition overlaps",
+        )
+    if required_symbols != set(price) & required_symbols | set(trading_status) | set(terminated):
+        raise OfficialSourceFailure(
+            "tw_lifecycle", "schema_validation",
+            safe_message="official price/status partition is incomplete",
+        )
 
     manifest_document = {
         "source_schema_version": SOURCE_SCHEMA_VERSION,
@@ -528,6 +777,16 @@ def build_historical_daily_snapshot(
                 "date_verification": result.date_verification,
             }
             for source_id, result in sorted(results.items())
+        },
+        "raw_price_source_hashes": dict(sorted(raw_price_source_hashes.items())),
+        "lifecycle_source_hashes": dict(sorted(lifecycle_source_hashes.items())),
+        "trading_statuses": {
+            symbol: status["evidence_sha256"]
+            for symbol, status in sorted(trading_status.items())
+        },
+        "terminated_symbols": {
+            symbol: status["evidence_sha256"]
+            for symbol, status in sorted(terminated.items())
         },
     }
     manifest_sha256 = hashlib.sha256(
@@ -555,6 +814,14 @@ def build_historical_daily_snapshot(
         request_budget=budget,
         source_mode=SOURCE_MODE,
         source_schema_version=SOURCE_SCHEMA_VERSION,
+        trading_status_by_symbol=MappingProxyType({
+            symbol: MappingProxyType(dict(status))
+            for symbol, status in trading_status.items()
+        }),
+        terminated_by_symbol=MappingProxyType({
+            symbol: MappingProxyType(dict(status))
+            for symbol, status in terminated.items()
+        }),
     )
 
 
