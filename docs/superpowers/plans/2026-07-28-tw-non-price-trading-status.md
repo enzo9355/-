@@ -1,6 +1,6 @@
 # TW Non-Price Trading Status Contract Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For the separately authorized implementation session:** execute this plan stage-by-stage with review checkpoints. This planning commit authorizes neither implementation nor subagent execution. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Preserve official TW non-price trading evidence without converting stale or blank rows into target-session OHLCV, then carry the verified status through artifacts, terminal completeness, manifest v3, loaders, dashboard, and reports.
 
@@ -13,6 +13,7 @@
 - Implement from base `9c10b6af385306d35582eec30df1b16b6034db7f` on `codex/tw-non-price-status-contract`.
 - Never forward-fill, synthesize, copy, or relabel OHLCV.
 - Never infer suspension from price-row absence and never hardcode a symbol.
+- Treat only null/blank and exact dash tokens (`-`, `--`, `---`, `----`) as non-price markers; prose markers fail closed.
 - Artifact `as_of` remains `latest_regular_price_date`; `observation_as_of` is the verified target session.
 - Missing, expired, contradictory, incomplete, or hash-mismatched status evidence fails closed.
 - Official-source failure occurs before the symbol loop and before checkpoint or artifact mutation.
@@ -23,14 +24,14 @@
 
 ---
 
-## File map
+## Exact files by stage
 
 ### B1: Source evidence and cache
 
 - Create `stock_papi/integrations/market_data/tw_trading_status.py` — lifecycle sources, status schemas, hashes, interval evaluation, price-row status classification.
 - Modify `stock_papi/integrations/market_data/tw_official_bulk.py` — add immutable `trading_status_by_symbol` to `OfficialDailySnapshot`.
 - Modify `stock_papi/integrations/market_data/tw_official_historical.py` — retain raw payload/row identity and assemble price plus status without overlap; implement `required_symbols_by_exchange` partition and conditional lifecycle loading.
-- Modify `stock_papi/integrations/market_data/tw_official_cache.py` — add raw payload cache v2 while preserving v1 price-only reads per exchange.
+- Modify `stock_papi/integrations/market_data/tw_official_cache.py` — add price-source raw payload cache v2 while preserving complete v1 price reads and all institutional/margin v1 reads.
 - Create `tests/test_tw_trading_status.py`.
 - Modify `tests/test_tw_official_historical.py`.
 - Modify `tests/test_tw_official_bulk.py`.
@@ -65,9 +66,11 @@
 - Modify `stock_papi/services/observation_view.py` — suppress current price/volume/technical values for a status artifact.
 - Modify `stock_papi/services/report_view.py` — validate and expose the status list.
 - Modify `templates/report_observation.html` — render verified status labels separately.
+- Modify `templates/reports/post_close_professional.html` — render factual status observations outside technical events.
 - Modify `templates/stock_detail.html` — render status-first stock view and dated last regular close only.
 - Modify `tests/test_observation_products.py`.
 - Modify `tests/test_professional_report_builder.py`.
+- Modify `tests/test_professional_report_html.py`.
 - Modify `tests/test_observation_public_surfaces.py`.
 
 ---
@@ -103,7 +106,7 @@ def load_lifecycle_statuses(
     *,
     session: Any,
     source_definitions: Mapping[str, OfficialSourceDefinition],
-    unresolved_symbols_by_exchange: Mapping[str, Collection[str]],
+    non_regular_symbols_by_exchange: Mapping[str, Collection[str]],
 ) -> Mapping[str, Mapping[str, Any]]: ...
 
 def load_lifecycle_index(root: Path, target_date: datetime.date) -> Mapping[str, Any]: ...
@@ -129,16 +132,16 @@ Rules:
 - `tpex_price` checks completeness against `required_symbols_by_exchange.get("TPEx", ())`.
 - Institutional and margin sources maintain existing coverage gates.
 - A v1 cache for a price source is reusable only when every required symbol for that exchange has a canonical price row.
-- If any required symbol for an exchange lacks a canonical price row and needs status classification, v2 raw evidence or lifecycle evidence is mandatory.
-- Lifecycle sources are loaded conditionally: if all required symbols for an exchange are classified by price raw rows (`regular_price` or `official_no_regular_trade`), lifecycle sources for that exchange are not loaded and their unavailability does not block the snapshot.
+- If any required symbol lacks a canonical price row, reload that price source into cache v2 before status classification. Lifecycle evidence cannot make an incomplete v1 price cache reusable.
+- Lifecycle sources are loaded conditionally: skip them only when every required symbol for an exchange has `regular_price`. If any required symbol has a blank or absent price row, load both exchange lifecycle sources, apply suspension precedence, and require their complete valid hashes even when the final result is `official_no_regular_trade`.
 
 `OfficialDailySnapshot` adds:
 
 ```python
-trading_status_by_symbol: Mapping[str, Mapping[str, Any]]
+trading_status_by_symbol: Mapping[str, Mapping[str, Any]] = MappingProxyType({})
 ```
 
-The snapshot manifest hash covers price source hashes, used lifecycle source hashes, and sorted `(symbol, evidence_sha256)` pairs.
+The immutable empty default preserves price-only constructors; status-aware v3 builders pass the validated mapping explicitly. The snapshot manifest hash covers price source hashes, used lifecycle source hashes, and sorted `(symbol, evidence_sha256)` pairs.
 
 ### Frozen lifecycle endpoint contract
 
@@ -169,6 +172,16 @@ class TwTradingStatusTests(unittest.TestCase):
         result = classify_price_row(TARGET, "tpex_price", "TPEx", FIELDS, BLANK_OHLC_BLANK_VOL_ROW, INDICES, "a" * 64)
         self.assertIsNone(result.price)
         self.assertEqual(result.status["status"], "official_no_regular_trade")
+
+    def test_tpex_triple_dash_ohlc_and_volume_becomes_no_regular_trade(self):
+        result = classify_price_row(TARGET, "tpex_price", "TPEx", FIELDS, TRIPLE_DASH_ROW, INDICES, "a" * 64)
+        self.assertIsNone(result.price)
+        self.assertEqual(result.status["status"], "official_no_regular_trade")
+        self.assertRegex(result.status["evidence_sha256"], r"^[0-9a-f]{64}$")
+
+    def test_prose_marker_is_not_accepted_as_no_regular_trade(self):
+        with self.assertRaisesRegex(ValueError, "official price row is invalid"):
+            classify_price_row(TARGET, "tpex_price", "TPEx", FIELDS, PROSE_MARKER_ROW, INDICES, "a" * 64)
 
     def test_blank_ohlc_with_positive_volume_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "official price row is invalid"):
@@ -206,12 +219,17 @@ class TwTradingStatusTests(unittest.TestCase):
   - `test_valid_zero_volume_ohlc_remains_regular_price`
   - `test_twse_price_checks_only_twse_required_symbols`
   - `test_tpex_price_checks_only_tpex_required_symbols`
-  - `test_conditional_lifecycle_loading_skips_when_no_unresolved_symbols`
+  - `test_conditional_lifecycle_loading_skips_when_all_required_rows_are_regular`
+  - `test_blank_row_plus_covering_lifecycle_interval_becomes_suspended`
+  - `test_absent_price_row_plus_covering_lifecycle_interval_becomes_suspended`
+  - `test_suspended_price_context_requires_payload_and_paired_optional_row_fields`
+  - `test_blank_row_requires_valid_lifecycle_context_before_no_regular_trade`
   - `test_price_and_status_maps_are_disjoint`
   - `test_valid_price_conflicting_with_suspension_fails_snapshot`
   - `test_daily_snapshot_manifest_changes_when_status_evidence_changes`
   - `test_v1_warm_cache_with_complete_required_universe_remains_readable`
   - `test_v1_warm_cache_cannot_classify_missing_active_price`
+  - `test_incomplete_v1_price_cache_is_not_rescued_by_lifecycle_status`
   - `test_v2_warm_cache_recomputes_payload_and_row_hashes_without_network`
 
 - [ ] Extend `tests/test_tw_official_bulk.py::test_cache_round_trip_is_hash_verified_and_secret_free` to assert the v2 payload object is content-addressed, the exact raw payload hash is recomputed, query parameters are absent from metadata, and a one-byte payload mutation raises `OfficialCacheError`.
@@ -234,17 +252,18 @@ git commit -m "test: freeze TW non-price source evidence"
 ### Minimal GREEN
 
 - [ ] Implement canonical JSON and SHA-256 with `json.dumps(..., sort_keys=True, separators=(",", ":"), allow_nan=False)` and `hashlib.sha256`; add no dependency.
-- [ ] Classify a price raw row in `tw_trading_status.classify_price_row()`:
-  - All 4 OHLC fields empty markers AND volume empty or zero -> `official_no_regular_trade`.
+- [ ] Classify a price raw row in `tw_trading_status.classify_price_row()` without reusing the broader numeric `_EMPTY_MARKERS` set:
+  - All 4 OHLC fields are null/blank or exact dash tokens (`-`, `--`, `---`, `----`) AND volume is the same or zero -> `official_no_regular_trade`.
+  - Prose or any other non-numeric token -> raise `ValueError`.
   - All 4 OHLC fields empty markers AND volume > 0 -> raise `ValueError`.
   - Partial empty OHLC fields -> raise `ValueError`.
   - Valid numeric OHLC AND volume == 0 -> `regular_price`.
   - No OHLC synthesis from average price, last trade price, bid/ask quotes, or prior day price.
 - [ ] Implement `required_symbols_by_exchange` partitioning: `twse_price` checks TWSE symbols; `tpex_price` checks TPEx symbols.
-- [ ] Implement conditional lifecycle loading: after price raw row classification, calculate unresolved required symbols per exchange. Only fetch/load lifecycle endpoints for an exchange if unresolved symbols exist. If all required symbols for an exchange are resolved by price raw rows, skip lifecycle fetch for that exchange.
+- [ ] Implement conditional lifecycle loading: reject an incomplete v1 price cache and obtain/cache v2 raw bytes first; after raw-row classification, calculate non-regular required symbols per exchange. Load both lifecycle endpoints when any required row is blank or absent; skip them only when all required rows are regular prices. Require valid complete lifecycle hashes before a blank row becomes `official_no_regular_trade`.
 - [ ] Parse `suspend`, `resume`, and `terminate`; reject future announcements and same-date contradictions; compute target state from frozen precedence.
-- [ ] Extend `store_cached_source()` and `load_cached_source()` with a separate v2 raw-payload path. Keep current v1 readable for canonical price-only hits per exchange.
-- [ ] Build `price_by_symbol` and `trading_status_by_symbol` as disjoint `MappingProxyType` mappings. Lifecycle status wins only when independently proven; a valid price/lifecycle conflict raises `OfficialSourceFailure`.
+- [ ] Extend `store_cached_source()` and `load_cached_source()` with the exact price-cache-v2 metadata fields from the design, deterministic gzip `mtime=0`, immutable identity checks, and a separate raw-payload path. Keep current v1 readable for complete canonical price hits per exchange and unchanged for institutional/margin sources.
+- [ ] Build `price_by_symbol` and `trading_status_by_symbol` as disjoint `MappingProxyType` mappings. A covering lifecycle suspension takes precedence over a blank-row candidate and retains both evidence hashes; a valid price/lifecycle conflict raises `OfficialSourceFailure`.
 - [ ] Advance official snapshot source schema to `tw-official-historical-v3` and bind all used status hashes into daily and series manifest hashes.
 
 ### GREEN command
@@ -292,7 +311,7 @@ def build_stock_snapshot(
 ): ...
 ```
 
-`ArtifactDateAudit` adds immutable `observation_by_symbol` and `observation_kind_by_symbol` mappings while retaining `latest_by_symbol` as the latest regular-price date.
+`stock_papi.quant.tw_artifact_audit.ArtifactDateAudit` adds immutable `observation_by_symbol` and `observation_kind_by_symbol` mappings while retaining `latest_by_symbol` as the latest regular-price date. `tw_incremental.load_incremental_artifact()` uses separate exact schema-v1 and schema-v2 validators; it does not loosen the v1 path.
 
 ### RED tests
 
@@ -302,6 +321,7 @@ def build_stock_snapshot(
   - `test_status_query_returns_immutable_same_symbol_same_date_evidence`
   - `test_status_query_rejects_evidence_from_other_symbol_date_or_series`
   - `test_regular_price_and_status_cannot_both_exist_for_symbol_date`
+  - `test_incremental_loader_accepts_exact_status_schema_v2_and_keeps_v1_strict`
 
 The first test must assert literal equality of the full pre-run `daily` array, not only its length.
 
@@ -357,7 +377,7 @@ git commit -m "test: freeze TW status artifact and terminal semantics"
 - [ ] In the CLI patch wrapper, pass only the fetched symbol's verified status into `build_stock_snapshot()`.
 - [ ] Pass `required_symbols_by_exchange` into `build_official_snapshot_series()` so exchange-specific cache-v1 compatibility is decided before the symbol loop.
 - [ ] In `build_stock_snapshot()`, retain existing strict target-date check when status is absent. When status is present, require `as_of < target_market_date`, exact symbol/date/source lineage, and an existing non-empty history; set artifact schema/date/status fields without appending a row.
-- [ ] Extend `write_stock_artifact()` and `_validated_artifact()` to require artifact schema v2 for status-aware TW observation runs and validate:
+- [ ] Extend `write_stock_artifact()`, `tw_incremental.load_incremental_artifact()`, and `_validated_artifact()` with separate exact schema-v1/v2 branches. Require artifact schema v2 for status-aware TW observation runs and validate:
 
 ```python
 document["as_of"] == document["latest_regular_price_date"] == latest_daily_date
@@ -366,8 +386,8 @@ document["observation_as_of"] == document["target_market_date"]
 ```
 
 - [ ] Extend `audit_artifact_dates()` without changing the meaning of `latest_by_symbol`.
-- [ ] Replace the single target-date predicate in `_assert_complete()` with a three-set partition. Verify each status evidence SHA against the exact daily snapshot and official series manifest. Keep existing strict checkpoint identity, exclusion parsing, official lineage, reconciliation history, and applied-artifact SHA checks.
-- [ ] Treat missing history, unknown missing price, termination-in-active-universe, or evidence mismatch as `_INCOMPLETE`; do not add them to an allowlist or exclusion file.
+- [ ] Replace the single target-date predicate in `_assert_complete()` with the frozen partition: regular plus expected-non-price must equal terminal-active symbols; validated pending/excluded symbols form `operational_failed_symbols`; all three sets must equal the configured universe without overlap. Verify each status evidence SHA against the exact daily snapshot and official series manifest. Keep existing strict checkpoint identity, exclusion parsing, official lineage, reconciliation history, and applied-artifact SHA checks.
+- [ ] Treat active-symbol runtime/artifact failure, missing history, unknown missing price, termination-in-active-universe, or evidence mismatch as `_INCOMPLETE`; never convert it to `operational_failed_symbols`, an allowlist, or an exclusion-file mutation.
 
 ### GREEN command
 
@@ -443,6 +463,7 @@ Assert exact arithmetic from spec and absence of `market_as_of` in v3.
 - [ ] Add to `tests/test_local_quant_task.py`:
 
   - `test_uploader_validates_v3_partition_and_status_hashes_before_copy`
+  - `test_uploader_requires_status_observation_list_for_v3_dashboard_source`
   - `test_uploader_uploads_v3_objects_and_manifest_before_pointer`
   - `test_uploader_rejects_unknown_or_mixed_schema_without_gcloud_copy`
 
@@ -471,7 +492,7 @@ git commit -m "test: freeze TW status manifest v3 trust boundary"
 - [ ] Write immutable v3 manifest, then atomically write schema-v3 latest pointer. Reuse current identical-rerun comparison and immutable-object checks.
 - [ ] In `reporting/source_loader.py`, dispatch on exact schema version before reading entries. v2 keeps every existing equality. v3 validates arithmetic, disjoint partitions, dates, entry/object sizes, compressed/uncompressed hashes, artifact schema v2, and evidence cross-bindings.
 - [ ] In `quant_snapshots.py`, include manifest schema plus manifest SHA in cache identity so a v2 cached object cannot mask a v3 pointer. Return `None` on every mismatch.
-- [ ] In `upload_local_quant.ps1`, add a schema-v3 validation branch. Reject before `Invoke-GcloudCopyBatch` unless local pointer, manifest, all referenced objects, counters, dates, and hashes pass. Keep immutable objects/manifest before pointer and existing generation-matched pointer update.
+- [ ] In `upload_local_quant.ps1`, add a schema-v3 validation branch. Reject before `Invoke-GcloudCopyBatch` unless local pointer, manifest, all referenced objects, counters, dates, hashes, and the evidence-bound dashboard status list pass. Keep immutable objects/manifest before pointer and existing generation-matched pointer update.
 - [ ] Leave `reporting/migrate_quant_manifest.py` unchanged and cover that decision with v2 compatibility tests.
 
 ### GREEN commands
@@ -535,6 +556,11 @@ Use one regular artifact and two status artifacts with deliberately extreme stal
   - `test_professional_report_rejects_unbound_status_observation`
   - `test_status_does_not_enter_positive_risk_or_high_anomaly_lists`
 
+- [ ] Add to `tests/test_professional_report_html.py`:
+
+  - `test_professional_template_lists_status_separately_from_stock_events`
+  - `test_professional_template_dates_last_regular_close_explicitly`
+
 - [ ] Add to `tests/test_observation_public_surfaces.py`:
 
 ```python
@@ -555,7 +581,7 @@ Also add `test_report_view_rejects_status_without_evidence_hash` and `test_repor
 ### RED command
 
 ```powershell
-.\.venv\Scripts\python.exe -B -m unittest tests.test_observation_products tests.test_professional_report_builder tests.test_observation_public_surfaces -v
+.\.venv\Scripts\python.exe -B -m unittest tests.test_observation_products tests.test_professional_report_builder tests.test_professional_report_html tests.test_observation_public_surfaces -v
 ```
 
 Expected: failures because status symbols still flow through latest-price calculations and the report/public contracts have no separate status list.
@@ -563,7 +589,7 @@ Expected: failures because status symbols still flow through latest-price calcul
 ### RED commit boundary
 
 ```powershell
-git add -- tests/test_observation_products.py tests/test_professional_report_builder.py tests/test_observation_public_surfaces.py
+git add -- tests/test_observation_products.py tests/test_professional_report_builder.py tests/test_professional_report_html.py tests/test_observation_public_surfaces.py
 git commit -m "test: freeze TW status report presentation"
 ```
 
@@ -576,6 +602,7 @@ git commit -m "test: freeze TW status report presentation"
 - [ ] In `observation_view.py`, branch on `observation_kind` before reading `latest` as current. For status, expose no `price`, returns, volume, indicator, technical, risk-event, or recommendation values.
 - [ ] In `report_view.py`, validate exact keys, labels, dates, symbol syntax, and 64-hex evidence SHA before returning status data.
 - [ ] In `report_observation.html`, add a status section separate from `stock_events`.
+- [ ] In `reports/post_close_professional.html`, render the same factual status list separately from technical events and date any optional last regular close explicitly.
 - [ ] In `stock_detail.html`, use a status-first branch. The regular branch remains byte-for-byte behaviorally equivalent; the status branch shows the verified label and optionally the explicitly dated last regular close.
 
 The required consumer guard is:
@@ -590,7 +617,7 @@ return build_regular_price_observation(stock, latest)
 ### GREEN command
 
 ```powershell
-.\.venv\Scripts\python.exe -B -m unittest tests.test_observation_products tests.test_professional_report_builder tests.test_observation_public_surfaces -v
+.\.venv\Scripts\python.exe -B -m unittest tests.test_observation_products tests.test_professional_report_builder tests.test_professional_report_html tests.test_observation_public_surfaces -v
 ```
 
 Required: zero failures/errors; regular-price dashboard/report snapshots remain unchanged except for empty status list required by v3 sources.
@@ -598,7 +625,7 @@ Required: zero failures/errors; regular-price dashboard/report snapshots remain 
 ### GREEN commit boundary
 
 ```powershell
-git add -- stock_papi/batch/observation_products.py reporting/observation_v2.py reporting/professional_builder.py stock_papi/services/observation_view.py stock_papi/services/report_view.py templates/report_observation.html templates/stock_detail.html
+git add -- stock_papi/batch/observation_products.py reporting/observation_v2.py reporting/professional_builder.py stock_papi/services/observation_view.py stock_papi/services/report_view.py templates/report_observation.html templates/reports/post_close_professional.html templates/stock_detail.html
 git commit -m "feat: render verified TW non-price status"
 ```
 
@@ -611,7 +638,7 @@ Stop after B4 for whole-branch review and separately authorized full verificatio
 Run only after B1-B4 are all green:
 
 ```powershell
-.\.venv\Scripts\python.exe -B -m unittest tests.test_tw_trading_status tests.test_tw_official_bulk tests.test_tw_official_historical tests.test_tw_incremental tests.test_tw_official_post_close_cli tests.test_local_quant tests.test_local_quant_publish tests.test_daily_report_source tests.test_quant_snapshot_repository tests.test_local_quant_task tests.test_observation_products tests.test_professional_report_builder tests.test_observation_public_surfaces -v
+.\.venv\Scripts\python.exe -B -m unittest tests.test_tw_trading_status tests.test_tw_official_bulk tests.test_tw_official_historical tests.test_tw_incremental tests.test_tw_official_post_close_cli tests.test_local_quant tests.test_local_quant_publish tests.test_daily_report_source tests.test_quant_snapshot_repository tests.test_local_quant_task tests.test_observation_products tests.test_professional_report_builder tests.test_professional_report_html tests.test_observation_public_surfaces -v
 
 .\.venv\Scripts\python.exe -m py_compile local_quant.py stock_papi/integrations/market_data/tw_trading_status.py stock_papi/integrations/market_data/tw_official_bulk.py stock_papi/integrations/market_data/tw_official_historical.py stock_papi/integrations/market_data/tw_official_cache.py stock_papi/quant/tw_incremental.py stock_papi/quant/tw_artifact_audit.py stock_papi/batch/tw_official_post_close_cli.py reporting/schemas.py reporting/source_loader.py stock_papi/repositories/quant_snapshots.py stock_papi/batch/observation_products.py reporting/observation_v2.py reporting/professional_builder.py stock_papi/services/observation_view.py stock_papi/services/report_view.py
 

@@ -23,7 +23,7 @@ Three approaches were considered:
 A symbol observed for the target session has exactly one `observation_kind`:
 
 - `regular_price`: verified target-session OHLCV exists.
-- `official_no_regular_trade`: the target-date official price payload contains the same symbol, all four OHLC cells are official empty markers, and volume is either an empty marker or zero.
+- `official_no_regular_trade`: the target-date official price payload contains the same symbol, all four OHLC cells are official empty markers, volume is either an empty marker or zero, and valid lifecycle sources prove neither a covering suspension nor an effective termination.
 - `officially_suspended`: an independent official lifecycle record proves that suspension covers the target session.
 
 Any other missing-price state is unrecognized and fails closed. A symbol with no prior valid regular-price artifact also fails closed in this phase; status-only bootstrap is out of scope.
@@ -56,19 +56,20 @@ Rules:
 - `tpex_price` checks completeness against `required_symbols_by_exchange.get("TPEx", ())`.
 - Institutional (`twse_institutional`, `tpex_institutional`) and margin (`twse_margin`, `tpex_margin`) sources do not use per-symbol required completeness; they retain existing source coverage gates (TWSE institutional >= 500, TWSE margin >= 400, TPEx institutional >= 300, TPEx margin >= 300).
 - A v1 cache for a price source is reusable only when every required symbol for that exchange has a canonical price row.
-- If any required symbol for an exchange lacks a canonical price row and needs status classification, v2 raw evidence or lifecycle evidence is mandatory.
+- If any required symbol lacks a canonical price row, that price source must be reloaded into cache v2 so the complete raw payload can be checked for a price/status conflict. Lifecycle evidence cannot make an incomplete v1 price cache reusable.
 
 ### Conditional lifecycle loading
 
-Lifecycle sources are loaded conditionally based on unresolved required symbols:
+Lifecycle sources are loaded conditionally based on non-regular required symbols:
 
-1. Parse both price sources (`twse_price`, `tpex_price`).
-2. Classify price raw rows into `regular_price` and `official_no_regular_trade`.
-3. Compute unresolved required symbols per exchange.
-4. Only if unresolved required symbols exist for an exchange, load that exchange's lifecycle sources (`twse_suspend_resume`, `twse_termination` for TWSE; `tpex_suspend_resume`, `tpex_termination` for TPEx).
-5. If a required lifecycle source is missing, expired, contradictory, or hash-mismatched, unresolved symbols fail closed.
-6. When all required symbols for an exchange are classified by price raw rows (`regular_price` or `official_no_regular_trade`), unused lifecycle sources are not requested and their unavailability does not block the snapshot.
-7. The daily snapshot manifest binds only the lifecycle source hashes and status evidence records that were actually used.
+1. Load both price sources (`twse_price`, `tpex_price`). If a v1 cache lacks any required canonical row for its exchange, treat it as a cache miss and obtain a complete v2 raw payload before classification.
+2. Classify price raw rows into final `regular_price`, provisional blank-row candidates, and missing-row candidates.
+3. Compute non-regular required symbols per exchange only after the v2 raw payload has been checked for a valid price row.
+4. If any non-regular required symbol exists for an exchange, load both lifecycle sources for that exchange (`twse_suspend_resume`, `twse_termination` for TWSE; `tpex_suspend_resume`, `tpex_termination` for TPEx). A missing, expired, contradictory, incomplete, or hash-mismatched required source fails closed.
+5. Evaluate the complete lifecycle payload against every required symbol for that exchange. A covering suspension plus valid OHLCV is a conflict and fails the snapshot. A covering suspension plus a blank or absent price row becomes `officially_suspended`.
+6. A provisional blank-row candidate becomes `official_no_regular_trade` only when both lifecycle sources are valid and no covering suspension or termination exists. A missing-row candidate without a covering suspension remains unresolved and fails closed.
+7. When all required symbols for an exchange have regular price rows, lifecycle sources are not requested and their unavailability does not block the snapshot.
+8. The daily snapshot manifest binds only lifecycle source hashes that were loaded, including the no-event hashes used to distinguish a blank-row no-trade observation from a suspension.
 
 ### Frozen lifecycle endpoint contract
 
@@ -81,10 +82,10 @@ Lifecycle evidence is accepted only from these four official exchange endpoints:
 | `twse_termination` | TWSE | 終止上市公司資訊 | `https://www.twse.com.tw/rwd/zh/company/delisting` | `{"response": "json"}` | 5 MB |
 | `tpex_termination` | TPEx | 終止上櫃公司資訊 | `https://www.tpex.org.tw/www/zh-tw/company/delisting` | `{"response": "json"}` | 5 MB |
 
-Pagination rules: Each endpoint returns a single-page bounded JSON response. If `count` or `total` indicates additional pages, pagination completes sequentially until all records are fetched. If pagination fails or yields duplicate page identities, the source fails closed.
+Retrieval rules: issue `GET` to the query-free URL with only the frozen parameters above, require HTTP 200 and a JSON content type, read at most the stated limit, and hash the exact response bytes before decoding. These contracts expect one bounded response. If `count`, `total`, or equivalent metadata proves that returned rows are incomplete, fail closed; do not guess undocumented pagination parameters. Supporting documented pagination later requires a new parser version and contract revision.
 
 Field mappings:
-- `announcement_id`: `exchange` + announcement number or record index
+- `announcement_id`: the exchange-issued identifier when present; otherwise SHA-256 of `(source_id, symbol, event_type, effective_date, raw_row_sha256)`, prefixed by the exchange
 - `announcement_date`: announcement publication date (`YYYY-MM-DD`)
 - `effective_date`: event effective date (`YYYY-MM-DD`)
 - `symbol`: normalized 4-6 digit numeric symbol
@@ -92,7 +93,7 @@ Field mappings:
 
 Sanitized fixture provenance: Test fixtures are derived from sanitized offline JSON responses of the above endpoints stored under `tests/fixtures/tw_lifecycle/`.
 
-### Content-addressed cache v2
+### Lifecycle cache v1
 
 Lifecycle payloads live independently from daily price caches:
 
@@ -101,7 +102,7 @@ Lifecycle payloads live independently from daily price caches:
 <DataRoot>/source-cache/tw-lifecycle/v1/index/<target_market_date>.json
 ```
 
-The immutable object contains the exact response bytes, deterministically gzipped. The atomic index contains only validated references. Existing objects are never overwritten. The index schema is:
+The immutable object contains the exact response bytes, deterministically gzipped with `mtime=0`. The atomic index contains only validated references. Existing objects are never overwritten. The index schema is:
 
 ```json
 {
@@ -127,7 +128,7 @@ The immutable object contains the exact response bytes, deterministically gzippe
 }
 ```
 
-`valid_from <= target_market_date <= valid_through` is mandatory. A missing source when required, expired interval, hash/size mismatch, parser mismatch, malformed raw row, contradictory event, or incomplete pagination makes the lifecycle index unusable. A valid cache hit performs zero requests.
+Lifecycle indexes are point-in-time observations: `valid_from == valid_through == target_market_date`. Reusing an index for another session is forbidden even when an open suspension spans both dates. A missing source when required, another validity range, hash/size mismatch, parser mismatch, malformed raw row, contradictory event, or incomplete response makes the lifecycle index unusable. A valid cache hit performs zero requests.
 
 ### Normalized lifecycle event
 
@@ -140,7 +141,7 @@ Each accepted event is canonical JSON with these exact fields:
   "exchange": "TWSE",
   "symbol": "numeric symbol",
   "event_type": "suspend",
-  "announcement_id": "exchange-issued identifier",
+  "announcement_id": "official or deterministic identifier",
   "announcement_date": "YYYY-MM-DD",
   "effective_date": "YYYY-MM-DD",
   "source_id": "twse_suspend_resume",
@@ -162,6 +163,8 @@ Each accepted event is canonical JSON with these exact fields:
 - An announcement dated after `target_market_date` cannot prove the target session.
 - `officially_suspended` requires exactly one open, non-terminated suspension interval containing the target session.
 
+The normalized status evidence records `valid_from`, `valid_through_exclusive` (null only when the interval is still open in the target-date payload), and `evaluated_through == target_market_date`. These values and the complete opening/closing event chain are covered by `evidence_sha256`; a later target session requires a separately fetched or cached point-in-time index.
+
 No Production module contains a symbol-specific branch, allowlist, or constant.
 
 ## B. Daily non-price evidence
@@ -170,7 +173,7 @@ No Production module contains a symbol-specific branch, allowlist, or constant.
 
 The price parser classifies raw rows before attempting numeric conversion. The classification rules are:
 
-1. **OHLC All Blank**: All four OHLC fields (`open`, `max`/high, `min`/low, `close`) MUST be official empty markers (`None` or blank text).
+1. **OHLC All Blank**: All four OHLC fields (`open`, `max`/high, `min`/low, `close`) MUST be one of the exact non-price markers: JSON null/Python `None`, empty or whitespace-only text, `-`, `--`, `---`, or `----` after HTML stripping and whitespace normalization. Numeric parsing's broader `_EMPTY_MARKERS` set is not reused; prose such as `暫停交易` or `除權息` is not a non-price marker and fails closed.
 2. **Volume Rule**: `volume` / `Trading_Volume` can be an official empty marker OR normalized to `0.0`.
 3. **Blank OHLC + Positive Volume -> REJECT**: If all four OHLC fields are empty markers but volume is positive (`volume > 0`), the row is malformed and raises `ValueError`.
 4. **Partial Blank OHLC -> REJECT**: If some OHLC fields are empty markers and others are numeric, the row is malformed and raises `ValueError`.
@@ -190,6 +193,10 @@ The normalized evidence is:
   "source_id": "tpex_price",
   "payload_sha256": "64-hex",
   "raw_row_sha256": "64-hex",
+  "lifecycle_source_sha256": {
+    "tpex_suspend_resume": "64-hex",
+    "tpex_termination": "64-hex"
+  },
   "raw_fields": {
     "symbol": "raw text",
     "name": "raw text",
@@ -199,37 +206,104 @@ The normalized evidence is:
     "close": "raw text",
     "volume": "raw text"
   },
-  "parser_version": "tw-official-historical-parser-v3"
+  "parser_version": "tw-official-historical-parser-v3",
+  "evidence_sha256": "64-hex"
 }
 ```
 
+Every status evidence document, including `official_no_regular_trade`, has `evidence_sha256`. It is SHA-256 of canonical UTF-8 JSON for the complete evidence document with that field omitted, using sorted keys, compact separators, and no NaN. For `official_no_regular_trade`, `lifecycle_source_sha256` binds the two valid exchange lifecycle payloads used for the precedence check; an absent or empty mapping is invalid.
+
 ### `officially_suspended`
 
-The evidence uses the same envelope fields but `status` is `officially_suspended` and `lifecycle_events` contains the exact normalized event records that open and, when applicable, bound the interval. `evidence_sha256` is computed over the complete normalized status evidence excluding the `evidence_sha256` field itself.
+Suspension evidence has these exact status-specific fields in addition to the common schema/market/exchange/symbol/target/parser/hash fields:
 
-Price-row absence never creates this status. If lifecycle evidence says suspended while the same session has valid OHLCV, or termination covers the session, the snapshot is contradictory and fails closed. When a blank official price row corroborates suspension, the lifecycle evidence remains primary and both hashes are retained.
+```json
+{
+  "status": "officially_suspended",
+  "price_context": {
+    "source_id": "tpex_price",
+    "payload_sha256": "64-hex",
+    "raw_row_sha256": null,
+    "raw_fields": null
+  },
+  "lifecycle_source_sha256": {
+    "tpex_suspend_resume": "64-hex",
+    "tpex_termination": "64-hex"
+  },
+  "lifecycle_events": [
+    {
+      "schema_version": 1,
+      "market": "TW",
+      "exchange": "TPEx",
+      "symbol": "numeric symbol",
+      "event_type": "suspend",
+      "announcement_id": "official or deterministic identifier",
+      "announcement_date": "YYYY-MM-DD",
+      "effective_date": "YYYY-MM-DD",
+      "source_id": "tpex_suspend_resume",
+      "payload_sha256": "64-hex",
+      "raw_row_sha256": "64-hex",
+      "parser_version": "tw-lifecycle-parser-v1"
+    }
+  ],
+  "valid_from": "YYYY-MM-DD",
+  "valid_through_exclusive": null,
+  "evaluated_through": "YYYY-MM-DD",
+  "evidence_sha256": "64-hex"
+}
+```
+
+`lifecycle_events` contains the exact normalized records that open and, when applicable, bound the interval. `price_context` is conflict-checking context, not the proof of suspension: its payload hash is always required, while `raw_row_sha256` and `raw_fields` are both null when the price payload omits the symbol and both populated when a blank row corroborates the lifecycle evidence. Any other null/populated combination is invalid. `evidence_sha256` covers the complete normalized status evidence with only that field omitted.
+
+Price-row absence never creates this status. If lifecycle evidence says suspended while the same session has valid OHLCV, or termination covers the session, the snapshot is contradictory and fails closed. When a blank official price row corroborates suspension, the lifecycle evidence remains primary and both the price-row and lifecycle hashes are retained. This precedence is why lifecycle sources are required whenever a required symbol is not `regular_price`.
 
 ## C. Snapshot and cache contract
 
 `OfficialDailySnapshot` gains one immutable mapping:
 
 ```python
-trading_status_by_symbol: Mapping[str, Mapping[str, Any]]
+trading_status_by_symbol: Mapping[str, Mapping[str, Any]] = MappingProxyType({})
 ```
 
-For a date, `price_by_symbol` and `trading_status_by_symbol` are disjoint. Every status record must match the snapshot date and symbol. The daily snapshot manifest hash includes sorted price source hashes, lifecycle source hashes, and each status `evidence_sha256`.
+The empty immutable default preserves existing price-only constructors; a v3 builder explicitly supplies the validated mapping. For a date, `price_by_symbol` and `trading_status_by_symbol` are disjoint. Every status record must match the snapshot date and symbol. The daily snapshot manifest hash includes sorted price source hashes, lifecycle source hashes, and each status `evidence_sha256`.
 
-Daily official cache v2 stores exact raw response bytes as well as canonical parsed rows:
+Daily official cache v2 applies only to `twse_price` and `tpex_price`, where raw-row status proof and price/status conflict detection are required. Institutional and margin sources keep their existing hash-verified v1 cache and coverage gates. The price cache stores exact raw response bytes as well as canonical parsed rows:
 
 ```text
 <DataRoot>/source-cache/tw-official/v2/<date>/<source-id>/objects/<payload_sha256>.json.gz
 <DataRoot>/source-cache/tw-official/v2/<date>/<source-id>/metadata.json
 ```
 
+The exact metadata schema is:
+
+```json
+{
+  "schema_version": 2,
+  "source_schema_version": "tw-official-historical-v3",
+  "source_id": "tpex_price",
+  "target_market_date": "YYYY-MM-DD",
+  "source_url_identifier": "query-free official URL",
+  "parser_version": "tw-official-historical-parser-v3",
+  "payload": "objects/<64-hex>.json.gz",
+  "payload_sha256": "64-hex",
+  "compressed_sha256": "64-hex",
+  "compressed_size": 1,
+  "uncompressed_size": 1,
+  "raw_row_count": 1,
+  "canonical_price_row_count": 0,
+  "non_price_candidate_row_count": 1,
+  "canonical_rows_sha256": "64-hex",
+  "non_price_candidate_rows_sha256": "64-hex",
+  "fetched_at": "RFC3339 UTC"
+}
+```
+
+The object is deterministic gzip (`mtime=0`) of the exact response bytes. `raw_row_count` counts rows in the selected official price table, `canonical_rows_sha256` hashes canonical JSON of sorted price rows, and `non_price_candidate_rows_sha256` hashes canonical JSON of sorted blank-row candidates before lifecycle precedence is applied. Final status evidence is not written back into a source-specific price cache; it is bound by the immutable daily snapshot manifest. An existing `(target_market_date, source_id, parser_version)` metadata identity that points to different bytes is contradictory and is not overwritten or silently refetched.
+
 Cache v1 remains readable for canonical price rows. It cannot prove a non-price status because it lacks raw payload and raw-row identity. Therefore:
 
 - a v1 cache hit for a price source is accepted only when every required symbol for that exchange has a canonical price row;
-- if a missing active price needs classification, v2 raw evidence or lifecycle evidence is mandatory;
+- if a required canonical price is missing, a complete v2 raw price payload is mandatory before either status can be accepted; lifecycle evidence is additionally mandatory for `officially_suspended`;
 - v1 is never rewritten or deleted;
 - a parser-version mismatch is a cache miss only when no incompatible metadata claims the same v2 identity; malformed or hash-mismatched existing v2 data fails closed.
 
@@ -262,13 +336,13 @@ For all kinds, `as_of == latest_regular_price_date == date(daily[-1].Date)`. For
 
 ### Terminal partition
 
-For the exact active universe, the terminal gate creates three disjoint sets:
+For the configured run universe, the terminal gate creates three disjoint sets. `terminal_active_symbols` is the configured universe minus the already validated pending and excluded states:
 
 - `regular_price_symbols`: target-date canonical price and target-date artifact.
 - `expected_non_price_symbols`: target-date, same-symbol, same-snapshot verified status and a valid prior regular-price artifact.
-- `operational_failed_symbols`: recognized runtime, artifact, pending, or excluded failures; never a substitute for missing status proof.
+- `operational_failed_symbols`: exactly the configured-universe symbols in validated pending or excluded state. A runtime, artifact, or unknown missing-price failure for a terminal-active symbol aborts the run and cannot be placed in this set.
 
-The union must equal the universe and pairwise intersections must be empty. An unclassified symbol, unknown missing price, status hash mismatch, stale `observation_as_of`, future price date, price/status conflict, or artifact/status mismatch fails the run before manifest creation. Existing strict source lineage and reconciliation checks remain required.
+`regular_price_symbols ∪ expected_non_price_symbols == terminal_active_symbols`; adding `operational_failed_symbols` must equal the configured universe, and all intersections are empty. An unclassified active symbol, unknown missing price, status hash mismatch, stale `observation_as_of`, future price date, price/status conflict, or artifact/status mismatch fails the run before manifest creation. Existing strict source lineage, exclusion-state, and reconciliation checks remain required.
 
 ## E. Manifest and publish contract
 
@@ -343,8 +417,10 @@ Observation products add `trading_status_observations` as a separate list. They 
 | Condition | Result |
 |---|---|
 | Valid target-date OHLCV | `regular_price` |
-| All 4 OHLC fields are official empty markers, volume is empty or 0, hashes valid | `official_no_regular_trade` |
-| Independent lifecycle interval covers target and hashes valid | `officially_suspended` |
+| All 4 OHLC fields are exact null/blank/dash markers (including `---`), volume is the same or 0, lifecycle sources valid with no covering interval | `official_no_regular_trade` |
+| OHLC contains prose or another non-numeric token | Reject source (`ValueError`) |
+| Independent lifecycle interval covers target, hashes valid, and no valid OHLCV conflicts | `officially_suspended` |
+| Blank/absent price with missing, incomplete, expired, contradictory, or hash-invalid lifecycle source | Reject source |
 | All 4 OHLC fields blank but volume > 0 | Reject source (`ValueError`) |
 | Partial blank OHLC fields (some blank, some numeric) | Reject source (`ValueError`) |
 | Valid numeric OHLC with volume = 0 | `regular_price` |
