@@ -37,8 +37,20 @@ $Definitions = @(
         uri = "gs://$Bucket/quant/v1/latest-TW.json"
     },
     @{
+        name = 'quant-insights-latest'
+        uri = "gs://$Bucket/quant/v1/latest-insights.json"
+    },
+    @{
         name = 'dashboard-latest'
         uri = "gs://$Bucket/dashboard/v1/latest-TW.json"
+    },
+    @{
+        name = 'reports-v1-index'
+        uri = "gs://$Bucket/reports/v1/index-TW.json"
+    },
+    @{
+        name = 'reports-v1-latest'
+        uri = "gs://$Bucket/reports/v1/latest-TW.json"
     },
     @{
         name = 'reports-v2-index'
@@ -51,6 +63,10 @@ $Definitions = @(
     @{
         name = 'reports-v2-pre-market'
         uri = "gs://$Bucket/reports/v2/latest-TW-pre_market.json"
+    },
+    @{
+        name = 'reports-v2-weekly-model'
+        uri = "gs://$Bucket/reports/v2/latest-TW-weekly_model.json"
     }
 )
 
