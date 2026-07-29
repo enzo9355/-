@@ -744,6 +744,51 @@ File Creation Time: 07082026||||||
                 target_market_date=datetime.date(2026, 7, 17),
             )
 
+    def test_taiwan_status_snapshot_preserves_last_regular_price_date(self):
+        from stock_papi.integrations.market_data.tw_trading_status import evidence_sha256
+
+        frame = pd.DataFrame(
+            {"Close": [100.0], "Volume": [1000.0]},
+            index=pd.to_datetime(["2026-07-16"]),
+        )
+        frame.index.name = "Date"
+        pipeline = SimpleNamespace(
+            get_data=lambda _symbol, _days: frame.copy(),
+            calc_all=lambda data: data,
+            get_stock_name=lambda symbol: symbol,
+        )
+        status = {
+            "schema_version": 1,
+            "status": "official_no_regular_trade",
+            "market": "TW",
+            "exchange": "TPEx",
+            "symbol": "2330",
+            "target_market_date": "2026-07-17",
+            "source_id": "tpex_price",
+            "payload_sha256": "a" * 64,
+            "raw_row_sha256": "b" * 64,
+            "raw_fields": {"open": "---", "high": "---", "low": "---", "close": "---", "volume": "0"},
+            "parser_version": "tw-official-historical-parser-v3",
+        }
+        status["evidence_sha256"] = evidence_sha256(status)
+
+        payload = build_stock_snapshot(
+            pipeline,
+            "TW",
+            "2330",
+            target_market_date=datetime.date(2026, 7, 17),
+            observation_only=True,
+            trading_status=status,
+        )
+
+        self.assertEqual(payload["schema_version"], 2)
+        self.assertEqual(payload["as_of"], "2026-07-16")
+        self.assertEqual(payload["latest_regular_price_date"], "2026-07-16")
+        self.assertEqual(payload["observation_as_of"], "2026-07-17")
+        self.assertEqual(payload["observation_kind"], "official_no_regular_trade")
+        self.assertEqual(payload["trading_status"], status)
+        self.assertEqual(len(payload["daily"]), 1)
+
     def test_taiwan_snapshot_fast_lane_uses_promoted_backtest_without_walk_forward(self):
         frame = pd.DataFrame(
             {"Close": [100.0], "AI_P": [None]},
