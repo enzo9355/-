@@ -480,6 +480,34 @@ class TWOfficialIncrementalTests(unittest.TestCase):
             with self.assertRaises(IncrementalHistoryError):
                 load_incremental_artifact(Path(temporary), "2330")
 
+    def test_schema_v2_artifact_audits_observation_separately_from_price(self):
+        status = dict(status_snapshot().trading_status_by_symbol["2330"])
+        with tempfile.TemporaryDirectory() as temporary:
+            path = write_artifact(temporary, daily=history())
+            with gzip.open(path, "rt", encoding="utf-8") as stream:
+                document = json.load(stream)
+            document.update(
+                schema_version=2,
+                target_market_date=TARGET.isoformat(),
+                observation_as_of=TARGET.isoformat(),
+                latest_regular_price_date="2026-07-22",
+                observation_kind="official_no_regular_trade",
+                trading_status=status,
+            )
+            with path.open("wb") as raw:
+                with gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as stream:
+                    stream.write(json.dumps(document).encode())
+
+            artifact = load_incremental_artifact(Path(temporary), "2330")
+            audit = audit_artifact_dates(
+                Path(temporary), ["2330"], target_date=TARGET
+            )
+
+        self.assertEqual(artifact.latest_date, datetime.date(2026, 7, 22))
+        self.assertEqual(artifact.observation_date, TARGET)
+        self.assertEqual(audit.latest_by_symbol["2330"], datetime.date(2026, 7, 22))
+        self.assertEqual(audit.observation_by_symbol["2330"], TARGET)
+
     def test_audit_records_latest_dates_and_unavailable_symbols(self):
         with tempfile.TemporaryDirectory() as temporary:
             write_artifact(temporary, daily=history(), symbol="2330")

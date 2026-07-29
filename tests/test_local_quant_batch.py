@@ -154,6 +154,28 @@ File Creation Time: 07082026||||||
             self.assertEqual(document["symbol"], "2330")
             self.assertFalse(target.with_suffix(target.suffix + ".tmp").exists())
 
+    def test_stock_artifact_writer_preserves_explicit_tw_schema_v2(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            ensure_layout(root)
+            target = write_stock_artifact(
+                root,
+                "TW",
+                "2330",
+                {
+                    "schema_version": 2,
+                    "as_of": "2026-07-16",
+                    "target_market_date": "2026-07-17",
+                    "observation_as_of": "2026-07-17",
+                    "latest_regular_price_date": "2026-07-16",
+                    "observation_kind": "official_no_regular_trade",
+                },
+            )
+
+            with gzip.open(target, "rt", encoding="utf-8") as stream:
+                document = json.load(stream)
+        self.assertEqual(document["schema_version"], 2)
+
     def test_stock_artifact_rejects_invalid_symbols_and_nonfinite_values(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
