@@ -58,6 +58,26 @@ class LocalQuantTaskTests(unittest.TestCase):
             source.index("# Upload manifest"), source.index("# Upload latest pointer")
         )
 
+    def test_uploader_has_fail_closed_manifest_v3_preflight(self):
+        source = UPLOADER.read_text(encoding="utf-8")
+
+        for required in (
+            "expected_non_price_symbols",
+            "operational_failed_symbols",
+            "regular_price_denominator",
+            "regular_price_coverage",
+            "observation_coverage",
+            "trading_status_evidence",
+            "evidence_sha256",
+            "artifact_sha256",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, source)
+        self.assertLess(
+            source.index("expected_non_price_symbols"),
+            source.index("# Upload objects"),
+        )
+
     def test_uploader_sends_market_insights_before_large_market_snapshots(self):
         source = UPLOADER.read_text(encoding="utf-8")
 

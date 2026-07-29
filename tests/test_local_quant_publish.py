@@ -13,9 +13,101 @@ from local_quant import (
     publish_market_snapshot,
     write_stock_artifact,
 )
+from stock_papi.integrations.market_data.tw_trading_status import evidence_sha256
+
+
+TARGET = datetime.date(2026, 7, 29)
+
+
+def v3_document(symbol, *, status=None):
+    latest_date = "2026-07-16" if status else TARGET.isoformat()
+    document = {
+        "schema_version": 2,
+        "as_of": latest_date,
+        "target_market_date": TARGET.isoformat(),
+        "observation_as_of": TARGET.isoformat(),
+        "latest_regular_price_date": latest_date,
+        "observation_kind": status["status"] if status else "regular_price",
+        "trading_status_evidence": status,
+        "name": symbol,
+        "model_version": "observation-source-v1",
+        "latest": {"Date": f"{latest_date}T00:00:00.000", "Close": 100.0},
+        "backtest": {},
+        "daily": [{"Date": f"{latest_date}T00:00:00.000", "Close": 100.0}],
+        "source_lineage": {
+            "source_schema_version": "tw-official-historical-v3",
+            "observation_as_of": TARGET.isoformat(),
+            "latest_regular_price_date": latest_date,
+            "observation_kind": status["status"] if status else "regular_price",
+        },
+    }
+    if status:
+        document["source_lineage"]["trading_status_evidence_sha256"] = status[
+            "evidence_sha256"
+        ]
+    return document
+
+
+def no_trade_status(symbol="2303"):
+    status = {
+        "schema_version": 1,
+        "status": "official_no_regular_trade",
+        "market": "TW",
+        "exchange": "TWSE",
+        "symbol": symbol,
+        "target_market_date": TARGET.isoformat(),
+        "source_id": "twse_price",
+        "payload_sha256": "a" * 64,
+        "raw_row_sha256": "b" * 64,
+        "raw_fields": {"open": "--", "high": "--", "low": "--", "close": "--", "volume": "0"},
+        "parser_version": "tw-official-historical-parser-v3",
+    }
+    status["evidence_sha256"] = evidence_sha256(status)
+    return status
 
 
 class LocalQuantPublishTests(unittest.TestCase):
+    def test_v3_manifest_partitions_regular_and_status_symbols(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            ensure_layout(root)
+            status = no_trade_status()
+            write_stock_artifact(root, "TW", "2330", v3_document("2330"))
+            write_stock_artifact(root, "TW", "2303", v3_document("2303", status=status))
+
+            latest_path = publish_market_snapshot(
+                root,
+                "TW",
+                ["2303", "2330"],
+                generated_at=datetime.datetime(2026, 7, 30, 6, tzinfo=TAIPEI),
+                target_market_date=TARGET,
+            )
+            latest = json.loads(latest_path.read_text(encoding="utf-8"))
+            manifest = json.loads(
+                (latest_path.parent / latest["manifest"]).read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(latest["schema_version"], 3)
+        self.assertEqual(manifest["schema_version"], 3)
+        self.assertNotIn("market_as_of", manifest)
+        self.assertEqual(manifest["target_market_date"], TARGET.isoformat())
+        self.assertEqual(manifest["observation_as_of"], TARGET.isoformat())
+        self.assertEqual(manifest["universe_count"], 2)
+        self.assertEqual(manifest["observation_count"], 2)
+        self.assertEqual(manifest["regular_price_symbol_count"], 1)
+        self.assertEqual(manifest["expected_non_price_symbol_count"], 1)
+        self.assertEqual(manifest["operational_failure_count"], 0)
+        self.assertEqual(manifest["regular_price_denominator"], 1)
+        self.assertEqual(manifest["regular_price_coverage"], 1.0)
+        self.assertEqual(manifest["observation_coverage"], 1.0)
+        self.assertEqual(manifest["operational_failure_rate"], 0.0)
+        expected = manifest["expected_non_price_symbols"]["2303"]
+        self.assertEqual(expected["status"], "official_no_regular_trade")
+        self.assertEqual(expected["evidence_sha256"], status["evidence_sha256"])
+        self.assertEqual(expected["artifact_sha256"], manifest["symbols"]["2303"]["sha256"])
+        self.assertEqual(expected["latest_regular_price_date"], "2026-07-16")
+        self.assertEqual(manifest["operational_failed_symbols"], [])
+
     def test_market_insights_publish_content_addressed_gzip_and_latest(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

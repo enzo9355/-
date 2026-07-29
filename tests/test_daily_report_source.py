@@ -6,10 +6,35 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tests.report_fixtures import stock_document, write_quant_publish
+from tests.report_fixtures import (
+    stock_document,
+    write_quant_publish,
+    write_quant_publish_v3,
+)
 
 
 class DailyReportSourceTests(unittest.TestCase):
+    def test_v3_loader_separates_regular_and_verified_status_artifacts(self):
+        from reporting.source_loader import load_report_source
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            write_quant_publish_v3(root)
+            source = load_report_source(root, market="TW")
+
+        self.assertEqual(source.manifest.schema_version, 3)
+        self.assertEqual(source.manifest.observation_as_of.isoformat(), "2026-07-29")
+        by_symbol = {stock.symbol: stock for stock in source.stocks}
+        self.assertEqual(by_symbol["2330"].observation_kind, "regular_price")
+        self.assertEqual(
+            by_symbol["2303"].observation_kind, "official_no_regular_trade"
+        )
+        self.assertEqual(
+            by_symbol["2303"].trading_status_evidence["evidence_sha256"],
+            source.manifest.expected_non_price_symbols["2303"]["evidence_sha256"],
+        )
+        self.assertEqual(by_symbol["2303"].as_of.isoformat(), "2026-07-16")
+
     def test_accepts_only_valid_manifest_listed_tw_objects(self):
         from reporting.source_loader import load_report_source
 
