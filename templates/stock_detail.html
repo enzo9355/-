@@ -23,7 +23,7 @@
 {% block content %}
 <div class="page stock-page" data-stock-code="{{ d.code }}" data-stock-name="{{ d.name }}"{% if observation_kind == "regular_price" %} data-stock-price="{{ '%.2f'|format(d.price) }}"{% endif %}>
   {% if observation_kind != "regular_price" %}
-  <header class="stock-hero" id="summary">
+  <header class="stock-hero" id="status-summary">
     <div class="hero-copy">
       <a class="back-link" href="{{ url_for('dashboard_page') }}">返回市場觀察</a>
       <p class="eyebrow">{{ market }} · {{ d.code }}</p>
