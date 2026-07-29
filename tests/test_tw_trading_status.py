@@ -246,6 +246,23 @@ class TwTradingStatusTests(unittest.TestCase):
         self.assertEqual(warm.calls, [])
         self.assertEqual(second.source_hashes, first.source_hashes)
 
+    def test_tpex_lifecycle_history_ignores_non_stock_warrant_codes(self):
+        session = LifecycleSession()
+        session.payloads["tpex_suspend_history"] = [{
+            "Date": "115", "Serial": "189", "SecuritiesCompanyCode": "72597U",
+            "CompanyName": "昇達科群益58售02", "DateOfSuspendedTrading": "1150715",
+            "TimeOfSuspendedTrading": "080000", "DateOfResumedTrading": "",
+            "TimeOfResumedTrading": "",
+        }]
+        with tempfile.TemporaryDirectory() as temporary:
+            snapshot = load_lifecycle_snapshot(
+                Path(temporary), TARGET, session=session,
+                required_symbols_by_exchange={"TPEx": {"4804"}},
+                now=datetime.datetime(2026, 7, 30, 1, tzinfo=datetime.timezone.utc),
+            )
+
+        self.assertEqual(set(snapshot.status_by_symbol), {"4804"})
+
 
 if __name__ == "__main__":
     unittest.main()
