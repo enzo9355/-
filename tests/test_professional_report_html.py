@@ -41,6 +41,18 @@ class ProfessionalReportHtmlTests(unittest.TestCase):
                 ],
                 "heatmap": [],
                 "stock_events": [],
+                "trading_status_observations": [
+                    {
+                        "symbol": "2303",
+                        "name": "測試股票 2303",
+                        "status": "official_no_regular_trade",
+                        "label": "當日無正常交易",
+                        "observation_as_of": "2026-07-17",
+                        "latest_regular_price_date": "2026-07-16",
+                        "evidence_sha256": "c" * 64,
+                        "last_regular_close": 100.0,
+                    }
+                ],
                 "etf_observations": [],
                 "daily_focus": ["市場廣度降至四成以下"],
                 "data_quality": {"coverage": 0.982, "symbol_count": 1332, "failure_count": 24},
@@ -92,6 +104,8 @@ class ProfessionalReportHtmlTests(unittest.TestCase):
             self.assertIn(f'id="{anchor}"', output)
         self.assertIn("下載完整 PDF", output)
         self.assertIn("法人流向尚未納入", output)
+        self.assertIn("當日無正常交易", output)
+        self.assertIn("最後正常交易收盤 100.00（2026-07-16）", output)
         self.assertNotIn("quant/v1/manifests/", output)
 
 

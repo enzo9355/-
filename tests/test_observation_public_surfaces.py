@@ -10,6 +10,8 @@ os.environ.setdefault("LINE_CHANNEL_ACCESS_TOKEN", "test")
 os.environ.setdefault("LINE_CHANNEL_SECRET", "test")
 
 import app as stock_app
+from stock_papi.services.report_view import build_observation_report_view
+from tests.report_fixtures import status_stock_document
 
 
 def observation_dashboard():
@@ -154,6 +156,21 @@ def quant_snapshot(symbol="2330", market="TW"):
     }
 
 
+def status_observation():
+    snapshot = status_stock_document()
+    evidence = snapshot["trading_status_evidence"]
+    return {
+        "symbol": snapshot["symbol"],
+        "name": snapshot["name"],
+        "status": snapshot["observation_kind"],
+        "label": "當日無正常交易",
+        "observation_as_of": snapshot["observation_as_of"],
+        "latest_regular_price_date": snapshot["latest_regular_price_date"],
+        "evidence_sha256": evidence["evidence_sha256"],
+        "last_regular_close": 100.0,
+    }
+
+
 class ObservationPublicSurfaceTests(unittest.TestCase):
     forbidden = (
         "五日上漲機率",
@@ -227,6 +244,77 @@ class ObservationPublicSurfaceTests(unittest.TestCase):
         self.assertNotIn("must-not-leak", html)
         chart = html.split('id="stock-chart-data"', 1)[1]
         self.assertNotIn("prediction", chart)
+
+    @patch.object(stock_app, "fetch_published_quant_snapshot")
+    def test_status_stock_page_and_line_card_never_present_stale_price_as_current(self, fetch):
+        fetch.return_value = status_stock_document()
+
+        data = stock_app.build_stock_observation(fetch.return_value)
+        response = stock_app.app.test_client().get("/stock/2303")
+        html = response.get_data(as_text=True)
+        flex = stock_app.build_stock_observation_flex(
+            "2303", "測試股票 2303", data, "https://example.com/stock/2303"
+        )
+        encoded = json.dumps(flex, ensure_ascii=False)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(data["observation_kind"], "official_no_regular_trade")
+        self.assertEqual(data["last_regular_close"], 100.0)
+        for key in (
+            "price",
+            "trend_observation",
+            "volume_ratio",
+            "rsi",
+            "macd_osc",
+            "k",
+            "d",
+            "risk_events",
+            "candles",
+        ):
+            self.assertNotIn(key, data)
+        for output in (html, encoded):
+            self.assertIn("當日無正常交易", output)
+            self.assertIn("2026-07-16", output)
+            for forbidden in ("最新收盤", "今日漲跌", "量比", "RSI", "MACD", "K 值", "D 值"):
+                self.assertNotIn(forbidden, output)
+
+    def test_report_view_accepts_only_exact_status_observation_shape(self):
+        dashboard = observation_dashboard()
+        dashboard["trading_status_observations"] = [status_observation()]
+        metadata = {
+            "schema_version": 2,
+            "product_mode": "observation",
+            "report_type": "post_close",
+            "title": "盤後市場觀察",
+            "source_market_date": "2026-07-29",
+            "applicable_trading_date": "2026-07-30",
+            "published_at": "2026-07-29T10:00:00Z",
+            "summary": [],
+            "warnings": [],
+            "content": {
+                key: dashboard[key]
+                for key in (
+                    "market_observation",
+                    "industry_observations",
+                    "heatmap",
+                    "stock_events",
+                    "trading_status_observations",
+                    "etf_observations",
+                    "daily_focus",
+                    "data_quality",
+                )
+            },
+        }
+
+        report = build_observation_report_view(metadata)
+        self.assertEqual(
+            report.core["trading_status_observations"],
+            [status_observation()],
+        )
+
+        metadata["content"]["trading_status_observations"][0]["price"] = 100.0
+        with self.assertRaisesRegex(Exception, "schema"):
+            build_observation_report_view(metadata)
 
     def test_browser_renderer_has_timeout_and_no_prediction_rendering(self):
         script = Path(stock_app.app.static_folder, "app.js").read_text(

@@ -145,6 +145,35 @@ class ProfessionalReportBuilderTests(unittest.TestCase):
         # unknown_event with high severity must NOT enter high_anomaly
         self.assertNotIn("9999", high_anomalies)
         self.assertNotIn("1111", high_anomalies)
+
+    def test_trading_status_observations_stay_out_of_event_policy(self):
+        metadata = self._metadata()
+        metadata["content"]["trading_status_observations"] = [
+            {
+                "symbol": "2303",
+                "name": "測試股票 2303",
+                "status": "official_no_regular_trade",
+                "label": "當日無正常交易",
+                "observation_as_of": "2026-07-17",
+                "latest_regular_price_date": "2026-07-16",
+                "evidence_sha256": "c" * 64,
+                "last_regular_close": 100.0,
+            }
+        ]
+
+        report = build_professional_post_close_artifact(
+            metadata, code_commit_sha="b" * 40
+        )
+        securities = report.securities.data
+
+        self.assertEqual(
+            securities["trading_status_observations"],
+            metadata["content"]["trading_status_observations"],
+        )
+        self.assertNotIn(
+            "2303", [item["symbol"] for item in securities["stock_events"]]
+        )
+        self.assertEqual(securities["uncategorized_event_count"], 1)
         
     def test_next_session_structured_logic(self):
         metadata = self._metadata()
