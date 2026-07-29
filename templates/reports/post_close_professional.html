@@ -74,6 +74,7 @@
   <section class="panel" id="security-analysis">
     <p class="eyebrow">SECURITIES AND ETF</p><h2>個股與 ETF</h2>
     {% if report.securities.status == 'available' %}
+      <h3>官方交易狀態</h3><ul>{% for item in report.securities.data.trading_status_observations %}<li>{{ item.name }}（{{ item.symbol }}）：{{ item.label }}{% if item.last_regular_close is defined %}；最後正常交易收盤 {{ '%.2f'|format(item.last_regular_close) }}（{{ item.latest_regular_price_date }}）{% endif %}</li>{% else %}<li>目前沒有已驗證的非價格交易狀態。</li>{% endfor %}</ul>
       <h3>個股異常事件</h3><ul>{% for item in report.securities.data.stock_events %}<li>{{ item.name }}（{{ item.symbol }}）：{{ item.observation }}</li>{% else %}<li>目前沒有通過條件的異常事件。</li>{% endfor %}</ul>
       <h3>ETF 觀察</h3><ul>{% for item in report.securities.data.etf_observations %}<li>{{ item.name }}（{{ item.symbol }}）</li>{% else %}<li>ETF 資料不足。</li>{% endfor %}</ul>
     {% else %}<div class="empty-state">{{ report.securities.reason }}</div>{% endif %}

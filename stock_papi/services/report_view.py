@@ -5,6 +5,9 @@ import re
 from typing import Any, Mapping
 
 from reporting.exceptions import ReportWebError
+from stock_papi.batch.observation_products import (
+    validate_trading_status_observations,
+)
 
 
 _REPORT_LABELS = {
@@ -94,7 +97,7 @@ class ObservationReportView:
     overnight_overlay: Mapping[str, Any] | None
 
 
-def _observation_core(value: Any) -> dict[str, Any]:
+def _observation_core(value: Any, source_market_date: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ReportWebError("Observation report core 不合法")
     if not isinstance(value.get("market_observation"), dict):
@@ -120,11 +123,18 @@ def _observation_core(value: Any) -> dict[str, Any]:
             raise ReportWebError(f"Observation report {key} 不合法")
     if not _valid_core_items(normalized):
         raise ReportWebError("Observation report content schema 不合法")
+    try:
+        statuses = validate_trading_status_observations(
+            value.get("trading_status_observations"), source_market_date
+        )
+    except ValueError as exc:
+        raise ReportWebError(str(exc)) from None
     return {
         "market_observation": dict(value["market_observation"]),
         "industry_observations": list(value["industry_observations"]),
         "heatmap": list(value["heatmap"]),
         "stock_events": list(value["stock_events"]),
+        "trading_status_observations": statuses,
         "etf_observations": list(value["etf_observations"]),
         "daily_focus": list(value["daily_focus"]),
         "data_quality": quality,
@@ -163,8 +173,9 @@ def build_observation_report_view(
     report_type = metadata.get("report_type")
     content = metadata.get("content")
     overlay = None
+    source_market_date = str(metadata.get("source_market_date") or "")
     if report_type == "post_close":
-        core = _observation_core(content)
+        core = _observation_core(content, source_market_date)
     elif report_type == "pre_market":
         base_metadata_sha256 = (
             content.get("base_metadata_sha256")
@@ -179,7 +190,7 @@ def build_observation_report_view(
             or base_metadata_sha256 != expected_base_metadata_sha256
         ):
             raise ReportWebError("Pre-market report base 不合法")
-        core = _observation_core(content.get("core"))
+        core = _observation_core(content.get("core"), source_market_date)
         overlay = _overnight_overlay(content.get("overnight_overlay"))
     else:
         raise ReportWebError("Observation report type 不支援")

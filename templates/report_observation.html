@@ -46,6 +46,11 @@
     <div class="mops-list">{% for item in content.stock_events[:30] %}<a href="{{ url_for('stock_page', code=item.symbol) }}"><strong>{{ item.name }}（{{ item.symbol }}）</strong><span>{{ item.observation }}</span><small>{{ item.as_of }}｜{{ item.metric_value }} {{ item.unit }}</small></a>{% else %}<div class="empty-state">目前沒有通過條件的異常事件。</div>{% endfor %}</div>
   </section>
 
+  <section class="panel" aria-labelledby="status-report-title">
+    <h2 id="status-report-title">官方交易狀態</h2>
+    <div class="mops-list">{% for item in content.trading_status_observations[:100] %}<a href="{{ url_for('stock_page', code=item.symbol) }}"><strong>{{ item.name }}（{{ item.symbol }}）</strong><span>{{ item.label }}</span><small>驗證日 {{ item.observation_as_of }}{% if item.last_regular_close is defined %}｜最後正常交易收盤 {{ '%.2f'|format(item.last_regular_close) }}（{{ item.latest_regular_price_date }}）{% endif %}</small></a>{% else %}<div class="empty-state">目前沒有已驗證的非價格交易狀態。</div>{% endfor %}</div>
+  </section>
+
   <section class="panel" aria-labelledby="etf-report-title">
     <h2 id="etf-report-title">ETF 觀察</h2>
     <div class="etf-grid">{% for item in content.etf_observations[:30] %}<article class="etf-card"><h3>{{ item.name }}（{{ item.symbol }}）</h3><p>收盤 {{ '{:,.2f}'.format(item.price) if item.price is not none else '—' }}｜單日 {{ '%+.2f%%'|format(item.return_1d_pct) if item.return_1d_pct is not none else '—' }}｜5 日 {{ '%+.2f%%'|format(item.return_5d_pct) if item.return_5d_pct is not none else '—' }}</p></article>{% else %}<div class="empty-state">ETF 觀察資料不足。</div>{% endfor %}</div>

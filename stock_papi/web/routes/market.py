@@ -107,6 +107,9 @@ def register_market_routes(
                 "industry_observations": snapshot["industry_observations"],
                 "heatmap": snapshot["heatmap"],
                 "stock_events": snapshot["stock_events"],
+                "trading_status_observations": snapshot.get(
+                    "trading_status_observations", []
+                ),
                 "etf_observations": snapshot["etf_observations"],
                 "data_quality": snapshot["data_quality"],
                 "prediction_status": "AI 預測研究中",

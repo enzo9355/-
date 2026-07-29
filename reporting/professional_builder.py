@@ -7,6 +7,9 @@ import math
 from typing import Any, Mapping
 
 from .professional_schema import ProfessionalPostCloseReport, compute_content_sha256
+from stock_papi.batch.observation_products import (
+    validate_trading_status_observations,
+)
 
 
 _AI_DISCLOSURE = (
@@ -289,6 +292,10 @@ def build_professional_post_close_artifact(
     quality = _require_mapping(content.get("data_quality"), "data_quality")
     industries = content.get("industry_observations")
     stock_events = content.get("stock_events")
+    status_observations = validate_trading_status_observations(
+        content.get("trading_status_observations"),
+        metadata.get("source_market_date"),
+    )
     etfs = content.get("etf_observations")
     daily_focus = content.get("daily_focus")
     if not all(
@@ -382,6 +389,9 @@ def build_professional_post_close_artifact(
             "data": {
                 "policy_version": EVENT_CLASSIFICATION_POLICY_VERSION,
                 "stock_events": copy.deepcopy(stock_events),
+                "trading_status_observations": copy.deepcopy(
+                    status_observations
+                ),
                 "etf_observations": copy.deepcopy(etfs),
                 "positive_observations": positive_observations,
                 "risk_observations": risk_observations,

@@ -4,6 +4,16 @@ import datetime
 import json
 import math
 
+from stock_papi.integrations.market_data.tw_trading_status import (
+    validate_status_evidence,
+)
+
+
+_STATUS_LABELS = {
+    "officially_suspended": "停止買賣",
+    "official_no_regular_trade": "當日無正常交易",
+}
+
 
 def _number(value):
     if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -63,10 +73,56 @@ def _risk_events(rows):
     return events or ["未觸發額外風險事件"]
 
 
+def _status_observation(snapshot, rows):
+    target = _date_text(snapshot.get("target_market_date"))
+    observed = _date_text(snapshot.get("observation_as_of"))
+    latest_regular = _date_text(snapshot.get("latest_regular_price_date"))
+    latest_row_date = _date_text(rows[-1].get("Date"))
+    status = snapshot.get("observation_kind")
+    if (
+        snapshot.get("market") != "TW"
+        or status not in _STATUS_LABELS
+        or target is None
+        or target != observed
+        or latest_regular is None
+        or latest_regular >= target
+        or latest_regular != snapshot.get("as_of")
+        or latest_row_date != latest_regular
+    ):
+        return None
+    try:
+        evidence = validate_status_evidence(
+            snapshot.get("trading_status_evidence"),
+            symbol=snapshot.get("symbol"),
+            target_date=datetime.date.fromisoformat(target),
+        )
+    except ValueError:
+        return None
+    if evidence["status"] != status:
+        return None
+    result = {
+        "code": str(snapshot.get("symbol") or ""),
+        "name": str(snapshot.get("name") or snapshot.get("symbol") or ""),
+        "market": "TW",
+        "observation_kind": status,
+        "status_label": _STATUS_LABELS[status],
+        "observation_as_of": observed,
+        "latest_regular_price_date": latest_regular,
+        "evidence_sha256": evidence["evidence_sha256"],
+        "quant_source": "已驗證官方交易狀態",
+        "prediction_status": "AI 預測研究中",
+    }
+    last_close = _number(rows[-1].get("Close"))
+    if last_close is not None and last_close > 0:
+        result["last_regular_close"] = last_close
+    return result
+
+
 def build_stock_observation(snapshot):
+    schema_version = snapshot.get("schema_version") if isinstance(snapshot, dict) else None
     if (
         not isinstance(snapshot, dict)
-        or snapshot.get("schema_version") != 1
+        or schema_version not in {1, 2}
         or snapshot.get("market") not in {"TW", "US"}
         or snapshot.get("sample_data") is True
         or not isinstance(snapshot.get("daily"), list)
@@ -76,9 +132,20 @@ def build_stock_observation(snapshot):
     rows = [row for row in snapshot["daily"] if isinstance(row, dict)]
     if len(rows) != len(snapshot["daily"]):
         return None
+    if schema_version == 2 and snapshot.get("observation_kind") in _STATUS_LABELS:
+        return _status_observation(snapshot, rows)
     latest = rows[-1]
     as_of = _date_text(latest.get("Date"))
     if as_of != snapshot.get("as_of"):
+        return None
+    if schema_version == 2 and (
+        snapshot.get("market") != "TW"
+        or snapshot.get("observation_kind") != "regular_price"
+        or snapshot.get("trading_status_evidence") is not None
+        or _date_text(snapshot.get("target_market_date")) != as_of
+        or _date_text(snapshot.get("observation_as_of")) != as_of
+        or _date_text(snapshot.get("latest_regular_price_date")) != as_of
+    ):
         return None
     close = _number(latest.get("Close"))
     if close is None:
@@ -123,6 +190,9 @@ def build_stock_observation(snapshot):
         "code": str(snapshot.get("symbol") or ""),
         "name": str(snapshot.get("name") or snapshot.get("symbol") or ""),
         "market": snapshot["market"],
+        "observation_kind": "regular_price",
+        "observation_as_of": as_of,
+        "latest_regular_price_date": as_of,
         "price": close,
         "as_of": as_of,
         "quant_source": "已驗證本地快照",
