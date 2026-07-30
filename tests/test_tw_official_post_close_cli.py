@@ -19,6 +19,7 @@ from stock_papi.batch import tw_official_post_close_cli as cli
 from stock_papi.batch.tw_official_post_close_cli import (
     _load_calendar_set,
     _patched_pipeline,
+    _plan_recovery_stage,
     _required_symbols_by_exchange,
     _required_trading_dates,
     run,
@@ -499,6 +500,104 @@ class TWOfficialPostCloseCLITests(unittest.TestCase):
                     target_market_date=TARGET,
                 )
 
+    def test_segment_plan_uses_observation_date_and_preserves_request_bound(self):
+        target = datetime.date(2026, 7, 29)
+        with tempfile.TemporaryDirectory() as temporary:
+            calendars = _load_calendar_set([write_calendar(temporary)])
+            first = types.SimpleNamespace(
+                observation_by_symbol=MappingProxyType({
+                    "1111": datetime.date(2026, 7, 8),
+                    "2222": datetime.date(2026, 7, 16),
+                    "3333": datetime.date(2026, 7, 24),
+                })
+            )
+            stage_target, stage_symbols, baseline = _plan_recovery_stage(
+                calendars,
+                first,
+                symbols=["1111", "2222", "3333"],
+                target_market_date=target,
+                reconcile_legacy_overlaps=True,
+            )
+            second = types.SimpleNamespace(
+                observation_by_symbol=MappingProxyType({
+                    "1111": stage_target,
+                    "2222": stage_target,
+                    "3333": datetime.date(2026, 7, 24),
+                })
+            )
+            final_target, final_symbols, final_baseline = _plan_recovery_stage(
+                calendars,
+                second,
+                symbols=["1111", "2222", "3333"],
+                target_market_date=target,
+                reconcile_legacy_overlaps=True,
+            )
+
+        self.assertEqual(stage_target, datetime.date(2026, 7, 21))
+        self.assertEqual(stage_symbols, ["1111", "2222"])
+        self.assertEqual(baseline, datetime.date(2026, 7, 8))
+        self.assertEqual(final_target, target)
+        self.assertEqual(final_symbols, ["1111", "2222", "3333"])
+        self.assertEqual(final_baseline, stage_target)
+
+    def test_cli_runs_partial_stages_without_publishing_them(self):
+        target = datetime.date(2026, 7, 29)
+        pipeline = Pipeline()
+        module = types.ModuleType("local_quant")
+        module.get_taiwan_symbols = lambda _pipeline: ["2303", "2330"]
+        module.load_stock_pipeline = lambda _root: pipeline
+        first = types.SimpleNamespace(
+            latest_by_symbol=MappingProxyType({
+                "2303": datetime.date(2026, 7, 8),
+                "2330": datetime.date(2026, 7, 24),
+            }),
+            observation_by_symbol=MappingProxyType({
+                "2303": datetime.date(2026, 7, 8),
+                "2330": datetime.date(2026, 7, 24),
+            }),
+            unavailable_symbols=(),
+        )
+        second = types.SimpleNamespace(
+            latest_by_symbol=first.latest_by_symbol,
+            observation_by_symbol=MappingProxyType({
+                "2303": datetime.date(2026, 7, 21),
+                "2330": datetime.date(2026, 7, 24),
+            }),
+            unavailable_symbols=(),
+        )
+        old = sys.modules.get("local_quant")
+        sys.modules["local_quant"] = module
+        try:
+            with tempfile.TemporaryDirectory() as temporary, patch.object(
+                cli, "audit_artifact_dates", side_effect=[first, second]
+            ), patch.object(
+                cli, "_run_stage", side_effect=[(0, set()), (0, set())]
+            ) as stage:
+                result = run(
+                    root=Path(temporary),
+                    target_market_date=target,
+                    calendar_artifacts=[write_calendar(temporary)],
+                    limit=5000,
+                    delay=0,
+                    reconcile_legacy_overlaps=True,
+                )
+        finally:
+            if old is None:
+                sys.modules.pop("local_quant", None)
+            else:
+                sys.modules["local_quant"] = old
+
+        self.assertEqual(result, 0)
+        self.assertEqual(stage.call_count, 2)
+        partial = stage.call_args_list[0].kwargs
+        final = stage.call_args_list[1].kwargs
+        self.assertEqual(partial["target_market_date"], datetime.date(2026, 7, 21))
+        self.assertEqual(partial["symbols"], ["2303"])
+        self.assertFalse(partial["publish"])
+        self.assertEqual(final["target_market_date"], target)
+        self.assertEqual(final["symbols"], ["2303", "2330"])
+        self.assertTrue(final["publish"])
+
     def test_cli_reconciliation_flag_is_explicit_opt_in(self):
         with tempfile.TemporaryDirectory() as temporary:
             calendar = write_calendar(temporary)
@@ -567,12 +666,15 @@ class TWOfficialPostCloseCLITests(unittest.TestCase):
         self.assertNotIn("historical_latest_date_counts", observed["identity"])
         self.assertNotIn("historical_unavailable_count", observed["identity"])
 
-    def test_cli_reconciliation_counts_baseline_in_session_limit(self):
+    def test_reconciliation_window_counts_baseline_in_session_limit(self):
         with tempfile.TemporaryDirectory() as temporary:
-            for symbol in ("2303", "2330"):
-                write_artifact(temporary, symbol, "2026-07-10")
+            calendars = _load_calendar_set([write_calendar(temporary)])
             with self.assertRaises(ValueError):
-                self._run_fake(temporary, reconcile=True)
+                cli._reconciliation_trading_dates(
+                    calendars,
+                    baseline_date=datetime.date(2026, 7, 10),
+                    target_market_date=TARGET,
+                )
 
     def test_cli_resume_reuses_discovered_baseline_and_series_identity(self):
         series = snapshot_series(FULL_SERIES_DATES)
@@ -680,6 +782,26 @@ class TWOfficialPostCloseCLITests(unittest.TestCase):
             "write_stock_artifact",
         ):
             self.assertIs(getattr(local, name), originals[name])
+
+    def test_cli_scopes_and_restores_segment_universe(self):
+        original_symbols = lambda _pipeline: ["2303", "2330"]
+        local = types.SimpleNamespace(
+            get_taiwan_symbols=original_symbols,
+            load_stock_pipeline=lambda _root: None,
+            run_market_batch=lambda *_args, **_kwargs: None,
+            build_stock_snapshot=lambda *_args, **_kwargs: {},
+        )
+        pipeline = Pipeline()
+        with _patched_pipeline(
+            local,
+            pipeline,
+            Mock(),
+            snapshot_series(),
+            Mock(),
+            symbols=["2303"],
+        ):
+            self.assertEqual(local.get_taiwan_symbols(pipeline), ["2303"])
+        self.assertIs(local.get_taiwan_symbols, original_symbols)
 
     def test_cli_reconciliation_recalculates_through_existing_calc_all_before_write(self):
         pipeline = Pipeline()

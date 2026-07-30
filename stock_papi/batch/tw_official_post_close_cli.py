@@ -128,6 +128,72 @@ def _reconciliation_trading_dates(
     return dates
 
 
+def _assert_audit_publishable(
+    audit: Any,
+    *,
+    symbols: list[str],
+    target_market_date: datetime.date,
+    calendars: TradingCalendarSet,
+) -> None:
+    available = set(audit.latest_by_symbol)
+    if (
+        not available
+        or available != set(audit.observation_by_symbol)
+        or len(audit.unavailable_symbols) / len(symbols) >= 0.05
+    ):
+        raise RuntimeError("historical artifact coverage is not publishable")
+    for symbol in available:
+        latest = audit.latest_by_symbol[symbol]
+        observation = audit.observation_by_symbol[symbol]
+        if (
+            latest > observation
+            or observation > target_market_date
+            or not calendars.is_session(latest)
+            or not calendars.is_session(observation)
+        ):
+            raise RuntimeError("historical artifact date is not a trading session")
+
+
+def _plan_recovery_stage(
+    calendars: TradingCalendarSet,
+    audit: Any,
+    *,
+    symbols: list[str],
+    target_market_date: datetime.date,
+    reconcile_legacy_overlaps: bool,
+    ignored_symbols: set[str] | frozenset[str] = frozenset(),
+) -> tuple[datetime.date, list[str], datetime.date]:
+    observations = audit.observation_by_symbol
+    baseline = min(
+        (
+            observations[symbol]
+            for symbol in symbols
+            if symbol not in ignored_symbols and symbol in observations
+        ),
+        default=target_market_date,
+    )
+    if baseline > target_market_date:
+        raise ValueError("historical artifacts are newer than target")
+    stage_target = baseline
+    capacity = MAX_CATCHUP_SESSIONS - int(reconcile_legacy_overlaps)
+    for _ in range(capacity):
+        if stage_target == target_market_date:
+            break
+        stage_target = calendars.next_session(stage_target)
+    if stage_target >= target_market_date:
+        return target_market_date, list(symbols), baseline
+    stage_symbols = [
+        symbol
+        for symbol in symbols
+        if symbol not in ignored_symbols
+        and symbol in observations
+        and observations[symbol] < stage_target
+    ]
+    if not stage_symbols:
+        raise RuntimeError(_INCOMPLETE)
+    return stage_target, stage_symbols, baseline
+
+
 def _enrich_batch_identity(
     identity: dict[str, Any],
     *,
@@ -383,6 +449,7 @@ def _patched_pipeline(
     audit: Any,
     *,
     backup_store: LegacyArtifactBackupStore | None = None,
+    symbols: list[str] | None = None,
 ) -> Iterator[None]:
     original_fetch = pipeline.fetch_finmind_dataset
     original_loader = local_quant.load_stock_pipeline
@@ -392,6 +459,7 @@ def _patched_pipeline(
     original_exclusion_loader = getattr(
         local_quant, "load_exclusion_list", None
     )
+    original_symbols_loader = getattr(local_quant, "get_taiwan_symbols", None)
     target_status_symbols = set(
         series.snapshots[series.target_date].trading_status_by_symbol
     )
@@ -479,6 +547,10 @@ def _patched_pipeline(
         return result
 
     try:
+        if symbols is not None:
+            if original_symbols_loader is None:
+                raise RuntimeError("TW universe loader is unavailable")
+            local_quant.get_taiwan_symbols = lambda _pipeline: list(symbols)
         pipeline.fetch_finmind_dataset = fetcher
         local_quant.load_stock_pipeline = lambda _root: pipeline
         local_quant.run_market_batch = run_market_batch_with_source
@@ -493,6 +565,8 @@ def _patched_pipeline(
             local_quant.write_stock_artifact = write_stock_artifact_with_backup
         yield
     finally:
+        if symbols is not None and original_symbols_loader is not None:
+            local_quant.get_taiwan_symbols = original_symbols_loader
         if backup_store is not None and original_writer is not None:
             local_quant.write_stock_artifact = original_writer
         local_quant.build_stock_snapshot = original_build
@@ -503,35 +577,32 @@ def _patched_pipeline(
         pipeline.fetch_finmind_dataset = original_fetch
 
 
-def run(
+def _run_stage(
     *,
+    local_quant: Any,
+    pipeline: Any,
     root: Path,
     target_market_date: datetime.date,
-    calendar_artifacts: list[Path],
+    calendars: TradingCalendarSet,
+    symbols: list[str],
+    baseline_date: datetime.date,
     limit: int,
     delay: float,
-    series_builder=build_official_snapshot_series,
-    reconcile_legacy_overlaps: bool = False,
-) -> int:
-    import local_quant
-
-    pipeline = local_quant.load_stock_pipeline(root)
-    symbols = local_quant.get_taiwan_symbols(pipeline)
-    if not symbols:
-        raise RuntimeError("TW universe is empty")
-
-    calendars = _load_calendar_set(calendar_artifacts)
+    series_builder: Any,
+    reconcile_legacy_overlaps: bool,
+    publish: bool,
+) -> tuple[int, set[str]]:
     audit = audit_artifact_dates(
         root,
         symbols,
         target_date=target_market_date,
     )
-    unavailable_ratio = len(audit.unavailable_symbols) / len(symbols)
-    if audit.earliest_latest_date is None or unavailable_ratio >= 0.05:
-        raise RuntimeError("historical artifact coverage is not publishable")
-    for value in set(audit.latest_by_symbol.values()):
-        if not calendars.is_session(value):
-            raise RuntimeError("historical artifact date is not a trading session")
+    _assert_audit_publishable(
+        audit,
+        symbols=symbols,
+        target_market_date=target_market_date,
+        calendars=calendars,
+    )
 
     resume = None
     if reconcile_legacy_overlaps:
@@ -539,9 +610,9 @@ def run(
             root, target_date=target_market_date
         )
         baseline_date = (
-            min(audit.earliest_latest_date, resume[1])
+            min(baseline_date, resume[1])
             if resume is not None
-            else audit.earliest_latest_date
+            else baseline_date
         )
         trading_dates = _reconciliation_trading_dates(
             calendars,
@@ -551,7 +622,7 @@ def run(
     else:
         trading_dates = _required_trading_dates(
             calendars,
-            earliest_latest_date=audit.earliest_latest_date,
+            earliest_latest_date=baseline_date,
             target_market_date=target_market_date,
         )
     required_symbols = _required_symbols_by_exchange(
@@ -622,10 +693,11 @@ def run(
         series,
         audit,
         backup_store=backup_store,
+        symbols=symbols,
     ):
         result = int(local_quant.main(argv))
     if result != 0:
-        return result
+        return result, set()
     applied_reconciliation_artifacts = {}
     if backup_store is not None:
         applied_reconciliation_artifacts = (
@@ -658,14 +730,82 @@ def run(
         | excluded
         | set(target_snapshot.terminated_by_symbol)
     ) - status_symbols
-    local_quant.publish_market_snapshot(
-        root,
-        "TW",
-        [str(value) for value in symbols],
-        failed_symbols=sorted(operational_failures),
-        target_market_date=target_market_date,
-    )
-    return 0
+    if publish:
+        local_quant.publish_market_snapshot(
+            root,
+            "TW",
+            [str(value) for value in symbols],
+            failed_symbols=sorted(operational_failures),
+            target_market_date=target_market_date,
+        )
+    return 0, operational_failures
+
+
+def run(
+    *,
+    root: Path,
+    target_market_date: datetime.date,
+    calendar_artifacts: list[Path],
+    limit: int,
+    delay: float,
+    series_builder=build_official_snapshot_series,
+    reconcile_legacy_overlaps: bool = False,
+) -> int:
+    import local_quant
+
+    pipeline = local_quant.load_stock_pipeline(root)
+    symbols = [str(value) for value in local_quant.get_taiwan_symbols(pipeline)]
+    if not symbols:
+        raise RuntimeError("TW universe is empty")
+    calendars = _load_calendar_set(calendar_artifacts)
+    if not calendars.is_session(target_market_date):
+        raise ValueError("target market date is not a trading session")
+
+    ignored_symbols: set[str] = set()
+    audit = audit_artifact_dates(root, symbols, target_date=target_market_date)
+    while True:
+        _assert_audit_publishable(
+            audit,
+            symbols=symbols,
+            target_market_date=target_market_date,
+            calendars=calendars,
+        )
+        stage_target, stage_symbols, baseline = _plan_recovery_stage(
+            calendars,
+            audit,
+            symbols=symbols,
+            target_market_date=target_market_date,
+            reconcile_legacy_overlaps=reconcile_legacy_overlaps,
+            ignored_symbols=ignored_symbols,
+        )
+        result, inactive = _run_stage(
+            local_quant=local_quant,
+            pipeline=pipeline,
+            root=root,
+            target_market_date=stage_target,
+            calendars=calendars,
+            symbols=stage_symbols,
+            baseline_date=baseline,
+            limit=limit,
+            delay=delay,
+            series_builder=series_builder,
+            reconcile_legacy_overlaps=reconcile_legacy_overlaps,
+            publish=stage_target == target_market_date,
+        )
+        if result != 0 or stage_target == target_market_date:
+            return result
+        ignored_symbols.update(inactive & set(stage_symbols))
+        audit = audit_artifact_dates(root, symbols, target_date=target_market_date)
+        _, _, next_baseline = _plan_recovery_stage(
+            calendars,
+            audit,
+            symbols=symbols,
+            target_market_date=target_market_date,
+            reconcile_legacy_overlaps=reconcile_legacy_overlaps,
+            ignored_symbols=ignored_symbols,
+        )
+        if next_baseline <= baseline:
+            raise RuntimeError(_INCOMPLETE)
 
 
 def main(argv=None) -> int:

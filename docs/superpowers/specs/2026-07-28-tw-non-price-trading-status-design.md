@@ -207,6 +207,8 @@ non-price status    => as_of < target_market_date and evidence symbol/date/statu
 
 The terminal gate retains checkpoint, batch identity, official-series manifest, reconciliation lineage, artifact SHA, and exclusion-file checks. It accepts a non-target price date only for an exact status member of the same target snapshot. Unknown gaps, evidence drift, price/status overlap, target-dated synthetic rows, or missing history abort the run.
 
+Catch-up progress is measured by `observation_as_of`, never by `as_of` or `latest_regular_price_date`; a verified non-price session advances observation progress without inventing a price. When the gap exceeds the ten-snapshot request bound, the same controlled invocation advances only lagging artifacts through intermediate verified sessions. Every segment retains the bound (and counts the reconciliation baseline), intermediate segments cannot publish, and only the final full-universe terminal gate may update the quant pointer.
+
 ## E. Manifest and publish contract
 
 Manifest schema v3 uses `target_market_date` and `observation_as_of`; it does not overload `market_as_of`.

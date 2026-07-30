@@ -322,6 +322,7 @@ Then run the repository's complete Python suite, PowerShell parser/release/uploa
 - Require exact top-level and nested dates, schema fingerprints, production row thresholds, non-zero TPEx margin rows, reproducible SHA, and bounded request count.
 - Recheck DataRoot allowlist, LKG, disk, ACL, lock, checkpoint identity, source manifest, universe identity, and rollback receipt immediately before mutation.
 - Run one controlled post-close recovery while Scheduled Tasks remain disabled.
+- Use `observation_as_of` as the recovery cursor. If the gap exceeds the source request bound, advance only lagging symbols in bounded, non-publishing segments; count the reconciliation baseline in every segment and publish only after the final full-universe gate.
 - Require unknown missing count zero and validate representative regular, ETF, no-regular-trade, suspended, and terminated/disposition paths from real artifacts.
 
 ### 5. Controlled publication
