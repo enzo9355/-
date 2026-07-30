@@ -89,6 +89,7 @@ Focused RED commits:
 - Normalize official lifecycle rows into hash-bound suspend/resume/terminate events.
 - Load lifecycle sources only when the configured price partition has a gap.
 - Resolve intervals and precedence, keep termination separate, and reject every unknown gap.
+- Treat later official activity as a new lifecycle era for a reused symbol; a target raw price row may supersede only a strictly earlier same-exchange termination, and the snapshot manifest binds that override.
 - Bind source schema `tw-official-historical-v3` to raw price, lifecycle, status, and termination hashes.
 
 Focused command:

@@ -217,6 +217,19 @@ class TwTradingStatusTests(unittest.TestCase):
         self.assertEqual(disposition["status"], "officially_terminated")
         self.assertNotEqual(disposition["status"], "officially_suspended")
 
+    def test_later_suspension_starts_new_lifecycle_after_reused_symbol_termination(self):
+        status = resolve_lifecycle_status(
+            [
+                event("terminate", "2008-09-01"),
+                event("suspend", "2026-07-23"),
+            ],
+            TARGET,
+            active=True,
+        )
+
+        self.assertEqual(status["status"], "officially_suspended")
+        self.assertEqual(status["valid_from"], "2026-07-23")
+
     def test_lifecycle_loader_resolves_official_intervals_and_terminations(self):
         session = LifecycleSession()
         with tempfile.TemporaryDirectory() as temporary:

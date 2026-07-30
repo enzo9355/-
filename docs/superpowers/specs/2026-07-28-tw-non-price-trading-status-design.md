@@ -106,6 +106,8 @@ Events are ordered by effective date, then `suspend`, `resume`, `terminate` prec
 - A suspension is valid on `valid_from <= target < valid_through_exclusive`.
 - A resume closes the interval on the resume session.
 - A termination effective on or before target produces `officially_terminated` and removes the symbol from the active publishable partition.
+- A later official suspension starts a new lifecycle era after an older termination of a reused symbol.
+- A target-session official raw price row (regular or all-blank OHLC) on the same exchange supersedes only a strictly earlier termination for a reused symbol. The snapshot manifest binds the superseded termination evidence hash. A same-session termination, any active suspension/price overlap, or an unbound identity conflict still aborts.
 - Multiple open suspensions, resume without an open suspension, mixed symbol/exchange events, duplicate conflicting events, or overlapping price/status identity fail closed.
 - When a covering lifecycle suspension and a blank official price row coexist, the lifecycle status wins. The blank row remains in the raw cache but is not mixed into the suspension evidence identity.
 
