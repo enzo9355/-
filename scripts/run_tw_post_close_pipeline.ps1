@@ -2,7 +2,8 @@
 param(
     [string]$DataRoot = 'D:\AbsorbData',
     [string]$TargetDate = (Get-Date).ToString('yyyy-MM-dd'),
-    [switch]$PublishObservation
+    [switch]$PublishObservation,
+    [switch]$ReconcileLegacyOverlaps
 )
 $ErrorActionPreference = 'Stop'
 if ($DataRoot -notin @('D:\AbsorbData', 'D:\StockPapiData')) { throw 'Data root is not allowlisted' }
@@ -58,6 +59,9 @@ $QuantArguments = @(
 )
 foreach ($Path in $CalendarPaths) {
     $QuantArguments += @('--calendar-artifact', $Path)
+}
+if ($ReconcileLegacyOverlaps) {
+    $QuantArguments += '--reconcile-legacy-overlaps'
 }
 & $PythonExe @QuantArguments
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
