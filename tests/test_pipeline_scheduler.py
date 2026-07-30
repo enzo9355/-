@@ -73,6 +73,10 @@ class PipelineSchedulerTests(unittest.TestCase):
         self.assertIn("stock_papi.batch.observation_products_cli", post_close)
         self.assertIn("stock_papi.batch.tw_official_post_close_cli", post_close)
         self.assertIn("[switch]$PublishObservation", post_close)
+        self.assertIn("[switch]$ReconcileLegacyOverlaps", post_close)
+        self.assertIn(
+            "$QuantArguments += '--reconcile-legacy-overlaps'", post_close
+        )
         self.assertIn("if (-not $PublishObservation) { exit 0 }", post_close)
         self.assertNotIn("local_quant.py", post_close)
         self.assertNotIn("'--observation-only'", post_close)
