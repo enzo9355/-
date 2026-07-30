@@ -666,12 +666,15 @@ class TWOfficialPostCloseCLITests(unittest.TestCase):
         self.assertNotIn("historical_latest_date_counts", observed["identity"])
         self.assertNotIn("historical_unavailable_count", observed["identity"])
 
-    def test_cli_reconciliation_counts_baseline_in_session_limit(self):
+    def test_reconciliation_window_counts_baseline_in_session_limit(self):
         with tempfile.TemporaryDirectory() as temporary:
-            for symbol in ("2303", "2330"):
-                write_artifact(temporary, symbol, "2026-07-10")
+            calendars = _load_calendar_set([write_calendar(temporary)])
             with self.assertRaises(ValueError):
-                self._run_fake(temporary, reconcile=True)
+                cli._reconciliation_trading_dates(
+                    calendars,
+                    baseline_date=datetime.date(2026, 7, 10),
+                    target_market_date=TARGET,
+                )
 
     def test_cli_resume_reuses_discovered_baseline_and_series_identity(self):
         series = snapshot_series(FULL_SERIES_DATES)
