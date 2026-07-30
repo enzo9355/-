@@ -40,7 +40,7 @@ from stock_papi.integrations.market_data.tw_trading_status import (
 
 SOURCE_MODE = "tw_official_bulk_v2"
 SOURCE_SCHEMA_VERSION = "tw-official-historical-v3"
-PARSER_VERSION = "tw-official-historical-parser-v2"
+PARSER_VERSION = "tw-official-historical-parser-v3"
 DEFAULT_TIMEOUT_SECONDS = 30
 DEFAULT_RETRY_ATTEMPTS = 2
 MAX_CATCHUP_SESSIONS = 10
@@ -692,6 +692,7 @@ def build_historical_daily_snapshot(
 
     trading_status: dict[str, Mapping[str, Any]] = {}
     terminated: dict[str, Mapping[str, Any]] = {}
+    superseded_terminations: dict[str, Mapping[str, Any]] = {}
     lifecycle_source_hashes: Mapping[str, str] = MappingProxyType({})
     required_symbols = set().union(*required_by_exchange.values()) if status_aware else set()
     missing_symbols = required_symbols - set(price)
@@ -712,8 +713,21 @@ def build_historical_daily_snapshot(
         request_count += lifecycle.request_count
         cold_sources += lifecycle.request_count
         lifecycle_source_hashes = lifecycle.source_hashes
+        current_row_exchange = dict(price_exchange)
+        current_row_exchange.update({
+            symbol: str(candidate["exchange"])
+            for symbol, candidate in price_status_candidates.items()
+        })
+        for symbol, disposition in lifecycle.terminated_by_symbol.items():
+            if (
+                current_row_exchange.get(symbol) == disposition.get("exchange")
+                and _datetime.date.fromisoformat(str(disposition["effective_date"]))
+                < target_date
+            ):
+                superseded_terminations[symbol] = disposition
         for symbol in set(price) & (
-            set(lifecycle.status_by_symbol) | set(lifecycle.terminated_by_symbol)
+            set(lifecycle.status_by_symbol)
+            | (set(lifecycle.terminated_by_symbol) - set(superseded_terminations))
         ):
             lifecycle_row = (
                 lifecycle.status_by_symbol.get(symbol)
@@ -725,7 +739,11 @@ def build_historical_daily_snapshot(
                     safe_message=f"regular price conflicts with lifecycle status {symbol}",
                 )
         for symbol in sorted(missing_symbols):
-            disposition = lifecycle.terminated_by_symbol.get(symbol)
+            disposition = (
+                None
+                if symbol in superseded_terminations
+                else lifecycle.terminated_by_symbol.get(symbol)
+            )
             status = lifecycle.status_by_symbol.get(symbol)
             candidate = price_status_candidates.get(symbol)
             if disposition is not None:
@@ -783,6 +801,10 @@ def build_historical_daily_snapshot(
         "terminated_symbols": {
             symbol: status["evidence_sha256"]
             for symbol, status in sorted(terminated.items())
+        },
+        "superseded_terminations": {
+            symbol: status["evidence_sha256"]
+            for symbol, status in sorted(superseded_terminations.items())
         },
     }
     manifest_sha256 = hashlib.sha256(

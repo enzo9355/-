@@ -268,6 +268,11 @@ def resolve_lifecycle_status(
             chain.append(event)
             continue
         if event_type == "suspend":
+            if terminated is not None and event_date > _event_date(terminated):
+                terminated = None
+                open_suspend = None
+                closed_at = None
+                chain = []
             if open_suspend is not None and closed_at is None:
                 raise ValueError("official lifecycle events conflict")
             open_suspend = event
