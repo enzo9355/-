@@ -215,6 +215,23 @@ def suspended_status(symbol, exchange="TPEx"):
     return resolve_lifecycle_status([event], CONTRACT_TARGET, active=True)
 
 
+def terminated_status(symbol, effective_date, exchange="TWSE"):
+    event = {
+        "schema_version": 1,
+        "exchange": exchange,
+        "symbol": symbol,
+        "event_type": "terminate",
+        "effective_date": effective_date,
+        "source_id": "twse_termination",
+        "payload_sha256": "d" * 64,
+        "raw_row_sha256": "e" * 64,
+        "raw_fields": {"symbol": symbol, "date": effective_date},
+        "parser_version": "tw-lifecycle-parser-v2",
+    }
+    event["evidence_sha256"] = evidence_sha256(event)
+    return resolve_lifecycle_status([event], CONTRACT_TARGET, active=True)
+
+
 class HistoricalParserTests(unittest.TestCase):
     def test_tpex_blank_row_is_preserved_as_hash_bound_status(self):
         data = payloads(TARGET)["tpex_price"]
@@ -474,6 +491,77 @@ class HistoricalStatusSnapshotTests(unittest.TestCase):
             ),
             lifecycle_status,
         )
+
+    def test_target_regular_row_supersedes_older_reused_symbol_termination(self):
+        old_termination = terminated_status("2330", "2008-09-01")
+        with tempfile.TemporaryDirectory() as temporary, mock.patch(
+            "stock_papi.integrations.market_data.tw_official_historical.load_lifecycle_snapshot",
+            return_value=lifecycle_snapshot(
+                statuses={"4804": suspended_status("4804")},
+                terminated={"2330": old_termination},
+            ),
+        ):
+            snapshot = build_historical_daily_snapshot(
+                Path(temporary),
+                CONTRACT_TARGET,
+                session=Session(),
+                minimum_price_symbols={"TWSE": 2, "TPEx": 2},
+                minimum_chip_symbols=1,
+                required_symbols_by_exchange={
+                    "TWSE": {"2330"},
+                    "TPEx": {"6488", "4804"},
+                },
+            )
+
+        self.assertIn("2330", snapshot.price_by_symbol)
+        self.assertNotIn("2330", snapshot.terminated_by_symbol)
+
+    def test_same_session_price_and_termination_still_fail_closed(self):
+        termination = terminated_status("2330", CONTRACT_TARGET.isoformat())
+        with tempfile.TemporaryDirectory() as temporary, mock.patch(
+            "stock_papi.integrations.market_data.tw_official_historical.load_lifecycle_snapshot",
+            return_value=lifecycle_snapshot(
+                statuses={"4804": suspended_status("4804")},
+                terminated={"2330": termination},
+            ),
+        ), self.assertRaises(OfficialSourceFailure) as context:
+            build_historical_daily_snapshot(
+                Path(temporary),
+                CONTRACT_TARGET,
+                session=Session(),
+                minimum_price_symbols={"TWSE": 2, "TPEx": 2},
+                minimum_chip_symbols=1,
+                required_symbols_by_exchange={
+                    "TWSE": {"2330"},
+                    "TPEx": {"6488", "4804"},
+                },
+            )
+
+        self.assertEqual(context.exception.category, "price_status_conflict")
+
+    def test_target_blank_raw_row_supersedes_older_reused_symbol_termination(self):
+        old_termination = terminated_status("00886", "2008-09-01", "TPEx")
+        with tempfile.TemporaryDirectory() as temporary, mock.patch(
+            "stock_papi.integrations.market_data.tw_official_historical.load_lifecycle_snapshot",
+            return_value=lifecycle_snapshot(terminated={"00886": old_termination}),
+        ):
+            snapshot = build_historical_daily_snapshot(
+                Path(temporary),
+                CONTRACT_TARGET,
+                session=BlankPriceSession(),
+                minimum_price_symbols={"TWSE": 2, "TPEx": 2},
+                minimum_chip_symbols=1,
+                required_symbols_by_exchange={
+                    "TWSE": {"2330"},
+                    "TPEx": {"6488", "00886"},
+                },
+            )
+
+        self.assertEqual(
+            snapshot.trading_status_by_symbol["00886"]["status"],
+            "official_no_regular_trade",
+        )
+        self.assertNotIn("00886", snapshot.terminated_by_symbol)
 
     def test_absent_price_requires_covering_suspension_or_fails_closed(self):
         with tempfile.TemporaryDirectory() as temporary, mock.patch(
