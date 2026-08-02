@@ -1,5 +1,6 @@
 import datetime
 import copy
+import dataclasses
 import gzip
 import hashlib
 import json
@@ -16,7 +17,10 @@ from stock_papi.quant.tw_legacy_reconciliation import (
     LegacyArtifactBackupStore,
     LegacyReconciliationError,
 )
-from stock_papi.quant.tw_incremental import OfficialCompatFetcher
+from stock_papi.quant.tw_incremental import (
+    OfficialCompatFetcher,
+    load_incremental_artifact,
+)
 
 
 TARGET = datetime.date(2026, 7, 24)
@@ -229,6 +233,316 @@ class LegacyArtifactBackupStoreTests(unittest.TestCase):
             separators=(",", ":"),
         ).encode("utf-8")
         return gzip.compress(decoded, mtime=0), decoded
+
+    def recovery_artifact(self):
+        return load_incremental_artifact(self.root, "2330")
+
+    def prepare_direct_recovery(self):
+        self.prepare_verified_reader()
+        return self.recovery_artifact()
+
+    def write_history_lineage(self, *, result_sha, reconciliation_value=None):
+        document = official_document(self.evidence)
+        selected = copy.deepcopy(reconciliation_value or self.evidence)
+        document["source_lineage"].pop("legacy_reconciliation")
+        item = {
+            "schema_version": 2,
+            "symbol": "2330",
+            "reconciled_artifact_sha256": result_sha,
+            "reconciliation": selected,
+        }
+        item["history_sha256"] = OfficialCompatFetcher._canonical_json_sha256(item)
+        document["source_lineage"]["legacy_reconciliation_history"] = [item]
+        write_artifact(self.root, document)
+        return document, item
+
+    def test_missing_or_null_lineage_is_legacy_and_not_recovery_eligible(self):
+        for lineage in (None, object()):
+            with self.subTest(lineage=lineage is None):
+                document = legacy_document()
+                if lineage is None:
+                    document["source_lineage"] = None
+                write_artifact(self.root, document)
+                artifact = self.recovery_artifact()
+
+                from stock_papi.quant.tw_legacy_reconciliation import (
+                    resolve_truncated_daily_history,
+                )
+
+                self.assertIsNone(
+                    resolve_truncated_daily_history(self.root, "2330", artifact)
+                )
+
+    def test_present_invalid_lineage_fails_closed_for_recovery(self):
+        document = official_document(self.evidence)
+        document["source_lineage"]["target_market_date"] = "not-a-date"
+        write_artifact(self.root, document)
+        artifact = self.recovery_artifact()
+
+        from stock_papi.quant.tw_legacy_reconciliation import (
+            resolve_truncated_daily_history,
+        )
+
+        with self.assertRaises(LegacyReconciliationError):
+            resolve_truncated_daily_history(self.root, "2330", artifact)
+
+    def test_valid_official_lineage_without_reconciliation_returns_none(self):
+        document = official_document(self.evidence)
+        document["source_lineage"].pop("legacy_reconciliation")
+        write_artifact(self.root, document)
+        artifact = self.recovery_artifact()
+
+        from stock_papi.quant.tw_legacy_reconciliation import (
+            resolve_truncated_daily_history,
+        )
+
+        self.assertIsNone(
+            resolve_truncated_daily_history(self.root, "2330", artifact)
+        )
+
+    def test_resolver_binds_direct_result_sha_and_exact_snapshot_date(self):
+        artifact = self.prepare_direct_recovery()
+
+        from stock_papi.quant.tw_legacy_reconciliation import (
+            resolve_truncated_daily_history,
+        )
+
+        result = resolve_truncated_daily_history(self.root, "2330", artifact)
+
+        self.assertEqual(result.input_artifact_sha256, artifact.compressed_sha256)
+        self.assertEqual(result.original_artifact_sha256, self.original_sha)
+        self.assertEqual(result.expected_result_sha256, artifact.compressed_sha256)
+        self.assertEqual(result.backup_target_market_date, TARGET)
+        self.assertEqual(result.backup_series_manifest_sha256, SERIES_SHA)
+
+    def test_resolver_binds_historical_result_sha_and_exact_snapshot_date(self):
+        self.prepare_verified_reader()
+        direct_result_sha = hashlib.sha256(self.path.read_bytes()).hexdigest()
+        self.write_history_lineage(result_sha=direct_result_sha)
+        artifact = self.recovery_artifact()
+
+        from stock_papi.quant.tw_legacy_reconciliation import (
+            resolve_truncated_daily_history,
+        )
+
+        result = resolve_truncated_daily_history(self.root, "2330", artifact)
+
+        self.assertEqual(result.input_artifact_sha256, artifact.compressed_sha256)
+        self.assertEqual(result.expected_result_sha256, direct_result_sha)
+        self.assertEqual(result.backup_target_market_date, TARGET)
+
+    def test_resolver_rejects_missing_or_multiple_distinct_backups(self):
+        self.prepare_verified_reader()
+        manifest_path, manifest = read_manifest(self.root)
+        manifest_path.unlink()
+        artifact = self.recovery_artifact()
+
+        from stock_papi.quant.tw_legacy_reconciliation import (
+            resolve_truncated_daily_history,
+        )
+
+        with self.assertRaises(LegacyReconciliationError):
+            resolve_truncated_daily_history(self.root, "2330", artifact)
+
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        result_sha = hashlib.sha256(self.path.read_bytes()).hexdigest()
+        document = official_document(self.evidence)
+        second = copy.deepcopy(self.evidence)
+        second["legacy_artifact_sha256"] = "d" * 64
+        document["source_lineage"]["legacy_reconciliation_history"] = [{
+            "schema_version": 2,
+            "symbol": "2330",
+            "reconciled_artifact_sha256": result_sha,
+            "reconciliation": second,
+            "history_sha256": "0" * 64,
+        }]
+        write_artifact(self.root, document)
+        artifact = dataclasses.replace(
+            self.recovery_artifact(), compressed_sha256=result_sha
+        )
+        backup_document = json.loads(self.decoded.decode("utf-8"))
+        first_entry = manifest["entries"]["2330"]
+        second_entry = dict(first_entry, original_sha256="d" * 64)
+        with (
+            patch.object(OfficialCompatFetcher, "_valid_official_lineage", return_value=True),
+            patch.object(
+                LegacyArtifactBackupStore,
+                "read_original_document",
+                side_effect=[
+                    (backup_document, first_entry),
+                    (backup_document, second_entry),
+                ],
+            ),
+            self.assertRaises(LegacyReconciliationError),
+        ):
+            resolve_truncated_daily_history(self.root, "2330", artifact)
+
+    def test_resolver_deduplicates_identical_repeated_history_bindings(self):
+        self.prepare_verified_reader()
+        result_sha = hashlib.sha256(self.path.read_bytes()).hexdigest()
+        document = official_document(self.evidence)
+        item = {
+            "schema_version": 2,
+            "symbol": "2330",
+            "reconciled_artifact_sha256": result_sha,
+            "reconciliation": copy.deepcopy(self.evidence),
+        }
+        item["history_sha256"] = OfficialCompatFetcher._canonical_json_sha256(item)
+        document["source_lineage"]["legacy_reconciliation_history"] = [
+            copy.deepcopy(item)
+        ]
+        write_artifact(self.root, document)
+        artifact = dataclasses.replace(
+            self.recovery_artifact(), compressed_sha256=result_sha
+        )
+
+        from stock_papi.quant.tw_legacy_reconciliation import (
+            resolve_truncated_daily_history,
+        )
+
+        with patch.object(OfficialCompatFetcher, "_valid_official_lineage", return_value=True):
+            result = resolve_truncated_daily_history(self.root, "2330", artifact)
+
+        self.assertEqual(result.original_artifact_sha256, self.original_sha)
+        self.assertEqual(result.expected_result_sha256, result_sha)
+
+    def test_resolver_rejects_same_object_sha_with_conflicting_authorization_bindings(self):
+        self.prepare_verified_reader()
+        result_sha = hashlib.sha256(self.path.read_bytes()).hexdigest()
+        conflicting = copy.deepcopy(self.evidence)
+        conflicting["official_snapshot_dates"][-1] = "2026-07-23"
+        conflicting["official_snapshot_manifests"][-1]["date"] = "2026-07-23"
+        document = official_document(self.evidence)
+        item = {
+            "schema_version": 2,
+            "symbol": "2330",
+            "reconciled_artifact_sha256": result_sha,
+            "reconciliation": conflicting,
+            "history_sha256": "0" * 64,
+        }
+        document["source_lineage"]["legacy_reconciliation_history"] = [item]
+        write_artifact(self.root, document)
+        artifact = dataclasses.replace(
+            self.recovery_artifact(), compressed_sha256=result_sha
+        )
+        backup_document = json.loads(self.decoded.decode("utf-8"))
+        entry = read_manifest(self.root)[1]["entries"]["2330"]
+
+        from stock_papi.quant.tw_legacy_reconciliation import (
+            resolve_truncated_daily_history,
+        )
+
+        with (
+            patch.object(OfficialCompatFetcher, "_valid_official_lineage", return_value=True),
+            patch.object(
+                LegacyArtifactBackupStore,
+                "read_original_document",
+                return_value=(backup_document, entry),
+            ),
+            self.assertRaises(LegacyReconciliationError),
+        ):
+            resolve_truncated_daily_history(self.root, "2330", artifact)
+
+    def test_merge_rejects_duplicate_dates_and_overlap_ohlcv_conflict(self):
+        self.prepare_direct_recovery()
+
+        from stock_papi.quant.tw_legacy_reconciliation import (
+            resolve_truncated_daily_history,
+        )
+
+        merge = reconciliation._merge_recovery_daily
+        row = legacy_document()["daily"][0]
+        with self.assertRaises(LegacyReconciliationError):
+            merge([row, dict(row)], [row])
+        with self.assertRaises(LegacyReconciliationError):
+            merge([dict(row, Close=9.0)], [row])
+
+    def test_merge_rejects_bool_nan_and_infinite_ohlcv(self):
+        self.prepare_direct_recovery()
+
+        from stock_papi.quant.tw_legacy_reconciliation import (
+            resolve_truncated_daily_history,
+        )
+
+        merge = reconciliation._merge_recovery_daily
+        row = legacy_document()["daily"][0]
+        for value in (True, float("nan"), float("inf")):
+            with self.subTest(value=value):
+                with self.assertRaises(LegacyReconciliationError):
+                    merge([dict(row, Open=value)], [])
+
+    def test_merge_rejects_non_prefix_backup_only_rows(self):
+        self.prepare_direct_recovery()
+
+        from stock_papi.quant.tw_legacy_reconciliation import (
+            resolve_truncated_daily_history,
+        )
+
+        merge = reconciliation._merge_recovery_daily
+        active = official_document(self.evidence)["daily"]
+        backup = [
+            legacy_document()["daily"][0],
+            dict(active[0], Date="2026-07-25T00:00:00.000"),
+        ]
+        with self.assertRaises(LegacyReconciliationError):
+            merge(active, backup)
+
+    def test_merge_keeps_current_whole_row_when_ohlcv_matches(self):
+        self.prepare_direct_recovery()
+
+        from stock_papi.quant.tw_legacy_reconciliation import (
+            resolve_truncated_daily_history,
+        )
+
+        merge = reconciliation._merge_recovery_daily
+        backup = legacy_document()["daily"]
+        current = dict(backup[0], InstitutionalNet=999.0)
+        merged, restored = merge([current], backup)
+
+        self.assertEqual(merged, (current,))
+        self.assertEqual(restored, ())
+
+    def test_resolver_returns_full_merge_and_candidates_without_range_filter(self):
+        artifact = self.prepare_direct_recovery()
+
+        from stock_papi.quant.tw_legacy_reconciliation import (
+            resolve_truncated_daily_history,
+        )
+
+        result = resolve_truncated_daily_history(self.root, "2330", artifact)
+
+        self.assertEqual(
+            [row["Date"][:10] for row in result.merged_daily],
+            [BASELINE.isoformat(), TARGET.isoformat()],
+        )
+        self.assertEqual(
+            [row["Date"][:10] for row in result.restored_candidates],
+            [BASELINE.isoformat()],
+        )
+        self.assertEqual(
+            [row["Date"][:10] for row in result.backup_daily],
+            [BASELINE.isoformat()],
+        )
+
+    def test_resolver_preserves_selected_reconciliation_evidence_for_receipt_finalization(self):
+        artifact = self.prepare_direct_recovery()
+        stored_receipt = {"schema_version": 1, "nested": {"date": TARGET.isoformat()}}
+        artifact.document["source_lineage"]["daily_history_recovery"] = stored_receipt
+
+        from stock_papi.quant.tw_legacy_reconciliation import (
+            resolve_truncated_daily_history,
+        )
+
+        result = resolve_truncated_daily_history(self.root, "2330", artifact)
+
+        with self.assertRaises(TypeError):
+            result.reconciliation["mode"] = "tampered"
+        with self.assertRaises(TypeError):
+            result.existing_receipt["schema_version"] = 2
+        stored_receipt["nested"]["date"] = "tampered"
+        self.assertEqual(
+            result.existing_receipt["nested"]["date"], TARGET.isoformat()
+        )
 
     def test_verified_reader_reads_object_once_and_parses_same_bytes(self):
         manifest_path, manifest, object_path, result_sha = self.prepare_verified_reader()

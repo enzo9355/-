@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import copy
 import datetime
 import gzip
 import hashlib
@@ -14,11 +15,14 @@ import re
 import stat
 import tempfile
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 from stock_papi.quant.tw_incremental import (
     MAX_COMPRESSED_BYTES,
     MAX_UNCOMPRESSED_BYTES,
+    HistoryRecoveryResult,
+    IncrementalArtifact,
     IncrementalHistoryError,
     OfficialCompatFetcher,
     load_incremental_artifact,
@@ -159,6 +163,211 @@ def _dates(value: Any) -> tuple[datetime.date, ...] | None:
     if parsed != tuple(sorted(set(parsed))):
         return None
     return parsed
+
+
+_RECOVERY_MISSING = object()
+_OHLCV_FIELDS = ("Open", "High", "Low", "Close", "Volume")
+
+
+def _finite_number(value: Any) -> int | float:
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise LegacyReconciliationError("daily history OHLCV is invalid")
+    try:
+        if not math.isfinite(value):
+            raise LegacyReconciliationError("daily history OHLCV is invalid")
+    except OverflowError as exc:
+        raise LegacyReconciliationError("daily history OHLCV is invalid") from exc
+    return value
+
+
+def _validated_daily_by_date(value: Any) -> dict[datetime.date, dict[str, Any]]:
+    if not isinstance(value, list):
+        raise LegacyReconciliationError("daily history rows are invalid")
+    rows: dict[datetime.date, dict[str, Any]] = {}
+    previous: datetime.date | None = None
+    for row in value:
+        if not isinstance(row, dict):
+            raise LegacyReconciliationError("daily history rows are invalid")
+        try:
+            day = datetime.datetime.fromisoformat(row["Date"]).date()
+        except (KeyError, TypeError, ValueError) as exc:
+            raise LegacyReconciliationError("daily history date is invalid") from exc
+        if previous is not None and day <= previous:
+            raise LegacyReconciliationError("daily history dates are invalid")
+        for name in _OHLCV_FIELDS:
+            _finite_number(row.get(name))
+        rows[day] = dict(row)
+        previous = day
+    return rows
+
+
+def _merge_recovery_daily(
+    active_daily: Any,
+    backup_daily: Any,
+) -> tuple[tuple[dict[str, Any], ...], tuple[dict[str, Any], ...]]:
+    active = _validated_daily_by_date(active_daily)
+    backup = _validated_daily_by_date(backup_daily)
+    for day in active.keys() & backup.keys():
+        for name in _OHLCV_FIELDS:
+            if _finite_number(active[day].get(name)) != _finite_number(
+                backup[day].get(name)
+            ):
+                raise LegacyReconciliationError("daily history OHLCV conflict")
+    merged = {**backup, **active}
+    restored_dates = sorted(backup.keys() - active.keys())
+    if restored_dates and restored_dates[-1] >= min(active):
+        raise LegacyReconciliationError("daily history recovery is not a missing prefix")
+    return (
+        tuple(dict(merged[day]) for day in sorted(merged)),
+        tuple(dict(backup[day]) for day in restored_dates),
+    )
+
+
+def _immutable_copy(value: Any) -> Any:
+    if isinstance(value, dict):
+        return MappingProxyType({key: _immutable_copy(item) for key, item in value.items()})
+    if isinstance(value, (list, tuple)):
+        return tuple(_immutable_copy(item) for item in value)
+    return copy.deepcopy(value)
+
+
+def resolve_truncated_daily_history(
+    root: Path,
+    symbol: str,
+    artifact: IncrementalArtifact,
+) -> HistoryRecoveryResult | None:
+    lineage = artifact.document.get("source_lineage", _RECOVERY_MISSING)
+    if lineage is _RECOVERY_MISSING or lineage is None:
+        return None
+    if not OfficialCompatFetcher._valid_official_lineage(lineage, artifact):
+        raise LegacyReconciliationError(
+            f"daily history recovery lineage is invalid for TW:{symbol}"
+        )
+    if (
+        "legacy_reconciliation" not in lineage
+        and "legacy_reconciliation_history" not in lineage
+    ):
+        return None
+    if artifact.symbol != symbol:
+        raise LegacyReconciliationError("daily history recovery symbol is invalid")
+
+    candidates: list[tuple[dict[str, Any], str]] = []
+    direct = lineage.get("legacy_reconciliation", _RECOVERY_MISSING)
+    if direct is not _RECOVERY_MISSING:
+        candidates.append((direct, artifact.compressed_sha256))
+    history = lineage.get("legacy_reconciliation_history", _RECOVERY_MISSING)
+    if history is not _RECOVERY_MISSING:
+        if not isinstance(history, list):
+            raise LegacyReconciliationError("daily history recovery lineage is invalid")
+        for item in history:
+            if not isinstance(item, dict):
+                raise LegacyReconciliationError("daily history recovery lineage is invalid")
+            candidates.append(
+                (item.get("reconciliation"), item.get("reconciled_artifact_sha256"))
+            )
+    if not candidates:
+        raise LegacyReconciliationError("daily history recovery lineage is invalid")
+
+    verified: list[
+        tuple[
+            tuple[Any, ...],
+            datetime.date,
+            dict[str, Any],
+            dict[str, Any],
+            dict[str, Any],
+            str,
+        ]
+    ] = []
+    for reconciliation, expected_result_sha256 in candidates:
+        if not isinstance(reconciliation, dict) or not _is_sha256(
+            expected_result_sha256
+        ):
+            raise LegacyReconciliationError("daily history recovery lineage is invalid")
+        try:
+            target = datetime.date.fromisoformat(
+                reconciliation["official_snapshot_dates"][-1]
+            )
+            series_manifest_sha256 = reconciliation[
+                "official_series_manifest_sha256"
+            ]
+            original_sha256 = reconciliation["legacy_artifact_sha256"]
+        except (KeyError, TypeError, ValueError, IndexError) as exc:
+            raise LegacyReconciliationError(
+                "daily history recovery lineage is invalid"
+            ) from exc
+        try:
+            store = LegacyArtifactBackupStore(
+                Path(root),
+                target_date=target,
+                series_manifest_sha256=series_manifest_sha256,
+            )
+        except (TypeError, ValueError) as exc:
+            raise LegacyReconciliationError(
+                "daily history recovery lineage is invalid"
+            ) from exc
+        backup_document, entry = store.read_original_document(
+            symbol=symbol,
+            original_sha256=original_sha256,
+            expected_result_sha256=expected_result_sha256,
+        )
+        entry_sha256 = OfficialCompatFetcher._canonical_json_sha256(entry)
+        if entry_sha256 is None:
+            raise LegacyReconciliationError("daily history recovery binding is invalid")
+        binding = (
+            entry["original_sha256"],
+            target.isoformat(),
+            series_manifest_sha256,
+            expected_result_sha256,
+            entry["backup_path"],
+            entry["original_size"],
+            entry["original_uncompressed_size"],
+            entry_sha256,
+        )
+        verified.append(
+            (
+                binding,
+                target,
+                reconciliation,
+                entry,
+                backup_document,
+                expected_result_sha256,
+            )
+        )
+
+    original_hashes = {binding[0] for binding, *_rest in verified}
+    bindings = {binding for binding, *_rest in verified}
+    if len(original_hashes) != 1 or len(bindings) != 1:
+        raise LegacyReconciliationError(
+            "daily history recovery authorization is ambiguous"
+        )
+    _binding, target, selected_reconciliation, entry, backup_document, expected = verified[0]
+    merged_daily, restored_candidates = _merge_recovery_daily(
+        artifact.document.get("daily"), backup_document.get("daily")
+    )
+    existing_receipt = lineage.get("daily_history_recovery")
+    if existing_receipt is not None and not isinstance(existing_receipt, dict):
+        raise LegacyReconciliationError("daily history recovery receipt is invalid")
+    return HistoryRecoveryResult(
+        merged_daily=tuple(_immutable_copy(row) for row in merged_daily),
+        restored_candidates=tuple(_immutable_copy(row) for row in restored_candidates),
+        backup_daily=tuple(
+            _immutable_copy(row) for row in _validated_daily_by_date(
+                backup_document.get("daily")
+            ).values()
+        ),
+        input_artifact_sha256=artifact.compressed_sha256,
+        original_artifact_sha256=entry["original_sha256"],
+        expected_result_sha256=expected,
+        backup_target_market_date=target,
+        backup_series_manifest_sha256=selected_reconciliation[
+            "official_series_manifest_sha256"
+        ],
+        backup_manifest_entry=_immutable_copy(entry),
+        reconciliation=_immutable_copy(selected_reconciliation),
+        existing_receipt=(
+            _immutable_copy(existing_receipt) if existing_receipt is not None else None
+        ),
+    )
 
 
 class LegacyArtifactBackupStore:

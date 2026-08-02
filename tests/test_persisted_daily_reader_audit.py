@@ -133,6 +133,8 @@ READER_CONTRACTS = {
     ("stock_papi/quant/tw_incremental.py", "OfficialCompatFetcher._reconciliation_plan"): "canonical-OHLCV",
     ("stock_papi/quant/tw_legacy_reconciliation.py", "LegacyArtifactBackupStore._validate_original"): "latest-only",
     ("stock_papi/quant/tw_legacy_reconciliation.py", "LegacyArtifactBackupStore._validate_expected_result"): "latest-only",
+    ("stock_papi/quant/tw_legacy_reconciliation.py", "LegacyArtifactBackupStore.read_original_document"): "canonical-OHLCV",
+    ("stock_papi/quant/tw_legacy_reconciliation.py", "resolve_truncated_daily_history"): "canonical-OHLCV",
     ("stock_papi/repositories/quant_snapshots.py", "fetch_quant_snapshot"): "latest-only",
     ("stock_papi/research/pit_dataset.py", "_history_rows"): "canonical-OHLCV",
     ("stock_papi/services/observation_view.py", "build_stock_observation"): "feature-ready-history",

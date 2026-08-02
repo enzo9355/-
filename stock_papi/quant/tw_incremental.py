@@ -11,7 +11,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Iterable, Mapping
+from typing import Any, Callable, Iterable, Mapping
 
 from stock_papi.integrations.market_data.tw_official_bulk import OfficialDailySnapshot
 from stock_papi.integrations.market_data.tw_trading_status import evidence_sha256
@@ -47,6 +47,27 @@ class IncrementalArtifact:
     latest_date: _datetime.date
     observation_date: _datetime.date
     trading_status_evidence: Mapping[str, Any] | None
+
+
+@dataclass(frozen=True)
+class HistoryRecoveryResult:
+    merged_daily: tuple[Mapping[str, Any], ...]
+    restored_candidates: tuple[Mapping[str, Any], ...]
+    backup_daily: tuple[Mapping[str, Any], ...]
+    input_artifact_sha256: str
+    original_artifact_sha256: str
+    expected_result_sha256: str
+    backup_target_market_date: _datetime.date
+    backup_series_manifest_sha256: str
+    backup_manifest_entry: Mapping[str, Any]
+    reconciliation: Mapping[str, Any]
+    existing_receipt: Mapping[str, Any] | None
+
+
+HistoryRecoveryResolver = Callable[
+    [str, IncrementalArtifact],
+    HistoryRecoveryResult | None,
+]
 
 
 @dataclass(frozen=True)
