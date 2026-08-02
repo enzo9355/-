@@ -400,11 +400,70 @@ class LegacyArtifactBackupStoreTests(unittest.TestCase):
             resolve_truncated_daily_history,
         )
 
-        with patch.object(OfficialCompatFetcher, "_valid_official_lineage", return_value=True):
+        original_reader = LegacyArtifactBackupStore.read_original_document
+
+        def tracked_reader(store, **kwargs):
+            return original_reader(store, **kwargs)
+
+        with (
+            patch.object(OfficialCompatFetcher, "_valid_official_lineage", return_value=True),
+            patch.object(
+                LegacyArtifactBackupStore,
+                "read_original_document",
+                autospec=True,
+                side_effect=tracked_reader,
+            ) as reader,
+        ):
             result = resolve_truncated_daily_history(self.root, "2330", artifact)
 
+        self.assertEqual(reader.call_count, 2)
         self.assertEqual(result.original_artifact_sha256, self.original_sha)
         self.assertEqual(result.expected_result_sha256, result_sha)
+
+    def test_resolver_fails_closed_when_second_identical_binding_cannot_be_verified(self):
+        self.prepare_verified_reader()
+        result_sha = hashlib.sha256(self.path.read_bytes()).hexdigest()
+        document = official_document(self.evidence)
+        item = {
+            "schema_version": 2,
+            "symbol": "2330",
+            "reconciled_artifact_sha256": result_sha,
+            "reconciliation": copy.deepcopy(self.evidence),
+        }
+        item["history_sha256"] = OfficialCompatFetcher._canonical_json_sha256(item)
+        document["source_lineage"]["legacy_reconciliation_history"] = [item]
+        write_artifact(self.root, document)
+        artifact = dataclasses.replace(
+            self.recovery_artifact(), compressed_sha256=result_sha
+        )
+
+        from stock_papi.quant.tw_legacy_reconciliation import (
+            resolve_truncated_daily_history,
+        )
+
+        original_reader = LegacyArtifactBackupStore.read_original_document
+        calls = 0
+
+        def second_read_fails(store, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise LegacyReconciliationError("second identical binding is unreadable")
+            return original_reader(store, **kwargs)
+
+        with (
+            patch.object(OfficialCompatFetcher, "_valid_official_lineage", return_value=True),
+            patch.object(
+                LegacyArtifactBackupStore,
+                "read_original_document",
+                autospec=True,
+                side_effect=second_read_fails,
+            ) as reader,
+            self.assertRaises(LegacyReconciliationError),
+        ):
+            resolve_truncated_daily_history(self.root, "2330", artifact)
+
+        self.assertEqual(reader.call_count, 2)
 
     def test_resolver_rejects_same_object_sha_with_conflicting_authorization_bindings(self):
         self.prepare_verified_reader()
@@ -525,7 +584,14 @@ class LegacyArtifactBackupStoreTests(unittest.TestCase):
         )
 
     def test_resolver_preserves_selected_reconciliation_evidence_for_receipt_finalization(self):
+        nested_legacy = legacy_document()
+        nested_legacy["daily"][0]["Nested"] = {"value": "backup"}
+        self.path, self.decoded = write_artifact(self.root, nested_legacy)
+        self.original = self.path.read_bytes()
+        self.original_sha = hashlib.sha256(self.original).hexdigest()
+        self.evidence = evidence(self.original_sha)
         artifact = self.prepare_direct_recovery()
+        artifact.document["daily"][0]["Nested"] = {"value": "active"}
         stored_receipt = {"schema_version": 1, "nested": {"date": TARGET.isoformat()}}
         artifact.document["source_lineage"]["daily_history_recovery"] = stored_receipt
 
@@ -533,15 +599,62 @@ class LegacyArtifactBackupStoreTests(unittest.TestCase):
             resolve_truncated_daily_history,
         )
 
-        result = resolve_truncated_daily_history(self.root, "2330", artifact)
+        original_reader = LegacyArtifactBackupStore.read_original_document
+        source_backup_document = None
+        source_entry = None
+
+        def reader_with_nested_entry(store, **kwargs):
+            nonlocal source_backup_document, source_entry
+            source_backup_document, source_entry = original_reader(store, **kwargs)
+            source_entry["nested"] = {"value": "entry"}
+            return source_backup_document, source_entry
+
+        with patch.object(
+            LegacyArtifactBackupStore,
+            "read_original_document",
+            autospec=True,
+            side_effect=reader_with_nested_entry,
+        ):
+            result = resolve_truncated_daily_history(self.root, "2330", artifact)
 
         with self.assertRaises(TypeError):
             result.reconciliation["mode"] = "tampered"
         with self.assertRaises(TypeError):
             result.existing_receipt["schema_version"] = 2
+        with self.assertRaises(TypeError):
+            result.reconciliation["official_snapshot_manifests"][0]["date"] = "tampered"
+        with self.assertRaises(TypeError):
+            result.existing_receipt["nested"]["date"] = "tampered"
+        with self.assertRaises(TypeError):
+            result.backup_manifest_entry["nested"]["value"] = "tampered"
+        for rows in (
+            result.merged_daily,
+            result.restored_candidates,
+            result.backup_daily,
+        ):
+            with self.subTest(rows=rows):
+                with self.assertRaises(TypeError):
+                    rows[0] = {}
+                with self.assertRaises(AttributeError):
+                    rows.append({})
+                with self.assertRaises(TypeError):
+                    rows[0]["Nested"]["value"] = "tampered"
         stored_receipt["nested"]["date"] = "tampered"
+        artifact.document["daily"][0]["Nested"]["value"] = "tampered"
+        artifact.document["source_lineage"]["legacy_reconciliation"][
+            "official_snapshot_manifests"
+        ][0]["date"] = "tampered"
+        source_backup_document["daily"][0]["Nested"]["value"] = "tampered"
+        source_entry["nested"]["value"] = "tampered"
         self.assertEqual(
             result.existing_receipt["nested"]["date"], TARGET.isoformat()
+        )
+        self.assertEqual(result.merged_daily[0]["Nested"]["value"], "backup")
+        self.assertEqual(result.merged_daily[1]["Nested"]["value"], "active")
+        self.assertEqual(result.backup_manifest_entry["nested"]["value"], "entry")
+        self.assertEqual(
+            result.reconciliation["official_snapshot_manifests"][0]["date"],
+            BASELINE.isoformat(),
         )
 
     def test_verified_reader_reads_object_once_and_parses_same_bytes(self):
