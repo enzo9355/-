@@ -18,7 +18,15 @@ class IndustryReportAnalyticsTests(unittest.TestCase):
             write_quant_publish(root, [document])
             report = build_daily_report(load_report_source(root), {"半導體": ["2330"]})
         self.assertEqual(report.market.returns[60], None)
-        self.assertEqual(report.industries[0].symbols, ["2330"])
+        industry = report.industries[0]
+        self.assertEqual(industry.symbols, ["2330"])
+        self.assertIsNone(document["daily"][-61]["MA20"])
+        self.assertAlmostEqual(
+            industry.returns[60],
+            document["daily"][-1]["Close"] / document["daily"][-61]["Close"] - 1,
+        )
+        self.assertAlmostEqual(industry.returns[60], 0.5504587155963303)
+        self.assertEqual(report.model_quality.pooled_oos_samples, 45)
 
     def _source(self):
         temporary = tempfile.TemporaryDirectory()

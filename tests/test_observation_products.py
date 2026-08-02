@@ -232,6 +232,16 @@ class ObservationProductsTests(unittest.TestCase):
         dashboard = self.build(
             _source([stock], as_of=stock.as_of), today=datetime.date(2026, 7, 4)
         )
+        warmup_close = document["daily"][-61]
+        self.assertIsNone(warmup_close["MA20"])
+        self.assertEqual(
+            round((document["daily"][-1]["Close"] / warmup_close["Close"] - 1) * 100, 2),
+            55.05,
+        )
+        self.assertEqual(
+            dashboard["market_observation"]["return_60d_pct"],
+            55.05,
+        )
         self.assertEqual(dashboard["data_quality"]["available_count"], 1)
         self.assertTrue(dashboard["market_observation"])
 

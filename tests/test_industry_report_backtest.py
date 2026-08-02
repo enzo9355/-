@@ -12,11 +12,12 @@ class IndustryReportBacktestTests(unittest.TestCase):
         from reporting.industry_backtest import backtest_industry
         from reporting.source_loader import StockSnapshot
 
-        document = warmup_stock_document("2330")
+        document = warmup_stock_document("2330", warmup_rows=22)
         stock = StockSnapshot.from_document(document, sha256="a" * 64, size=1)
         result = backtest_industry("半導體", [stock], ReportConfig(min_backtest_periods=2))
-        self.assertEqual(result.rebalance_dates[0].isoformat(), document["daily"][20]["Date"][:10])
-        self.assertGreaterEqual(len(result.rebalance_dates), 9)
+        self.assertEqual(len(stock.daily), 70)
+        self.assertEqual(result.rebalance_dates[0].isoformat(), document["daily"][25]["Date"][:10])
+        self.assertGreaterEqual(len(result.rebalance_dates), 8)
 
     def test_five_day_non_overlapping_oos_backtest_cost_and_cash_periods(self):
         from reporting.config import ReportConfig
