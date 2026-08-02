@@ -123,10 +123,13 @@ def _parse_date(value: Any) -> _datetime.date:
 
 def _canonical_json_value(value: Any) -> Any:
     if isinstance(value, Mapping):
-        return {
-            str(key): _canonical_json_value(item)
-            for key, item in value.items()
-        }
+        normalized = {}
+        for key, item in value.items():
+            name = str(key)
+            if name in normalized:
+                raise IncrementalHistoryError("canonical JSON mapping keys collide")
+            normalized[name] = _canonical_json_value(item)
+        return normalized
     if isinstance(value, (tuple, list)):
         return [_canonical_json_value(item) for item in value]
     if value is None or isinstance(value, (str, bool, int)):
@@ -806,7 +809,9 @@ class OfficialCompatFetcher:
                 raise IncrementalHistoryError("daily history recovery receipt is invalid")
             receipt = dict(existing)
             if (
-                receipt["original_artifact_sha256"] != result.original_artifact_sha256
+                receipt["recovery_target_market_date"]
+                != recovery_target_market_date.isoformat()
+                or receipt["original_artifact_sha256"] != result.original_artifact_sha256
                 or receipt["backup_target_market_date"]
                 != result.backup_target_market_date.isoformat()
                 or receipt["backup_series_manifest_sha256"]
@@ -848,16 +853,27 @@ class OfficialCompatFetcher:
                 evidence=evidence,
             )
             retained.append(self._canonical_recovery_source_row(row))
-        if missing:
-            floor = _datetime.date.fromisoformat(final[0]["Date"])
-            if any(day >= floor for day in missing):
-                raise IncrementalHistoryError("daily history recovery receipt is invalid")
         if existing is not None:
-            if not missing and (
-                receipt["restored_daily_sha256"]
-                != self._canonical_json_sha256(retained)
-                or receipt["restored_row_count"] != len(retained)
-            ):
+            if not missing:
+                retained_dates = [
+                    _datetime.date.fromisoformat(row["Date"])
+                    for row in retained
+                ]
+                if (
+                    receipt["restored_daily_sha256"]
+                    != self._canonical_json_sha256(retained)
+                    or receipt["restored_row_count"] != len(retained)
+                    or retained_dates[0].isoformat()
+                    != receipt["restored_start_date"]
+                    or retained_dates[-1].isoformat()
+                    != receipt["restored_end_date"]
+                ):
+                    raise IncrementalHistoryError("daily history recovery receipt is invalid")
+            elif len(missing) == len(authorized):
+                floor = _datetime.date.fromisoformat(final[0]["Date"])
+                if any(day >= floor for day in missing):
+                    raise IncrementalHistoryError("daily history recovery receipt is invalid")
+            else:
                 raise IncrementalHistoryError("daily history recovery receipt is invalid")
             return receipt
         unsigned = {
@@ -1640,15 +1656,15 @@ class OfficialCompatFetcher:
         if reconciliation is not None:
             lineage["legacy_reconciliation"] = copy.deepcopy(reconciliation)
         if recovery is not None:
+            if persisted_daily is None:
+                raise IncrementalHistoryError(
+                    "final persisted daily history is required for recovery"
+                )
             receipt = self._finalize_daily_history_recovery(
                 recovery,
                 symbol=symbol,
                 recovery_target_market_date=self.target_date,
-                persisted_daily=(
-                    artifact.document["daily"]
-                    if persisted_daily is None
-                    else persisted_daily
-                ),
+                persisted_daily=persisted_daily,
             )
             if receipt is not None:
                 direct = self._existing_reconciliations.get(symbol)

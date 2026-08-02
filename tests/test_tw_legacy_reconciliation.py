@@ -619,10 +619,13 @@ class LegacyArtifactBackupStoreTests(unittest.TestCase):
         artifact.document["daily"][0]["Nested"] = {"value": "active"}
 
         original_reader = LegacyArtifactBackupStore.read_original_document
+        resolved_sources = {}
 
         def reader_with_nested_entry(store, **kwargs):
             document, entry = original_reader(store, **kwargs)
             entry["nested"] = {"value": "entry"}
+            resolved_sources["backup_document"] = document
+            resolved_sources["entry"] = entry
             return document, entry
 
         from stock_papi.quant.tw_legacy_reconciliation import (
@@ -637,6 +640,14 @@ class LegacyArtifactBackupStoreTests(unittest.TestCase):
         ):
             result = resolve_truncated_daily_history(self.root, "2330", artifact)
 
+        artifact.document["daily"][0]["Nested"]["value"] = "mutated-active"
+        artifact.document["source_lineage"]["legacy_reconciliation"][
+            "official_snapshot_manifests"
+        ][0]["date"] = "mutated-lineage"
+        resolved_sources["backup_document"]["daily"][0]["Nested"][
+            "value"
+        ] = "mutated-backup"
+        resolved_sources["entry"]["nested"]["value"] = "mutated-entry"
         with self.assertRaises(TypeError):
             result.reconciliation["mode"] = "tampered"
         with self.assertRaises(TypeError):
@@ -650,6 +661,10 @@ class LegacyArtifactBackupStoreTests(unittest.TestCase):
         self.assertEqual(result.merged_daily[0]["Nested"]["value"], "backup")
         self.assertEqual(result.merged_daily[1]["Nested"]["value"], "active")
         self.assertEqual(result.backup_manifest_entry["nested"]["value"], "entry")
+        self.assertEqual(
+            result.reconciliation["official_snapshot_manifests"][0]["date"],
+            BASELINE.isoformat(),
+        )
 
     def test_verified_reader_reads_object_once_and_parses_same_bytes(self):
         manifest_path, manifest, object_path, result_sha = self.prepare_verified_reader()
