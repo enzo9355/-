@@ -468,7 +468,8 @@ class LegacyArtifactBackupStore:
             ) from exc
         if (
             not isinstance(document, dict)
-            or document.get("schema_version") != 1
+            or type(document.get("schema_version")) is not int
+            or document["schema_version"] != 1
             or document.get("market") != "TW"
             or document.get("symbol") != symbol
             or not isinstance(daily, list)

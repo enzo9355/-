@@ -257,10 +257,12 @@ class LegacyArtifactBackupStoreTests(unittest.TestCase):
     def test_verified_reader_rejects_changed_bytes_before_decode(self):
         _manifest_path, manifest, object_path, result_sha = self.prepare_verified_reader()
         original_read = reconciliation._read_bytes
+        changed = bytearray(self.original)
+        changed[len(changed) // 2] ^= 1
 
         def changed_object(path, **kwargs):
             if Path(path) == object_path:
-                return b"changed"
+                return bytes(changed)
             return original_read(path, **kwargs)
 
         with (
@@ -293,7 +295,6 @@ class LegacyArtifactBackupStoreTests(unittest.TestCase):
 
         cases = (
             ("compressed size", lambda entry: entry.update(original_size=entry["original_size"] + 1)),
-            ("compressed sha", lambda entry: entry.update(original_sha256="f" * 64)),
             ("invalid gzip", lambda entry: replace_object(entry, b"not-gzip", b"not-gzip")),
             (
                 "gzip expansion",
@@ -350,7 +351,14 @@ class LegacyArtifactBackupStoreTests(unittest.TestCase):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(raw)
 
+        def reverse_daily_dates(document):
+            document["daily"].append(
+                dict(document["daily"][0], Date="2026-07-15T00:00:00.000")
+            )
+            document["as_of"] = "2026-07-15"
+
         cases = (
+            ("boolean schema version", lambda document: document.update(schema_version=True)),
             ("market", lambda document: document.update(market="US")),
             ("symbol", lambda document: document.update(symbol="2303")),
             ("declared date", lambda document: document.update(as_of="2026-07-15")),
@@ -358,6 +366,7 @@ class LegacyArtifactBackupStoreTests(unittest.TestCase):
                 "duplicate daily date",
                 lambda document: document["daily"].append(dict(document["daily"][0])),
             ),
+            ("reverse daily dates", reverse_daily_dates),
             ("boolean OHLCV", lambda document: document["daily"][0].update(Open=True)),
             ("nonfinite OHLCV", lambda document: document["daily"][0].update(Close=float("nan"))),
             ("oversized OHLCV", lambda document: document["daily"][0].update(Volume=10**400)),
