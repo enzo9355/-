@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
@@ -42,7 +43,7 @@ class TWHistoryPersistenceTests(unittest.TestCase):
     @staticmethod
     def _frame(days=25, *, end="2026-07-28"):
         index = pd.bdate_range(end=end, periods=days)
-        values = list(range(100, 100 + len(index)))
+        values = [float(value) for value in range(100, 100 + len(index))]
         frame = pd.DataFrame(
             {
                 "Open": values,
@@ -182,6 +183,71 @@ class TWHistoryPersistenceTests(unittest.TestCase):
                 self._pipeline(self._frame(19)), "TW", "2330"
             )
 
+    def test_calculation_and_inference_mutation_cannot_overwrite_canonical_sources(self):
+        frame = self._frame()
+        frame["InstitutionalNet"] = list(range(len(frame)))
+        frame["MARKET_RET_1"] = [index / 1000 for index in range(len(frame))]
+        original = frame.copy(deep=True)
+        observed = {}
+        canonical_frames = []
+        original_canonical = local_quant._canonical_history_frame
+
+        def capture_canonical(data):
+            canonical = original_canonical(data)
+            canonical_frames.append(canonical)
+            return canonical
+
+        def mutate_and_calculate(data):
+            observed["calculation_input"] = data
+            data.loc[data.index[-1], [
+                "Open", "High", "Low", "Close", "Volume",
+                "InstitutionalNet", "MARKET_RET_1",
+            ]] = [900.0, 902.0, 899.0, 901.0, 9999.0, -999.0, -0.9]
+            return calc_all(data, pd=pd, np=np)
+
+        def mutate_inference(data):
+            observed["inference_input"] = data
+            data.loc[data.index[-1], [
+                "Open", "High", "Low", "Close", "Volume",
+                "InstitutionalNet", "MARKET_RET_1",
+            ]] = [800.0, 802.0, 799.0, 801.0, 8888.0, -888.0, -0.8]
+            data.loc[data.index[-1], "AI_P"] = 63.5
+            return {"model_version": "lgbm-5d-v1"}
+
+        pipeline = self._pipeline(
+            frame,
+            run_latest_inference=mutate_inference,
+        )
+        pipeline.calc_all = mutate_and_calculate
+        with patch.object(
+            local_quant,
+            "_canonical_history_frame",
+            side_effect=capture_canonical,
+        ):
+            payload = local_quant.build_stock_snapshot(
+                pipeline,
+                "TW",
+                "2330",
+                degraded_bootstrap=True,
+            )
+
+        self.assertIsNot(observed["calculation_input"], frame)
+        self.assertIsNot(observed["calculation_input"], canonical_frames[0])
+        self.assertIsNot(observed["inference_input"], canonical_frames[0])
+        allowed = set(CALCULATED_COLUMNS) | set(local_quant.OBSERVATION_MODEL_COLUMNS)
+        by_date = {
+            row["Date"].split("T", 1)[0]: row for row in payload["daily"]
+        }
+        for date, source in original.iterrows():
+            persisted = by_date[date.date().isoformat()]
+            for name in (
+                "Open", "High", "Low", "Close", "Volume",
+                "InstitutionalNet", "MARKET_RET_1",
+            ):
+                self.assertEqual(persisted[name], source[name])
+            self.assertLessEqual(set(persisted) - {"Date"} - set(original), allowed)
+        self.assertEqual(payload["latest"]["AI_P"], 63.5)
+
     def test_multistage_history_does_not_erode_and_rerun_is_byte_stable(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -189,7 +255,16 @@ class TWHistoryPersistenceTests(unittest.TestCase):
             current = self._frame(40, end="2026-07-28")
             stages = []
             first_rerun_bytes = None
-            for target in (None, *(datetime.date(2026, 7, day) for day in (29, 30, 31, 31))):
+            previous_canonical = None
+            expected_bounds = (
+                ("2026-06-03T00:00:00.000", "2026-07-28T00:00:00.000"),
+                ("2026-06-03T00:00:00.000", "2026-07-29T00:00:00.000"),
+                ("2026-06-03T00:00:00.000", "2026-07-30T00:00:00.000"),
+                ("2026-06-03T00:00:00.000", "2026-07-31T00:00:00.000"),
+                ("2026-06-03T00:00:00.000", "2026-07-31T00:00:00.000"),
+            )
+            targets = (None, *(datetime.date(2026, 7, day) for day in (29, 30, 31, 31)))
+            for stage_index, target in enumerate(targets):
                 if target is not None and target not in current.index.date:
                     previous = current.iloc[-1]
                     current.loc[pd.Timestamp(target)] = {
@@ -208,6 +283,25 @@ class TWHistoryPersistenceTests(unittest.TestCase):
                 )
                 persisted = self._artifact_daily(root, payload)
                 daily_bytes = self._daily_bytes(persisted)
+                dates = [pd.Timestamp(row["Date"]) for row in persisted]
+                canonical = [
+                    {
+                        name: row[name]
+                        for name in ("Date", "Open", "High", "Low", "Close", "Volume")
+                    }
+                    for row in persisted
+                ]
+                self.assertEqual(
+                    (persisted[0]["Date"], persisted[-1]["Date"]),
+                    expected_bounds[stage_index],
+                )
+                self.assertTrue(all(left < right for left, right in zip(dates, dates[1:])))
+                self.assertEqual(len(dates), len(set(dates)))
+                if previous_canonical is not None:
+                    self.assertEqual(
+                        self._daily_bytes(canonical[:len(previous_canonical)]),
+                        self._daily_bytes(previous_canonical),
+                    )
                 stages.append(
                     {
                         "rows": len(persisted),
@@ -218,12 +312,7 @@ class TWHistoryPersistenceTests(unittest.TestCase):
                             persisted[-1][name] is not None
                             for name in CALCULATED_COLUMNS
                         ),
-                        "ohlcv": self._daily_bytes(
-                            [
-                                {name: row[name] for name in ("Date", "Open", "High", "Low", "Close", "Volume")}
-                                for row in persisted
-                            ]
-                        ),
+                        "ohlcv": self._daily_bytes(canonical),
                     }
                 )
                 if target == datetime.date(2026, 7, 31):
@@ -231,6 +320,7 @@ class TWHistoryPersistenceTests(unittest.TestCase):
                         first_rerun_bytes = daily_bytes
                     else:
                         self.assertEqual(daily_bytes, first_rerun_bytes)
+                previous_canonical = canonical
                 current = self._daily_frame(persisted)
 
         self.assertEqual([stage["rows"] for stage in stages], [40, 41, 42, 43, 43])
