@@ -8,13 +8,16 @@ import gzip
 import hashlib
 import io
 import json
+import math
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Callable, Iterable, Mapping
+from typing import Any, Callable, Iterable
 
 from stock_papi.integrations.market_data.tw_official_bulk import OfficialDailySnapshot
 from stock_papi.integrations.market_data.tw_trading_status import evidence_sha256
+from stock_papi.quant.features import CALCULATED_COLUMNS
 
 MAX_COMPRESSED_BYTES = 5 * 1024 * 1024
 MAX_UNCOMPRESSED_BYTES = 20 * 1024 * 1024
@@ -33,6 +36,31 @@ _RECONCILIATION_HISTORY_FIELDS = frozenset({
     "history_sha256",
     "reconciliation",
 })
+RECOVERY_DERIVED_FIELDS: frozenset[str] = frozenset((
+    *CALCULATED_COLUMNS,
+    "AI_P",
+    "FUTURE_RET_5",
+    "T",
+))
+_RECOVERY_RECEIPT_FIELDS = frozenset({
+    "schema_version",
+    "mode",
+    "symbol",
+    "recovery_target_market_date",
+    "input_artifact_sha256",
+    "original_artifact_sha256",
+    "backup_target_market_date",
+    "backup_series_manifest_sha256",
+    "backup_manifest_entry_sha256",
+    "backup_object_size",
+    "backup_object_uncompressed_size",
+    "restored_start_date",
+    "restored_end_date",
+    "restored_row_count",
+    "restored_daily_sha256",
+    "receipt_sha256",
+})
+_RECOVERY_OHLCV_FIELDS = ("Open", "High", "Low", "Close", "Volume")
 
 
 class IncrementalHistoryError(RuntimeError):
@@ -91,6 +119,34 @@ def _parse_date(value: Any) -> _datetime.date:
             return _datetime.date.fromisoformat(str(value)[:10])
         except ValueError as exc:
             raise IncrementalHistoryError("historical row date is invalid") from exc
+
+
+def _canonical_json_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {
+            str(key): _canonical_json_value(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, (tuple, list)):
+        return [_canonical_json_value(item) for item in value]
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float):
+        if math.isfinite(value):
+            return value
+    raise IncrementalHistoryError("canonical JSON value is invalid")
+
+
+def _canonical_recovery_source_row(row: Mapping[str, Any]) -> dict[str, Any]:
+    if not isinstance(row, Mapping):
+        raise IncrementalHistoryError("daily history row is invalid")
+    value = {
+        name: item
+        for name, item in row.items()
+        if name not in RECOVERY_DERIVED_FIELDS and not str(name).startswith("_")
+    }
+    value["Date"] = _parse_date(value.get("Date")).isoformat()
+    return value
 
 
 def _artifact_path(root: Path, symbol: str) -> Path:
@@ -241,9 +297,12 @@ class OfficialCompatFetcher:
         *,
         pd: Any,
         legacy_overlap_policy: str = "strict",
+        recovery_resolver: HistoryRecoveryResolver | None = None,
     ):
         if legacy_overlap_policy not in LEGACY_OVERLAP_POLICIES:
             raise ValueError("unknown legacy overlap policy")
+        if recovery_resolver is not None and not callable(recovery_resolver):
+            raise TypeError("history recovery resolver is invalid")
         self.root = Path(root)
         is_daily_snapshot = isinstance(source, OfficialDailySnapshot)
         if is_daily_snapshot:
@@ -298,7 +357,9 @@ class OfficialCompatFetcher:
             raise ValueError("official series manifest is invalid")
         self.pd = pd
         self.legacy_overlap_policy = legacy_overlap_policy
+        self.recovery_resolver = recovery_resolver
         self._artifacts: dict[str, IncrementalArtifact] = {}
+        self._history_recovery: dict[str, HistoryRecoveryResult | None] = {}
         self._lineage_kinds: dict[str, str] = {}
         self._existing_reconciliations: dict[str, dict[str, Any]] = {}
         self._existing_reconciliation_history: dict[
@@ -307,6 +368,7 @@ class OfficialCompatFetcher:
         self._reconciliation_dates: dict[
             str, dict[_datetime.date, dict[str, str]]
         ] = {}
+        self._existing_recovery_receipts: dict[str, dict[str, Any]] = {}
 
     def _load_artifact(self, symbol: str) -> IncrementalArtifact:
         if symbol not in self._artifacts:
@@ -318,6 +380,19 @@ class OfficialCompatFetcher:
             )
         return artifact
 
+    def _ensure_history_recovery(
+        self,
+        symbol: str,
+    ) -> HistoryRecoveryResult | None:
+        if symbol not in self._history_recovery:
+            artifact = self._load_artifact(symbol)
+            self._history_recovery[symbol] = (
+                None
+                if self.recovery_resolver is None
+                else self.recovery_resolver(symbol, artifact)
+            )
+        return self._history_recovery[symbol]
+
     @staticmethod
     def _is_sha256(value: Any) -> bool:
         return (
@@ -327,18 +402,21 @@ class OfficialCompatFetcher:
         )
 
     @staticmethod
-    def _canonical_json_sha256(value: Any) -> str | None:
-        try:
-            payload = json.dumps(
-                value,
-                ensure_ascii=True,
-                allow_nan=False,
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode("utf-8")
-        except (TypeError, ValueError):
-            return None
+    def _canonical_json_sha256(value: Any) -> str:
+        payload = json.dumps(
+            _canonical_json_value(value),
+            ensure_ascii=True,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
         return hashlib.sha256(payload).hexdigest()
+
+    @staticmethod
+    def _canonical_recovery_source_row(
+        row: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        return _canonical_recovery_source_row(row)
 
     @staticmethod
     def _canonical_series_sha256(
@@ -369,7 +447,7 @@ class OfficialCompatFetcher:
 
     @staticmethod
     def _date_list(value: Any) -> tuple[_datetime.date, ...] | None:
-        if not isinstance(value, list) or not value:
+        if not isinstance(value, (list, tuple)) or not value:
             return None
         try:
             dates = tuple(_datetime.date.fromisoformat(item) for item in value)
@@ -387,7 +465,7 @@ class OfficialCompatFetcher:
         target_date: _datetime.date,
     ) -> bool:
         if (
-            not isinstance(value, dict)
+            not isinstance(value, Mapping)
             or value.get("schema_version") != 2
             or value.get("mode") != "replace_verified_legacy"
             or not cls._is_sha256(value.get("legacy_artifact_sha256"))
@@ -409,7 +487,7 @@ class OfficialCompatFetcher:
         manifests = value.get("official_snapshot_manifests")
         if (
             snapshot_dates is None
-            or not isinstance(manifests, list)
+            or not isinstance(manifests, (list, tuple))
             or len(manifests) != len(snapshot_dates)
             or legacy_as_of > target_date
             or snapshot_dates[-1] > target_date
@@ -417,7 +495,7 @@ class OfficialCompatFetcher:
             return False
         for item, snapshot_date in zip(manifests, snapshot_dates):
             if (
-                not isinstance(item, dict)
+                not isinstance(item, Mapping)
                 or item.get("date") != snapshot_date.isoformat()
                 or not cls._is_sha256(item.get("manifest_sha256"))
             ):
@@ -446,7 +524,7 @@ class OfficialCompatFetcher:
             preserved_name = f"{dataset}_preserved_no_official_row_dates"
             for name in (replaced_name, preserved_name):
                 raw = value.get(name)
-                parsed = () if raw == [] else cls._date_list(raw)
+                parsed = () if raw in ([], ()) else cls._date_list(raw)
                 if parsed is None:
                     return False
                 partitions[name] = parsed
@@ -455,11 +533,11 @@ class OfficialCompatFetcher:
             if replaced & preserved or replaced | preserved != set(overlap):
                 return False
         evidence = value.get("date_evidence")
-        if not isinstance(evidence, list) or len(evidence) != len(overlap):
+        if not isinstance(evidence, (list, tuple)) or len(evidence) != len(overlap):
             return False
         for row, row_date in zip(evidence, overlap):
             if (
-                not isinstance(row, dict)
+                not isinstance(row, Mapping)
                 or row.get("date") != row_date.isoformat()
             ):
                 return False
@@ -472,6 +550,334 @@ class OfficialCompatFetcher:
                 if row.get(f"{dataset}_action") != expected:
                     return False
         return True
+
+    @staticmethod
+    def _positive_int(value: Any) -> bool:
+        return type(value) is int and value > 0
+
+    @classmethod
+    def _valid_recovery_receipt(
+        cls,
+        value: Any,
+        *,
+        symbol: str,
+        recovery_bindings: Iterable[tuple[Mapping[str, Any], str]],
+    ) -> bool:
+        if (
+            not isinstance(value, Mapping)
+            or set(value) != _RECOVERY_RECEIPT_FIELDS
+            or value.get("schema_version") != 1
+            or value.get("mode") != "restore_verified_reconciliation_backup"
+            or value.get("symbol") != symbol
+            or not all(
+                cls._is_sha256(value.get(name))
+                for name in (
+                    "input_artifact_sha256",
+                    "original_artifact_sha256",
+                    "backup_series_manifest_sha256",
+                    "backup_manifest_entry_sha256",
+                    "restored_daily_sha256",
+                    "receipt_sha256",
+                )
+            )
+            or not all(
+                cls._positive_int(value.get(name))
+                for name in (
+                    "backup_object_size",
+                    "backup_object_uncompressed_size",
+                    "restored_row_count",
+                )
+            )
+        ):
+            return False
+        try:
+            recovery_target = _datetime.date.fromisoformat(
+                value["recovery_target_market_date"]
+            )
+            backup_target = _datetime.date.fromisoformat(
+                value["backup_target_market_date"]
+            )
+            start = _datetime.date.fromisoformat(value["restored_start_date"])
+            end = _datetime.date.fromisoformat(value["restored_end_date"])
+            unsigned = {name: item for name, item in value.items() if name != "receipt_sha256"}
+            if (
+                start > end
+                or recovery_target < backup_target
+                or cls._canonical_json_sha256(unsigned) != value["receipt_sha256"]
+            ):
+                return False
+        except (IncrementalHistoryError, KeyError, TypeError, ValueError):
+            return False
+        for reconciliation, artifact_sha256 in recovery_bindings:
+            dates = cls._date_list(reconciliation.get("official_snapshot_dates"))
+            if (
+                dates is not None
+                and artifact_sha256 == value["input_artifact_sha256"]
+                and reconciliation.get("legacy_artifact_sha256")
+                == value["original_artifact_sha256"]
+                and dates[-1] == backup_target
+                and reconciliation.get("official_series_manifest_sha256")
+                == value["backup_series_manifest_sha256"]
+            ):
+                return True
+        return False
+
+    @staticmethod
+    def _normalized_persisted_daily(value: Any) -> list[dict[str, Any]]:
+        if not isinstance(value, (list, tuple)) or not value:
+            raise IncrementalHistoryError("persisted daily history is invalid")
+        rows = []
+        previous: _datetime.date | None = None
+        for row in value:
+            if not isinstance(row, Mapping):
+                raise IncrementalHistoryError("persisted daily history is invalid")
+            day = _parse_date(row.get("Date"))
+            if previous is not None and day <= previous:
+                raise IncrementalHistoryError("persisted daily history is invalid")
+            normalized = dict(row)
+            normalized["Date"] = day.isoformat()
+            rows.append(normalized)
+            previous = day
+        return rows
+
+    def _validated_recovery_backup(
+        self,
+        result: HistoryRecoveryResult,
+        *,
+        symbol: str,
+    ) -> tuple[
+        dict[_datetime.date, dict[str, Any]],
+        tuple[_datetime.date, ...],
+        dict[_datetime.date, dict[str, str]],
+        str,
+        dict[str, Any],
+    ]:
+        if (
+            not isinstance(result, HistoryRecoveryResult)
+            or not self._is_sha256(result.input_artifact_sha256)
+            or not self._is_sha256(result.original_artifact_sha256)
+            or not self._is_sha256(result.expected_result_sha256)
+            or not isinstance(result.backup_target_market_date, _datetime.date)
+            or isinstance(result.backup_target_market_date, _datetime.datetime)
+            or not self._is_sha256(result.backup_series_manifest_sha256)
+            or not isinstance(result.backup_manifest_entry, Mapping)
+            or not self._valid_reconciliation(
+                result.reconciliation,
+                target_date=result.backup_target_market_date,
+            )
+        ):
+            raise IncrementalHistoryError("daily history recovery binding is invalid")
+        entry = result.backup_manifest_entry
+        entry_sha256 = self._canonical_json_sha256(entry)
+        if (
+            entry.get("original_sha256") != result.original_artifact_sha256
+            or entry.get("new_sha256") != result.expected_result_sha256
+            or not self._positive_int(entry.get("original_size"))
+            or not self._positive_int(entry.get("original_uncompressed_size"))
+            or result.reconciliation.get("legacy_artifact_sha256")
+            != result.original_artifact_sha256
+            or result.reconciliation.get("official_series_manifest_sha256")
+            != result.backup_series_manifest_sha256
+            or _datetime.date.fromisoformat(
+                result.reconciliation["official_snapshot_dates"][-1]
+            ) != result.backup_target_market_date
+        ):
+            raise IncrementalHistoryError("daily history recovery binding is invalid")
+        backup: dict[_datetime.date, dict[str, Any]] = {}
+        previous: _datetime.date | None = None
+        for row in result.backup_daily:
+            if not isinstance(row, Mapping):
+                raise IncrementalHistoryError("daily history recovery backup is invalid")
+            day = _parse_date(row.get("Date"))
+            if previous is not None and day <= previous:
+                raise IncrementalHistoryError("daily history recovery backup is invalid")
+            backup[day] = dict(row, Date=day.isoformat())
+            previous = day
+        candidates = []
+        for row in result.restored_candidates:
+            if not isinstance(row, Mapping):
+                raise IncrementalHistoryError("daily history recovery backup is invalid")
+            day = _parse_date(row.get("Date"))
+            if day not in backup or day in candidates:
+                raise IncrementalHistoryError("daily history recovery backup is invalid")
+            candidates.append(day)
+        if candidates != sorted(candidates):
+            raise IncrementalHistoryError("daily history recovery backup is invalid")
+        evidence = {
+            _datetime.date.fromisoformat(row["date"]): dict(row)
+            for row in result.reconciliation["date_evidence"]
+        }
+        return backup, tuple(candidates), evidence, entry_sha256, dict(entry)
+
+    def _validate_recovered_final_row(
+        self,
+        *,
+        symbol: str,
+        final: Mapping[str, Any],
+        backup: Mapping[str, Any],
+        day: _datetime.date,
+        evidence: Mapping[_datetime.date, Mapping[str, str]],
+    ) -> None:
+        if final.get("Date") != backup.get("Date"):
+            raise IncrementalHistoryError("daily history recovery final row is invalid")
+        actions = evidence.get(day, {})
+        snapshot = self.snapshots.get(day)
+        if actions.get("price_action") == "replaced_official":
+            if snapshot is None:
+                raise IncrementalHistoryError("daily history recovery official row is unavailable")
+            official = self._official_price(snapshot, symbol)
+            if official is None or any(
+                self._number(final, historical) != float(official[official_name])
+                for historical, official_name in (
+                    ("Open", "open"), ("High", "max"), ("Low", "min"),
+                    ("Close", "close"), ("Volume", "Trading_Volume"),
+                )
+            ):
+                raise IncrementalHistoryError("daily history recovery final row is invalid")
+        else:
+            for name in _RECOVERY_OHLCV_FIELDS:
+                if self._number(final, name) != self._number(backup, name):
+                    raise IncrementalHistoryError("daily history recovery final row is invalid")
+        if actions.get("institutional_action") == "replaced_official":
+            if snapshot is None:
+                raise IncrementalHistoryError("daily history recovery official row is unavailable")
+            institutional = self._official_institutional(snapshot, symbol)
+            total = sum(float(row["buy"]) - float(row["sell"]) for row in institutional)
+            foreign = sum(
+                float(row["buy"]) - float(row["sell"])
+                for row in institutional if row["name"] == "Foreign"
+            )
+            if (
+                self._number(final, "InstitutionalNet", 0.0) != total
+                or self._number(final, "ForeignNet", 0.0) != foreign
+            ):
+                raise IncrementalHistoryError("daily history recovery final row is invalid")
+        else:
+            for name in ("InstitutionalNet", "ForeignNet"):
+                if self._number(final, name, 0.0) != self._number(
+                    backup, name, 0.0
+                ):
+                    raise IncrementalHistoryError("daily history recovery final row is invalid")
+        if actions.get("margin_action") == "replaced_official":
+            if snapshot is None:
+                raise IncrementalHistoryError("daily history recovery official row is unavailable")
+            margin = self._official_margin(snapshot, symbol)
+            if margin is None or (
+                self._number(final, "MarginBalance", 0.0)
+                != float(margin["MarginPurchaseTodayBalance"])
+                or self._number(final, "ShortBalance", 0.0)
+                != float(margin["ShortSaleTodayBalance"])
+            ):
+                raise IncrementalHistoryError("daily history recovery final row is invalid")
+        else:
+            for name in ("MarginBalance", "ShortBalance"):
+                if self._number(final, name, 0.0) != self._number(
+                    backup, name, 0.0
+                ):
+                    raise IncrementalHistoryError("daily history recovery final row is invalid")
+
+    def _finalize_daily_history_recovery(
+        self,
+        result: HistoryRecoveryResult,
+        *,
+        symbol: str,
+        recovery_target_market_date: _datetime.date,
+        persisted_daily: Any,
+    ) -> dict[str, Any] | None:
+        if (
+            not isinstance(recovery_target_market_date, _datetime.date)
+            or isinstance(recovery_target_market_date, _datetime.datetime)
+        ):
+            raise IncrementalHistoryError("daily history recovery target is invalid")
+        final = self._normalized_persisted_daily(persisted_daily)
+        final_by_date = {
+            _datetime.date.fromisoformat(row["Date"]): row for row in final
+        }
+        backup, candidates, evidence, entry_sha256, entry = self._validated_recovery_backup(
+            result, symbol=symbol
+        )
+        existing = result.existing_receipt
+        if existing is not None:
+            if not self._valid_recovery_receipt(
+                dict(existing),
+                symbol=symbol,
+                recovery_bindings=((result.reconciliation, result.expected_result_sha256),),
+            ):
+                raise IncrementalHistoryError("daily history recovery receipt is invalid")
+            receipt = dict(existing)
+            if (
+                receipt["original_artifact_sha256"] != result.original_artifact_sha256
+                or receipt["backup_target_market_date"]
+                != result.backup_target_market_date.isoformat()
+                or receipt["backup_series_manifest_sha256"]
+                != result.backup_series_manifest_sha256
+                or receipt["backup_manifest_entry_sha256"] != entry_sha256
+                or receipt["backup_object_size"] != entry["original_size"]
+                or receipt["backup_object_uncompressed_size"]
+                != entry["original_uncompressed_size"]
+                or entry.get("new_sha256") != result.expected_result_sha256
+            ):
+                raise IncrementalHistoryError("daily history recovery receipt is invalid")
+            start = _datetime.date.fromisoformat(receipt["restored_start_date"])
+            end = _datetime.date.fromisoformat(receipt["restored_end_date"])
+            authorized = [day for day in sorted(backup) if start <= day <= end]
+            if (
+                not authorized
+                or len(authorized) != receipt["restored_row_count"]
+                or authorized[0] != start
+                or authorized[-1] != end
+            ):
+                raise IncrementalHistoryError("daily history recovery receipt is invalid")
+        else:
+            authorized = [day for day in candidates if day in final_by_date]
+            if not authorized:
+                return None
+            start, end = authorized[0], authorized[-1]
+        retained = []
+        missing = []
+        for day in authorized:
+            row = final_by_date.get(day)
+            if row is None:
+                missing.append(day)
+                continue
+            self._validate_recovered_final_row(
+                symbol=symbol,
+                final=row,
+                backup=backup[day],
+                day=day,
+                evidence=evidence,
+            )
+            retained.append(self._canonical_recovery_source_row(row))
+        if missing:
+            floor = _datetime.date.fromisoformat(final[0]["Date"])
+            if any(day >= floor for day in missing):
+                raise IncrementalHistoryError("daily history recovery receipt is invalid")
+        if existing is not None:
+            if not missing and (
+                receipt["restored_daily_sha256"]
+                != self._canonical_json_sha256(retained)
+                or receipt["restored_row_count"] != len(retained)
+            ):
+                raise IncrementalHistoryError("daily history recovery receipt is invalid")
+            return receipt
+        unsigned = {
+            "schema_version": 1,
+            "mode": "restore_verified_reconciliation_backup",
+            "symbol": symbol,
+            "recovery_target_market_date": recovery_target_market_date.isoformat(),
+            "input_artifact_sha256": result.input_artifact_sha256,
+            "original_artifact_sha256": result.original_artifact_sha256,
+            "backup_target_market_date": result.backup_target_market_date.isoformat(),
+            "backup_series_manifest_sha256": result.backup_series_manifest_sha256,
+            "backup_manifest_entry_sha256": entry_sha256,
+            "backup_object_size": entry["original_size"],
+            "backup_object_uncompressed_size": entry["original_uncompressed_size"],
+            "restored_start_date": start.isoformat(),
+            "restored_end_date": end.isoformat(),
+            "restored_row_count": len(retained),
+            "restored_daily_sha256": self._canonical_json_sha256(retained),
+        }
+        return {**unsigned, "receipt_sha256": self._canonical_json_sha256(unsigned)}
 
     @classmethod
     def _valid_official_lineage(
@@ -620,10 +1026,24 @@ class OfficialCompatFetcher:
                 or len(artifact_hashes) != len(set(artifact_hashes))
             ):
                 return False
-            return True
+            receipt = lineage.get("daily_history_recovery", _MISSING)
+            return (
+                receipt is _MISSING
+                or cls._valid_recovery_receipt(
+                    receipt,
+                    symbol=artifact.symbol,
+                    recovery_bindings=(
+                        (
+                            item["reconciliation"],
+                            item["reconciled_artifact_sha256"],
+                        )
+                        for item in history
+                    ),
+                )
+            )
         if reconciliation is _MISSING:
-            return True
-        return (
+            return "daily_history_recovery" not in lineage
+        valid_direct = (
             cls._valid_reconciliation(
                 reconciliation,
                 target_date=target_date,
@@ -642,6 +1062,7 @@ class OfficialCompatFetcher:
             and lineage["official_snapshot_manifests"]
             == reconciliation["official_snapshot_manifests"]
         )
+        return valid_direct and "daily_history_recovery" not in lineage
 
     def _lineage_kind(self, symbol: str) -> str:
         if symbol in self._lineage_kinds:
@@ -662,6 +1083,9 @@ class OfficialCompatFetcher:
                 self._existing_reconciliation_history[symbol] = copy.deepcopy(
                     history
                 )
+            receipt = lineage.get("daily_history_recovery")
+            if receipt is not None:
+                self._existing_recovery_receipts[symbol] = copy.deepcopy(receipt)
         else:
             raise IncrementalHistoryError(
                 "historical artifact lineage is not eligible for reconciliation: "
@@ -690,8 +1114,14 @@ class OfficialCompatFetcher:
         end: _datetime.date,
     ) -> list[dict[str, Any]]:
         artifact = self._load_artifact(symbol)
-        rows = []
-        for item in artifact.document["daily"]:
+        recovery = self._ensure_history_recovery(symbol)
+        daily = (
+            recovery.merged_daily
+            if recovery is not None
+            else artifact.document["daily"]
+        )
+        rows: list[dict[str, Any]] = []
+        for item in daily:
             row_date = _parse_date(item.get("Date"))
             if start <= row_date <= end:
                 rows.append(dict(item, _date=row_date))
@@ -1120,8 +1550,14 @@ class OfficialCompatFetcher:
             ],
         }
 
-    def lineage_for(self, symbol: str) -> dict[str, Any]:
+    def lineage_for(
+        self,
+        symbol: str,
+        *,
+        persisted_daily: Any | None = None,
+    ) -> dict[str, Any]:
         artifact = self._load_artifact(symbol)
+        recovery = self._ensure_history_recovery(symbol)
         self._lineage_kind(symbol)
         status = self.status_for(symbol)
         lineage = {
@@ -1203,4 +1639,49 @@ class OfficialCompatFetcher:
             )
         if reconciliation is not None:
             lineage["legacy_reconciliation"] = copy.deepcopy(reconciliation)
+        if recovery is not None:
+            receipt = self._finalize_daily_history_recovery(
+                recovery,
+                symbol=symbol,
+                recovery_target_market_date=self.target_date,
+                persisted_daily=(
+                    artifact.document["daily"]
+                    if persisted_daily is None
+                    else persisted_daily
+                ),
+            )
+            if receipt is not None:
+                direct = self._existing_reconciliations.get(symbol)
+                if direct is not None:
+                    if (
+                        self._existing_reconciliation_history.get(symbol)
+                        or recovery.expected_result_sha256
+                        != recovery.input_artifact_sha256
+                        or direct["legacy_artifact_sha256"]
+                        != recovery.original_artifact_sha256
+                        or _datetime.date.fromisoformat(
+                            direct["official_snapshot_dates"][-1]
+                        ) != recovery.backup_target_market_date
+                        or direct["official_series_manifest_sha256"]
+                        != recovery.backup_series_manifest_sha256
+                    ):
+                        raise IncrementalHistoryError(
+                            "daily history recovery direct binding is invalid"
+                        )
+                    history_item = {
+                        "schema_version": 2,
+                        "symbol": symbol,
+                        "reconciled_artifact_sha256": recovery.input_artifact_sha256,
+                        "reconciliation": copy.deepcopy(direct),
+                    }
+                    history_item["history_sha256"] = self._canonical_json_sha256(
+                        history_item
+                    )
+                    lineage.pop("legacy_reconciliation", None)
+                    lineage["legacy_reconciliation_history"] = [history_item]
+                lineage["daily_history_recovery"] = dict(receipt)
+        elif symbol in self._existing_recovery_receipts:
+            lineage["daily_history_recovery"] = copy.deepcopy(
+                self._existing_recovery_receipts[symbol]
+            )
         return lineage

@@ -20,6 +20,7 @@ from stock_papi.integrations.market_data.tw_official_historical import (
 from stock_papi.integrations.market_data.tw_trading_status import evidence_sha256
 from stock_papi.quant.tw_artifact_audit import audit_artifact_dates
 from stock_papi.quant.tw_incremental import (
+    HistoryRecoveryResult,
     IncrementalHistoryError,
     OfficialCompatFetcher,
     load_incremental_artifact,
@@ -545,6 +546,402 @@ class TWOfficialIncrementalTests(unittest.TestCase):
             fetcher = OfficialCompatFetcher(Path(temporary), snapshot(), pd=pd)
             with self.assertRaises(IncrementalHistoryError):
                 fetcher("TaiwanStockPrice", "2330", "2026-07-24", "2026-07-24")
+
+    def _recovery_fixture(self, temporary, *, direct=False):
+        current = (
+            target_history(
+                Open=1100.0,
+                High=1120.0,
+                Low=1090.0,
+                Close=1110.0,
+                Volume=1000.0,
+                InstitutionalNet=90.0,
+                ForeignNet=80.0,
+                MarginBalance=5000.0,
+                ShortBalance=200.0,
+            )
+            if direct
+            else history()
+        )
+        lineage = _MISSING
+        reconciliation = reconciliation_record()
+        reconciliation["legacy_artifact_sha256"] = "b" * 64
+        if direct:
+            lineage = official_lineage(reconciliation=reconciliation)
+            write_artifact(
+                temporary,
+                daily=current,
+                as_of=TARGET.isoformat(),
+                source_lineage=lineage,
+            )
+        else:
+            write_artifact(temporary, daily=current)
+        artifact = load_incremental_artifact(Path(temporary), "2330")
+        backup = dict(history()[0], Date="2026-07-16T00:00:00.000")
+        entry = {
+            "symbol": "2330",
+            "status": "applied",
+            "original_sha256": "b" * 64,
+            "original_size": 123,
+            "original_uncompressed_size": 456,
+            "backup_path": f"objects/{'b' * 64}.json.gz",
+            "overlap_dates": [TARGET.isoformat()],
+            "new_sha256": artifact.compressed_sha256,
+        }
+        result = HistoryRecoveryResult(
+            merged_daily=(
+                MappingProxyType(backup),
+                MappingProxyType(dict(current[0])),
+            ),
+            restored_candidates=(MappingProxyType(backup),),
+            backup_daily=(MappingProxyType(backup),),
+            input_artifact_sha256=artifact.compressed_sha256,
+            original_artifact_sha256="b" * 64,
+            expected_result_sha256=artifact.compressed_sha256,
+            backup_target_market_date=TARGET,
+            backup_series_manifest_sha256=reconciliation[
+                "official_series_manifest_sha256"
+            ],
+            backup_manifest_entry=MappingProxyType(entry),
+            reconciliation=MappingProxyType(reconciliation),
+            existing_receipt=None,
+        )
+        calls = []
+
+        def resolver(symbol, received):
+            calls.append((symbol, received.compressed_sha256))
+            return result
+
+        return (
+            OfficialCompatFetcher(
+                Path(temporary),
+                snapshot(),
+                pd=pd,
+                recovery_resolver=resolver,
+            ),
+            result,
+            calls,
+        )
+
+    @staticmethod
+    def _daily_bytes(value):
+        return json.dumps(
+            value, sort_keys=True, separators=(",", ":"), allow_nan=False
+        ).encode("utf-8")
+
+    def test_recovery_resolver_is_optional_and_not_called_by_default(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            write_artifact(temporary, daily=history())
+            fetcher = OfficialCompatFetcher(
+                Path(temporary), snapshot(), pd=pd, recovery_resolver=None
+            )
+            fetcher("TaiwanStockPrice", "2330", "2026-07-01", "2026-07-24")
+            self.assertIsNone(fetcher._ensure_history_recovery("2330"))
+
+    def test_recovery_resolver_is_called_once_for_all_dataset_orders(self):
+        for datasets in (
+            (
+                "TaiwanStockPrice",
+                "TaiwanStockInstitutionalInvestorsBuySell",
+                "TaiwanStockMarginPurchaseShortSale",
+            ),
+            (
+                "TaiwanStockMarginPurchaseShortSale",
+                "TaiwanStockInstitutionalInvestorsBuySell",
+                "TaiwanStockPrice",
+            ),
+        ):
+            with self.subTest(datasets=datasets), tempfile.TemporaryDirectory() as temporary:
+                fetcher, _result, calls = self._recovery_fixture(temporary)
+                for dataset in datasets:
+                    fetcher(dataset, "2330", "2026-07-01", "2026-07-24")
+                self.assertEqual(calls, [("2330", calls[0][1])])
+
+    def test_recovered_daily_rows_filter_each_requested_range_after_cache(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            fetcher, _result, calls = self._recovery_fixture(temporary)
+            first = fetcher(
+                "TaiwanStockPrice", "2330", "2026-07-16", "2026-07-16"
+            )
+            second = fetcher(
+                "TaiwanStockPrice", "2330", "2026-07-22", "2026-07-22"
+            )
+        self.assertEqual(list(first.date), ["2026-07-16"])
+        self.assertEqual(list(second.date), ["2026-07-22"])
+        self.assertEqual(len(calls), 1)
+
+    def test_dataset_call_orders_are_byte_identical(self):
+        datasets = (
+            "TaiwanStockPrice",
+            "TaiwanStockInstitutionalInvestorsBuySell",
+            "TaiwanStockMarginPurchaseShortSale",
+        )
+        outputs = set()
+        for order in __import__("itertools").permutations(datasets):
+            with tempfile.TemporaryDirectory() as temporary:
+                fetcher, result, calls = self._recovery_fixture(temporary)
+                for dataset in order:
+                    fetcher(dataset, "2330", "2026-07-01", "2026-07-24")
+                lineage = fetcher.lineage_for(
+                    "2330", persisted_daily=[dict(row) for row in result.merged_daily]
+                )
+                outputs.add(
+                    self._daily_bytes(
+                        {
+                            "daily": [dict(row) for row in result.merged_daily],
+                            "daily_history_recovery": lineage[
+                                "daily_history_recovery"
+                            ],
+                        }
+                    )
+                )
+                self.assertEqual(len(calls), 1)
+        self.assertEqual(len(outputs), 1)
+
+    def test_receipt_hashes_only_restored_rows_in_final_persisted_daily(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            fetcher, result, _calls = self._recovery_fixture(temporary)
+            final = [dict(row) for row in result.merged_daily]
+            receipt = fetcher._finalize_daily_history_recovery(
+                result,
+                symbol="2330",
+                recovery_target_market_date=TARGET,
+                persisted_daily=final,
+            )
+        self.assertEqual(receipt["restored_row_count"], 1)
+        self.assertEqual(receipt["restored_start_date"], "2026-07-16")
+        self.assertEqual(
+            receipt["restored_daily_sha256"],
+            fetcher._canonical_json_sha256([fetcher._canonical_recovery_source_row(final[0])]),
+        )
+
+    def test_receipt_hashes_final_persisted_source_projection_not_backup_candidate(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            fetcher, result, _calls = self._recovery_fixture(temporary)
+            final = [dict(row) for row in result.merged_daily]
+            final[0]["Nested"] = {"final": True}
+            receipt = fetcher._finalize_daily_history_recovery(
+                result, symbol="2330", recovery_target_market_date=TARGET, persisted_daily=final
+            )
+        self.assertEqual(
+            receipt["restored_daily_sha256"],
+            fetcher._canonical_json_sha256([fetcher._canonical_recovery_source_row(final[0])]),
+        )
+
+    def test_receipt_allows_recomputed_context_fields_different_from_backup(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            fetcher, result, _calls = self._recovery_fixture(temporary)
+            final = [dict(row) for row in result.merged_daily]
+            final[0].update(
+                MARKET_RET=1.0,
+                ETF50_RET=2.0,
+                OPTION_SIGNAL=3.0,
+                DATA_PRICE_OK=True,
+                YF_CLOSE=4.0,
+            )
+            receipt = fetcher._finalize_daily_history_recovery(
+                result, symbol="2330", recovery_target_market_date=TARGET, persisted_daily=final
+            )
+        self.assertIsNotNone(receipt)
+
+    def test_receipt_allows_evidenced_official_reconciliation_price_chip_margin_replacements(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            write_artifact(temporary, daily=history())
+            fetcher = OfficialCompatFetcher(Path(temporary), series(), pd=pd)
+            artifact = load_incremental_artifact(Path(temporary), "2330")
+            recovered_date = datetime.date(2026, 7, 23)
+            reconciliation = reconciliation_record(
+                replaced_date=recovered_date.isoformat(),
+                legacy_as_of=recovered_date.isoformat(),
+                snapshot_dates=(recovered_date.isoformat(),),
+            )
+            reconciliation["legacy_artifact_sha256"] = "b" * 64
+            backup = dict(target_history()[0], Date=recovered_date.isoformat())
+            final = [dict(history()[0]), dict(backup)]
+            final[1].update(
+                Open=1080.0, High=1100.0, Low=1070.0, Close=1090.0,
+                Volume=1000.0, InstitutionalNet=90.0, ForeignNet=80.0,
+                MarginBalance=5000.0, ShortBalance=200.0,
+            )
+            entry = {
+                "symbol": "2330", "status": "applied", "original_sha256": "b" * 64,
+                "original_size": 123, "original_uncompressed_size": 456,
+                "backup_path": f"objects/{'b' * 64}.json.gz",
+                "overlap_dates": [recovered_date.isoformat()],
+                "new_sha256": artifact.compressed_sha256,
+            }
+            result = HistoryRecoveryResult(
+                merged_daily=tuple(MappingProxyType(row) for row in final),
+                restored_candidates=(MappingProxyType(backup),),
+                backup_daily=(MappingProxyType(backup),),
+                input_artifact_sha256=artifact.compressed_sha256,
+                original_artifact_sha256="b" * 64,
+                expected_result_sha256=artifact.compressed_sha256,
+                backup_target_market_date=recovered_date,
+                backup_series_manifest_sha256=reconciliation["official_series_manifest_sha256"],
+                backup_manifest_entry=MappingProxyType(entry),
+                reconciliation=MappingProxyType(reconciliation),
+                existing_receipt=None,
+            )
+            receipt = fetcher._finalize_daily_history_recovery(
+                result, symbol="2330", recovery_target_market_date=TARGET, persisted_daily=final
+            )
+        self.assertIsNotNone(receipt)
+
+    def test_receipt_rejects_unauthorized_final_ohlcv_difference(self):
+        for field, value in (
+            ("Close", 999.0),
+            ("InstitutionalNet", 999.0),
+            ("MarginBalance", 999.0),
+        ):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as temporary:
+                fetcher, result, _calls = self._recovery_fixture(temporary)
+                final = [dict(row) for row in result.merged_daily]
+                final[0][field] = value
+                with self.assertRaises(IncrementalHistoryError):
+                    fetcher._finalize_daily_history_recovery(
+                        result, symbol="2330", recovery_target_market_date=TARGET, persisted_daily=final
+                    )
+
+    def test_zero_retained_rows_without_receipt_returns_none(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            fetcher, result, _calls = self._recovery_fixture(temporary)
+            self.assertIsNone(fetcher._finalize_daily_history_recovery(
+                result, symbol="2330", recovery_target_market_date=TARGET,
+                persisted_daily=[dict(result.merged_daily[-1])],
+            ))
+
+    def test_opt_in_rerun_rebinds_existing_receipt_to_current_verified_backup(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            fetcher, result, _calls = self._recovery_fixture(temporary)
+            final = [dict(row) for row in result.merged_daily]
+            receipt = fetcher._finalize_daily_history_recovery(
+                result, symbol="2330", recovery_target_market_date=TARGET, persisted_daily=final
+            )
+            rebound = HistoryRecoveryResult(**{
+                **result.__dict__,
+                "input_artifact_sha256": "c" * 64,
+                "expected_result_sha256": result.input_artifact_sha256,
+                "existing_receipt": MappingProxyType(receipt),
+            })
+            self.assertEqual(receipt, fetcher._finalize_daily_history_recovery(
+                rebound, symbol="2330", recovery_target_market_date=TARGET, persisted_daily=final
+            ))
+
+    def test_existing_receipt_revalidation_uses_current_persisted_source_projection(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            fetcher, result, _calls = self._recovery_fixture(temporary)
+            final = [dict(row) for row in result.merged_daily]
+            receipt = fetcher._finalize_daily_history_recovery(result, symbol="2330", recovery_target_market_date=TARGET, persisted_daily=final)
+            final[0]["MARKET_RET"] = 5.0
+            rebound = HistoryRecoveryResult(**{**result.__dict__, "existing_receipt": MappingProxyType(receipt)})
+            with self.assertRaises(IncrementalHistoryError):
+                fetcher._finalize_daily_history_recovery(rebound, symbol="2330", recovery_target_market_date=TARGET, persisted_daily=final)
+
+    def test_existing_receipt_rejects_in_window_final_persisted_row_mutation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            fetcher, result, _calls = self._recovery_fixture(temporary)
+            final = [dict(row) for row in result.merged_daily]
+            receipt = fetcher._finalize_daily_history_recovery(result, symbol="2330", recovery_target_market_date=TARGET, persisted_daily=final)
+            final[0]["Close"] = 999.0
+            rebound = HistoryRecoveryResult(**{**result.__dict__, "existing_receipt": MappingProxyType(receipt)})
+            with self.assertRaises(IncrementalHistoryError):
+                fetcher._finalize_daily_history_recovery(rebound, symbol="2330", recovery_target_market_date=TARGET, persisted_daily=final)
+
+    def test_direct_recovery_promotes_reconciliation_to_history_and_artifact_rerun_is_byte_identical(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            fetcher, result, _calls = self._recovery_fixture(temporary, direct=True)
+            final = [dict(row) for row in result.merged_daily]
+            first = fetcher.lineage_for("2330", persisted_daily=final)
+            self.assertNotIn("legacy_reconciliation", first)
+            self.assertEqual(len(first["legacy_reconciliation_history"]), 1)
+            self.assertEqual(first["daily_history_recovery"]["input_artifact_sha256"], result.input_artifact_sha256)
+            self.assertTrue(OfficialCompatFetcher._valid_official_lineage(
+                first, load_incremental_artifact(Path(temporary), "2330")
+            ))
+
+    def test_existing_receipt_rebind_allows_only_retention_aged_rows_to_be_absent(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            fetcher, result, _calls = self._recovery_fixture(temporary)
+            final = [dict(row) for row in result.merged_daily]
+            receipt = fetcher._finalize_daily_history_recovery(result, symbol="2330", recovery_target_market_date=TARGET, persisted_daily=final)
+            rebound = HistoryRecoveryResult(**{**result.__dict__, "existing_receipt": MappingProxyType(receipt)})
+            self.assertEqual(receipt, fetcher._finalize_daily_history_recovery(
+                rebound, symbol="2330", recovery_target_market_date=TARGET,
+                persisted_daily=[dict(final[-1])],
+            ))
+
+    def test_changed_parseable_manifest_entry_fails_existing_receipt_revalidation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            fetcher, result, _calls = self._recovery_fixture(temporary)
+            final = [dict(row) for row in result.merged_daily]
+            receipt = fetcher._finalize_daily_history_recovery(result, symbol="2330", recovery_target_market_date=TARGET, persisted_daily=final)
+            entry = dict(result.backup_manifest_entry, original_size=999)
+            rebound = HistoryRecoveryResult(**{
+                **result.__dict__, "backup_manifest_entry": MappingProxyType(entry),
+                "existing_receipt": MappingProxyType(receipt),
+            })
+            with self.assertRaises(IncrementalHistoryError):
+                fetcher._finalize_daily_history_recovery(rebound, symbol="2330", recovery_target_market_date=TARGET, persisted_daily=final)
+
+    def test_canonical_json_normalizes_immutable_mappings_and_sequences(self):
+        value = MappingProxyType({"row": (1, MappingProxyType({"ok": True}))})
+        expected = {"row": [1, {"ok": True}]}
+        self.assertEqual(
+            OfficialCompatFetcher._canonical_json_sha256(value),
+            OfficialCompatFetcher._canonical_json_sha256(expected),
+        )
+
+    def test_canonical_json_normalizes_nested_immutable_mappings(self):
+        value = MappingProxyType({"outer": MappingProxyType({"inner": ("x", 1)})})
+        self.assertEqual(
+            OfficialCompatFetcher._canonical_json_sha256(value),
+            OfficialCompatFetcher._canonical_json_sha256({"outer": {"inner": ["x", 1]}}),
+        )
+
+    def test_canonical_json_rejects_unsupported_and_nonfinite_values(self):
+        for value in (object(), float("nan"), float("inf"), float("-inf")):
+            with self.subTest(value=repr(value)), self.assertRaises(IncrementalHistoryError):
+                OfficialCompatFetcher._canonical_json_sha256(value)
+
+    def test_backup_manifest_entry_sha256_is_lowercase_64_hex(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            fetcher, result, _calls = self._recovery_fixture(temporary)
+            receipt = fetcher._finalize_daily_history_recovery(
+                result, symbol="2330", recovery_target_market_date=TARGET,
+                persisted_daily=[dict(row) for row in result.merged_daily],
+            )
+        self.assertRegex(receipt["backup_manifest_entry_sha256"], r"^[0-9a-f]{64}$")
+
+    def test_flag_off_carries_valid_receipt_without_quarantine(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            fetcher, result, _calls = self._recovery_fixture(temporary, direct=True)
+            final = [dict(row) for row in result.merged_daily]
+            receipt = fetcher._finalize_daily_history_recovery(result, symbol="2330", recovery_target_market_date=TARGET, persisted_daily=final)
+            lineage = fetcher.lineage_for("2330", persisted_daily=final)
+            path = write_artifact(temporary, daily=final, as_of=TARGET.isoformat(), source_lineage=lineage)
+            with gzip.open(path, "rt", encoding="utf-8") as stream:
+                document = json.load(stream)
+            self.assertEqual(document["source_lineage"]["daily_history_recovery"], receipt)
+            carried = OfficialCompatFetcher(Path(temporary), snapshot(), pd=pd).lineage_for("2330", persisted_daily=final)
+        self.assertEqual(carried["daily_history_recovery"], receipt)
+
+    def test_lineage_rejects_malformed_tampered_cross_symbol_or_zero_row_receipt(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            fetcher, result, _calls = self._recovery_fixture(temporary, direct=True)
+            final = [dict(row) for row in result.merged_daily]
+            lineage = fetcher.lineage_for("2330", persisted_daily=final)
+            for change in (
+                {"symbol": "2303"},
+                {"restored_row_count": 0},
+                {"receipt_sha256": "0" * 64},
+            ):
+                with self.subTest(change=change):
+                    invalid = copy.deepcopy(lineage)
+                    invalid["daily_history_recovery"].update(change)
+                    self.assertFalse(OfficialCompatFetcher._valid_official_lineage(
+                        invalid, load_incremental_artifact(Path(temporary), "2330")
+                    ))
 
 
 class TWLegacyOverlapReconciliationTests(unittest.TestCase):
