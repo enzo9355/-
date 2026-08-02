@@ -8,6 +8,14 @@ from stock_papi.quant.constants import (
 )
 
 
+CALCULATED_COLUMNS: tuple[str, ...] = (
+    "MA_5", "MA20", "RET_1", "RET_5", "RET_20", "RANGE_PCT",
+    "VOL_RATIO", "VOL_CHG", "INST_NET_RATIO", "MARGIN_CHG",
+    "SHORT_CHG", "RSI", "Volat", "MACD_DIF", "MACD",
+    "MACD_OSC", "K", "D", "BB_UP", "BB_DN",
+)
+
+
 def calc_all(frame, *, pd, np):
     frame = frame.copy()
     numeric_columns = [
