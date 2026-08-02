@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 from stock_papi.integrations.market_data.tw_trading_status import evidence_sha256
+from stock_papi.quant.features import CALCULATED_COLUMNS
 
 
 def stock_document(
@@ -53,6 +54,30 @@ def stock_document(
         "daily": daily,
         "sample_data": True,
     }
+
+
+def warmup_stock_document(
+    symbol: str,
+    *,
+    rows: int = 70,
+    warmup_rows: int = 20,
+    as_of: str = "2026-07-03",
+) -> dict:
+    document = stock_document(symbol, rows=rows, as_of=as_of)
+    document["sample_data"] = False
+    for index, row in enumerate(document["daily"]):
+        close = float(row["Close"])
+        row.update(
+            Open=close - 0.5,
+            High=close + 1.0,
+            Low=close - 1.0,
+            Volume=float(1000 + index),
+        )
+        for offset, name in enumerate(CALCULATED_COLUMNS, 1):
+            row[name] = None if index < warmup_rows else float(index + offset)
+        row["AI_P"] = None if index < warmup_rows else 60.0
+    document["latest"] = dict(document["daily"][-1])
+    return document
 
 
 def write_quant_publish(root: Path, documents: list[dict]) -> Path:

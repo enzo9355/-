@@ -3,10 +3,21 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tests.report_fixtures import stock_document, write_quant_publish
+from tests.report_fixtures import stock_document, warmup_stock_document, write_quant_publish
 
 
 class IndustryReportBacktestTests(unittest.TestCase):
+    def test_backtest_filters_null_signals_but_keeps_price_calendar(self):
+        from reporting.config import ReportConfig
+        from reporting.industry_backtest import backtest_industry
+        from reporting.source_loader import StockSnapshot
+
+        document = warmup_stock_document("2330")
+        stock = StockSnapshot.from_document(document, sha256="a" * 64, size=1)
+        result = backtest_industry("半導體", [stock], ReportConfig(min_backtest_periods=2))
+        self.assertEqual(result.rebalance_dates[0].isoformat(), document["daily"][20]["Date"][:10])
+        self.assertGreaterEqual(len(result.rebalance_dates), 9)
+
     def test_five_day_non_overlapping_oos_backtest_cost_and_cash_periods(self):
         from reporting.config import ReportConfig
         from reporting.industry_backtest import backtest_industry

@@ -8,6 +8,7 @@ from pathlib import Path
 
 from tests.report_fixtures import (
     stock_document,
+    warmup_stock_document,
     write_quant_publish,
     write_quant_publish_v3,
 )
@@ -30,6 +31,16 @@ def rewrite_manifest(publish: Path, mutate) -> None:
 
 
 class DailyReportSourceTests(unittest.TestCase):
+    def test_loader_accepts_canonical_warmup_rows_with_null_indicators(self):
+        from reporting.source_loader import load_report_source
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            write_quant_publish(root, [warmup_stock_document("2330")])
+            source = load_report_source(root)
+        self.assertEqual(len(source.stocks[0].daily), 70)
+        self.assertIsNone(source.stocks[0].daily[0]["MA20"])
+
     def test_v3_loader_separates_regular_and_verified_status_artifacts(self):
         from reporting.source_loader import load_report_source
 

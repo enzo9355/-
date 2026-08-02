@@ -2,10 +2,24 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tests.report_fixtures import stock_document, write_quant_publish
+from tests.report_fixtures import stock_document, warmup_stock_document, write_quant_publish
 
 
 class IndustryReportAnalyticsTests(unittest.TestCase):
+    def test_report_filters_null_historical_features_without_dropping_prices(self):
+        from reporting.industry_analytics import build_daily_report
+        from reporting.source_loader import load_report_source
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            document = warmup_stock_document("2330")
+            for row in document["daily"][:20]:
+                row["MARKET_RET_1"] = None
+            write_quant_publish(root, [document])
+            report = build_daily_report(load_report_source(root), {"半導體": ["2330"]})
+        self.assertEqual(report.market.returns[60], None)
+        self.assertEqual(report.industries[0].symbols, ["2330"])
+
     def _source(self):
         temporary = tempfile.TemporaryDirectory()
         root = Path(temporary.name)

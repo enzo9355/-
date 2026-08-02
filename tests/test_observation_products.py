@@ -10,6 +10,7 @@ from reporting.schemas import (
 )
 from stock_papi.config.capabilities import PredictionCapabilityState
 from stock_papi.batch.observation_products import build_observation_dashboard
+from tests.report_fixtures import warmup_stock_document
 from stock_papi.integrations.market_data.tw_trading_status import (
     evidence_sha256,
     resolve_lifecycle_status,
@@ -225,6 +226,15 @@ def _walk_keys(value):
 
 
 class ObservationProductsTests(unittest.TestCase):
+    def test_market_aggregation_uses_canonical_rows_and_ready_latest(self):
+        document = warmup_stock_document("2330")
+        stock = StockSnapshot.from_document(document, sha256="a" * 64, size=1)
+        dashboard = self.build(
+            _source([stock], as_of=stock.as_of), today=datetime.date(2026, 7, 4)
+        )
+        self.assertEqual(dashboard["data_quality"]["available_count"], 1)
+        self.assertTrue(dashboard["market_observation"])
+
     def setUp(self):
         rising = [100 + index for index in range(65)]
         falling = [200 - index for index in range(65)]
