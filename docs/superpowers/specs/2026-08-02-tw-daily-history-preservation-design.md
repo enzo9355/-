@@ -43,7 +43,7 @@ The defect is at the snapshot construction and persistence boundary. Quarantine 
 
 - No synthetic prices, forward-fill, interpolation, or relabeling of an old close as a target-session close.
 - No change to rolling formulas, model features, LightGBM, backtests, prediction targets, or recommendation policy.
-- No second daily-history field and no artifact schema-version bump solely for history preservation.
+- No second daily-history field. Retaining the current artifact schema version is conditional on the repository-wide persisted-reader audit and compatibility tests below proving that every existing consumer safely accepts warm-up indicator `null` values. If that proof fails, implementation stops for a revised schema decision; it does not silently broaden this design.
 - No unlimited retention beyond the existing `get_data(symbol, 730)` contract.
 - No automatic recovery, quarantine scan, filename search, `rglob()`, or arbitrary backup selection.
 - No weakening of official source, lifecycle, reconciliation, artifact-size, gzip-expansion, SHA-256, path, symlink, or reparse-point validation.
@@ -120,6 +120,37 @@ Observation-only mode applies its existing model-column removal to the calculate
 
 Consumers that require complete indicators continue to receive the calculated frame directly inside snapshot construction. Any reader that analyzes persisted `daily` must explicitly filter the required indicator columns with `dropna(subset=required_columns)` or an equivalent check at that consumer boundary; it must not assume every persisted row is feature-ready.
 
+## Persisted `daily` consumer compatibility audit
+
+Before implementation may retain the current schema version, a repository-wide search must inventory every production, reporting, dashboard, research, migration, and validation path that reads a persisted `daily` array. The search must be rerun against the implementation commit; every match must be assigned one of these contracts:
+
+- **canonical-OHLCV**: consumes dates or canonical source fields and must accept indicator `null` values without dropping valid OHLCV rows;
+- **latest-only**: validates or consumes only `daily[-1]` or the separately persisted `latest`; the latest canonical regular-price row remains fully calculated;
+- **feature-ready-history**: reads derived fields across history and must explicitly filter the exact required derived fields before calculation.
+
+The design-time inventory is:
+
+| Reader boundary | Classification | Required compatibility rule |
+| --- | --- | --- |
+| `stock_papi.quant.tw_incremental` | canonical-OHLCV | Preserve all valid ordered/unique canonical rows; do not require derived fields. |
+| `stock_papi.research.pit_dataset` | canonical-OHLCV | Build PIT price/volume history from canonical rows even when warm-up indicators are `null`. |
+| `local_quant._validated_artifact`, `stock_papi.repositories.quant_snapshots`, `stock_papi.quant.tw_artifact_audit`, `stock_papi.quant.tw_legacy_reconciliation`, `stock_papi.batch.tw_official_post_close_cli._assert_complete`, `reporting.source_loader`, `reporting.schemas`, `reporting.migrate_quant_manifest` | latest-only | Continue identity/date/hash/lineage validation and accept earlier indicator `null` values. |
+| `stock_papi.services.observation_view` candle construction | canonical-OHLCV | Keep every valid OHLCV candle independently of derived fields. |
+| `stock_papi.services.observation_view` headline construction | latest-only | Use derived headline values only from the fully calculated latest row. |
+| `stock_papi.services.observation_view` historical MA20 line | feature-ready-history | Retain the explicit non-`null` MA20 check. |
+| `stock_papi.services.stock_analysis.snapshot_dataframe` | feature-ready-history | Filter the complete set of fields required by downstream analysis before the minimum-history check or any `.iloc` access. |
+| `reporting.industry_analytics` return and flow calculations | canonical-OHLCV | Keep canonical return/flow rows independently of derived fields. |
+| `reporting.industry_analytics` historical market/model calculations | feature-ready-history | Retain or add explicit finite-value filtering for each required historical market/model field. |
+| `reporting.industry_backtest` | feature-ready-history | Require finite signal fields at the signal boundary while retaining canonical prices for the unified calendar and forward returns. |
+| `stock_papi.batch.observation_products` return/price-history calculations | canonical-OHLCV | Keep canonical return and rolling-price history independently of derived fields. |
+| `stock_papi.batch.observation_products` indicator observations | latest-only | Use indicators only from the fully calculated latest row. |
+| `stock_papi.batch.oos_diagnostics` | feature-ready-history | Retain explicit finite-value filtering for historical market factors; canonical price/volume liquidity remains independent of derived-field availability. |
+| `stock_papi.batch.daily_products` and application/dashboard callers | latest-only downstream | Consume the validated latest snapshot without assuming earlier rows are feature-ready. |
+
+`scripts/generate_sample_daily_report.py` constructs sample input and is not a persisted production reader; it remains covered only as a report-generation fixture. Any additional reader found by the mandatory implementation-time search must be added to the inventory and classified before code changes proceed.
+
+Compatibility acceptance must exercise reporting source loading, dashboard/market aggregation, report generation, PIT and other research datasets, and quant snapshot loading with fixtures that contain preserved OHLCV warm-up rows and `null` derived values. Every feature-ready boundary must prove that it filters its own required fields; no test may make the fixture pass by deleting persisted warm-up rows.
+
 ## Explicit recovery boundary
 
 The official post-close CLI gains a separate boolean opt-in named `--recover-truncated-history`, defaulting to false. Its programmatic `run()` argument also defaults to false, and the batch/checkpoint identity records the selected recovery mode so a checkpoint cannot resume under different semantics.
@@ -142,15 +173,15 @@ Recovery authority comes only from an already valid `source_lineage`:
 1. Load the current artifact through `load_incremental_artifact()` and require `_valid_official_lineage()` to pass.
 2. If the valid lineage has neither direct `legacy_reconciliation` nor validated `legacy_reconciliation_history`, the symbol is not recovery-eligible and continues unchanged even when the flag is enabled.
 3. For an eligible symbol, read the direct `legacy_reconciliation`, or the reconciliation records inside validated `legacy_reconciliation_history` envelopes.
-4. Derive each possible backup location from that record's exact reconciliation target and `official_series_manifest_sha256`:
+4. For each direct or historical reconciliation record, require a non-empty ordered `official_snapshot_dates` list and define the backup target date exactly as `reconciliation.official_snapshot_dates[-1]`. Derive the only possible backup location from that date and `official_series_manifest_sha256`:
 
    ```text
    <root>/quarantine/tw-recovery/legacy-reconciliation/v2/
-     <reconciliation-target-date>/<series-manifest-sha256>/manifest.json
+     <official_snapshot_dates[-1]>/<series-manifest-sha256>/manifest.json
    ```
 
 5. Do not recursively scan, glob, search by filename, or select the first filesystem match.
-6. A candidate qualifies only when its validated manifest entry binds the same symbol and `legacy_artifact_sha256` recorded by the lineage.
+6. A candidate qualifies only when its validated manifest entry binds the same symbol and `legacy_artifact_sha256` recorded by the lineage. For a historical record, additionally require `manifest_entry.new_sha256 == history_item.reconciled_artifact_sha256`. For a direct record, require the equivalent result binding `manifest_entry.new_sha256 == active_artifact.compressed_sha256`, where that active artifact carries the validated direct `legacy_reconciliation`.
 7. Every recovery-eligible symbol must resolve exactly one distinct qualifying backup object. Repeated lineage references to the same object are deduplicated by the same SHA. Zero or multiple different qualifying objects fail closed.
 
 The existing `LegacyArtifactBackupStore` is extended with a read-only original-document method so recovery reuses its path, manifest, object, gzip, and size trust boundary instead of implementing a weaker reader.
@@ -159,7 +190,9 @@ The method requires:
 
 - the exact schema-v2 target-date and series-manifest directory;
 - a complete valid manifest with an `applied` entry for the requested symbol;
+- `entry.symbol` and the decoded object both match the requested `TW:<symbol>` identity;
 - `entry.original_sha256 == reconciliation.legacy_artifact_sha256`;
+- the direct or historical `entry.new_sha256` result binding defined above;
 - `entry.backup_path == objects/<original_sha256>.json.gz`;
 - exact compressed size and SHA-256;
 - exact bounded uncompressed size;
@@ -210,9 +243,9 @@ The receipt has exact fields:
 }
 ```
 
-Hash inputs use the repository's canonical JSON encoding. `backup_manifest_entry_sha256` hashes the complete validated manifest entry. `restored_daily_sha256` hashes the ordered backup-only canonical rows that were added. `receipt_sha256` hashes every receipt field except itself.
+Hash inputs use the repository's canonical JSON encoding. `backup_manifest_entry_sha256` hashes the complete validated manifest entry. The normal target-date and 730-day retention filter is applied after merge; `restored_start_date`, `restored_end_date`, `restored_row_count`, and `restored_daily_sha256` describe and hash only the ordered backup-only canonical rows actually retained and restored into the persisted canonical frame after that filter. `receipt_sha256` hashes every receipt field except itself.
 
-No wall-clock timestamp is included, so a same-input recovery is deterministic. `input_artifact_sha256` records the truncated artifact that triggered recovery; `original_artifact_sha256` records the immutable backup object. If no row is added because the artifact already carries the same valid receipt and merged history, recovery is a verified no-op and the existing receipt is retained. A different receipt for the same artifact fails closed rather than creating an unbounded receipt history.
+No wall-clock timestamp is included, so a same-input recovery is deterministic. `input_artifact_sha256` records the truncated artifact that triggered recovery; `original_artifact_sha256` records the immutable backup object. If no row is added because the artifact already carries the same valid receipt and merged history, recovery is a verified no-op and the existing receipt is retained. If zero rows remain to add after normal retention and there is no prior valid matching receipt, recovery is a verified no-op and creates no `daily_history_recovery` receipt; a zero-row receipt is invalid and must not be synthesized. A different receipt for the same artifact fails closed rather than creating an unbounded receipt history.
 
 An opt-in rerun still revalidates the exact authorized manifest and backup object before accepting that no-op. Only a later normal run with the flag off carries the receipt without reading quarantine.
 
@@ -222,7 +255,16 @@ An opt-in rerun still revalidates the exact authorized manifest and backup objec
 
 The existing `ValueError("calculated history is unavailable")` remains for an empty calculated frame. A calculated frame that does not contain the latest canonical regular-price date is also rejected rather than publishing a latest row with unavailable required indicators.
 
-Recovery failures use one stable domain error at the CLI boundary while retaining specific exception causes in tests. No failure overwrites the active artifact, advances the checkpoint, publishes a candidate, changes an exclusion, or marks a backup as repaired.
+Recovery failures use one stable domain error at the CLI boundary while retaining specific exception causes in tests. They follow the existing generic per-symbol failure path in `local_quant.run_market_batch`; this design does not add a new fatal exception or change checkpoint control flow:
+
+- the failed symbol is recorded in the checkpoint failure list;
+- no artifact is written or overwritten for that failed symbol;
+- when the failure occurs while processing a new symbol, `next_index` may advance past it under the existing behavior;
+- on resume, recorded failed symbols are retried before any new symbols, and another retry failure remains recorded without advancing `next_index` further;
+- recovery does not change exclusions, so the symbol remains an active failure and `_assert_complete` blocks candidate publication until its retry succeeds;
+- existing provider-specific fail-fast behavior remains unchanged and is not repurposed for recovery.
+
+Thus a recovery failure may advance the main cursor, but it cannot overwrite the failed artifact, satisfy batch completeness, publish a candidate, change an exclusion, or mark a backup as repaired. `local_quant.run_market_batch` is not an implementation boundary for this design because its current checkpoint semantics are preserved.
 
 Examples that must fail closed:
 
@@ -251,6 +293,16 @@ No tests are added or run by this design-only commit. After approval, RED tests 
 - Run at least N, N+1, and N+2 and prove no repeated 20-row loss.
 - Rerun the same target date and prove identical date membership and historical OHLCV with no duplicate rows.
 - Cover the write-before-checkpoint retry shape.
+- Cover recovery failure on a new symbol: the failed artifact is unchanged, the symbol is recorded, and `next_index` advances under the existing checkpoint contract.
+- Resume that checkpoint and prove the failed symbol is retried before new symbols; a repeated failure remains recorded and `_assert_complete` blocks publication.
+
+### Persisted-reader compatibility
+
+- Re-run the repository-wide persisted-`daily` reader inventory and fail review if any reader is unclassified.
+- Use warm-up fixtures with valid OHLCV and `null` derived fields to cover reporting source loading, quant snapshot loading, dashboard/market aggregation, report generation, PIT/research datasets, and OOS diagnostics.
+- Assert canonical-OHLCV and latest-only readers preserve or accept the warm-up rows.
+- Assert every feature-ready-history consumer explicitly filters its exact required derived fields before calculation; `stock_analysis.snapshot_dataframe` must filter before its minimum-history and latest-row checks.
+- Permit no artifact schema-version decision until this coverage passes.
 
 ### Date, status, lineage, and lifecycle
 
@@ -264,8 +316,10 @@ No tests are added or run by this design-only commit. After approval, RED tests 
 - A normal update succeeds when no quarantine directory exists.
 - A normal update is instrumented so any quarantine filesystem access fails the test.
 - Recovery uses only the exact lineage-derived manifest path.
+- Backup lookup derives its target directory exactly from `reconciliation.official_snapshot_dates[-1]`; historical and direct candidates enforce their respective `new_sha256` result binding.
 - Missing manifest/object, altered bytes, wrong hash/size/uncompressed size, unsafe path, wrong symbol, multiple distinct candidates, and overlap OHLCV conflict all fail closed.
 - A valid recovery restores the prefix, preserves current overlap rows, records the deterministic receipt, and is idempotent.
+- Receipt dates/count/hash cover only restored rows remaining after normal retention; a zero-added-row no-op without a prior valid receipt writes no receipt.
 - A later normal run preserves and validates the receipt without touching quarantine.
 
 ### Required sequential simulation evidence
@@ -296,12 +350,13 @@ No new dependency, artifact format, general migration framework, rollback tool, 
 Implementation is not complete until all of the following have fresh evidence:
 
 1. Mandatory RED failures observed before production changes.
-2. Focused preservation, incremental, reconciliation, status, ETF, short-history, and lifecycle tests GREEN.
-3. Full Python suite GREEN, with any environment-only skip reported exactly.
-4. `python -m compileall` succeeds.
-5. Applicable Node syntax and PowerShell parser checks succeed.
-6. Temporary sequential simulation shows no erosion, no duplicate dates, no ValueError, and a stable same-date rerun.
-7. Normal runtime test proves no quarantine dependency.
-8. `git diff --check` succeeds and worktree status contains only intended files.
-9. Independent code and security/data-contract review has no unresolved Critical or Important finding.
-10. One implementation commit is pushed and a draft pull request is opened against `main`; merge and production operations remain prohibited.
+2. The refreshed repository-wide persisted-`daily` reader inventory is complete, every reader is classified, every feature-ready boundary filters explicitly, and compatibility coverage proves warm-up indicator `null` values are safe; only then may the implementation retain the current schema version.
+3. Focused preservation, incremental, reconciliation, checkpoint/resume, reporting source, dashboard/market aggregation, report generation, quant snapshot, PIT/research, status, ETF, short-history, and lifecycle tests GREEN.
+4. Full Python suite GREEN, with any environment-only skip reported exactly.
+5. `python -m compileall` succeeds.
+6. Applicable Node syntax and PowerShell parser checks succeed.
+7. Temporary sequential simulation shows no erosion, no duplicate dates, no ValueError, and a stable same-date rerun.
+8. Normal runtime test proves no quarantine dependency.
+9. `git diff --check` succeeds and worktree status contains only intended files.
+10. Independent code and security/data-contract review has no unresolved Critical or Important finding.
+11. One implementation commit is pushed and a draft pull request is opened against `main`; merge and production operations remain prohibited.
