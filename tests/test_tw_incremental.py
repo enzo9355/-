@@ -1201,6 +1201,34 @@ class TWOfficialIncrementalTests(unittest.TestCase):
                 persisted_daily=[dict(final[-1])],
             ))
 
+    def test_existing_receipt_carries_historical_target_across_later_aged_out_opt_in_rerun(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            fetcher, result, _calls = self._recovery_fixture(temporary)
+            final = [dict(row) for row in result.merged_daily]
+            receipt = fetcher._finalize_daily_history_recovery(
+                result,
+                symbol="2330",
+                recovery_target_market_date=TARGET,
+                persisted_daily=final,
+            )
+            later_target = TARGET + datetime.timedelta(days=1)
+            rebound = HistoryRecoveryResult(**{
+                **result.__dict__, "existing_receipt": MappingProxyType(receipt),
+            })
+            carried = fetcher._finalize_daily_history_recovery(
+                rebound,
+                symbol="2330",
+                recovery_target_market_date=later_target,
+                persisted_daily=[dict(
+                    final[-1], Date=f"{later_target.isoformat()}T00:00:00.000"
+                )],
+            )
+        self.assertEqual(receipt, carried)
+        self.assertEqual(
+            self._daily_bytes(receipt), self._daily_bytes(carried)
+        )
+        self.assertEqual(receipt["recovery_target_market_date"], TARGET.isoformat())
+
     def test_existing_receipt_rebind_rejects_partial_retention_with_context_mutation(self):
         with tempfile.TemporaryDirectory() as temporary:
             fetcher, result, _calls = self._recovery_fixture(
@@ -1296,6 +1324,7 @@ class TWOfficialIncrementalTests(unittest.TestCase):
                 {"mode": "other"},
                 {"symbol": "2303"},
                 {"recovery_target_market_date": "2026-07-25"},
+                {"recovery_target_market_date": "2026-07-23"},
                 {"input_artifact_sha256": "c" * 64},
                 {"original_artifact_sha256": "c" * 64},
                 {"backup_target_market_date": "2026-07-23"},

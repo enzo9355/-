@@ -808,10 +808,22 @@ class OfficialCompatFetcher:
             ):
                 raise IncrementalHistoryError("daily history recovery receipt is invalid")
             receipt = dict(existing)
+            try:
+                receipt_recovery_target = _datetime.date.fromisoformat(
+                    receipt["recovery_target_market_date"]
+                )
+            except (KeyError, TypeError, ValueError) as exc:
+                raise IncrementalHistoryError(
+                    "daily history recovery receipt is invalid"
+            ) from exc
             if (
-                receipt["recovery_target_market_date"]
-                != recovery_target_market_date.isoformat()
-                or receipt["original_artifact_sha256"] != result.original_artifact_sha256
+                not (
+                    result.backup_target_market_date
+                    <= receipt_recovery_target
+                    <= recovery_target_market_date
+                )
+                or receipt["original_artifact_sha256"]
+                != result.original_artifact_sha256
                 or receipt["backup_target_market_date"]
                 != result.backup_target_market_date.isoformat()
                 or receipt["backup_series_manifest_sha256"]
