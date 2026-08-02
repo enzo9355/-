@@ -43,6 +43,7 @@ from market_insights import (
     parse_mops_items,
 )
 from stock_papi.integrations.market_data.provider import FinMindFetchError
+from stock_papi.quant.features import CALCULATED_COLUMNS
 
 
 TAIPEI = datetime.timezone(datetime.timedelta(hours=8), "Asia/Taipei")
@@ -1563,6 +1564,61 @@ def get_us_symbols(root, fetch_json=None, now=None, fetch_nasdaq=None):
     return symbols
 
 
+def _market_date(value):
+    if isinstance(value, datetime.datetime):
+        return value.date()
+    if isinstance(value, datetime.date):
+        return value
+    text = str(value).replace("Z", "+00:00")
+    try:
+        return datetime.datetime.fromisoformat(text).date()
+    except ValueError:
+        try:
+            return datetime.date.fromisoformat(text[:10])
+        except ValueError as exc:
+            raise ValueError("historical market date is invalid") from exc
+
+
+def _canonical_history_frame(frame):
+    result = frame.copy()
+    dated_positions = [
+        (_market_date(value), position)
+        for position, value in enumerate(result.index)
+    ]
+    dates = [value for value, _ in dated_positions]
+    if len(dates) != len(set(dates)):
+        raise ValueError("historical market dates are duplicated")
+    dated_positions.sort()
+    result = result.iloc[[position for _, position in dated_positions]].copy()
+    result.index = [
+        datetime.datetime.combine(value, datetime.time.min)
+        for value, _ in dated_positions
+    ]
+    result.index.name = frame.index.name or "Date"
+    return result
+
+
+def _persisted_history_frame(canonical_frame, calculated_frame):
+    if calculated_frame.index.has_duplicates:
+        raise ValueError("calculated market dates are duplicated")
+    if not calculated_frame.index.isin(canonical_frame.index).all():
+        raise ValueError("calculated market date is not canonical")
+    derived = CALCULATED_COLUMNS + OBSERVATION_MODEL_COLUMNS
+    source_columns = [
+        name for name in canonical_frame.columns if name not in derived
+    ]
+    result = canonical_frame.loc[:, source_columns].copy()
+    join_columns = [
+        name for name in derived if name in calculated_frame.columns
+    ]
+    for name in join_columns:
+        result[name] = math.nan
+        if calculated_frame[name].dtype == object:
+            result[name] = result[name].astype(object)
+        result.loc[calculated_frame.index, name] = calculated_frame[name]
+    return result
+
+
 def build_stock_snapshot(
     pipeline,
     market,
@@ -1604,12 +1660,15 @@ def build_stock_snapshot(
         frame = frame[frame.index.date <= target_market_date]
         if frame.empty:
             raise ValueError("point-in-time price history is unavailable")
-    frame = pipeline.calc_all(frame)
-    if frame is None or frame.empty:
+    canonical_frame = _canonical_history_frame(frame)
+    calculated_frame = pipeline.calc_all(canonical_frame.copy())
+    if calculated_frame is None or calculated_frame.empty:
+        raise ValueError("calculated history is unavailable")
+    if canonical_frame.index[-1] not in calculated_frame.index:
         raise ValueError("calculated history is unavailable")
     compatibility = None
     if observation_only:
-        frame = frame.drop(
+        calculated_frame = calculated_frame.drop(
             columns=list(OBSERVATION_MODEL_COLUMNS),
             errors="ignore",
         )
@@ -1622,7 +1681,7 @@ def build_stock_snapshot(
         )
 
         if promoted_backtest is None and not degraded_bootstrap:
-            backtest = pipeline.run_ai_engine(frame)
+            backtest = pipeline.run_ai_engine(calculated_frame)
             if not isinstance(backtest, dict):
                 raise ValueError("backtest is unavailable")
             model_version = (
@@ -1636,7 +1695,7 @@ def build_stock_snapshot(
             infer = getattr(pipeline, "run_latest_inference", None)
             if not callable(infer):
                 raise ValueError("latest inference is unavailable")
-            inference = infer(frame)
+            inference = infer(calculated_frame)
             if not isinstance(inference, dict) or not isinstance(
                 inference.get("model_version"), str
             ):
@@ -1671,8 +1730,11 @@ def build_stock_snapshot(
                     )
                 backtest = promoted_backtest
 
+    persisted_frame = _persisted_history_frame(
+        canonical_frame, calculated_frame
+    )
     daily = json.loads(
-        frame.reset_index().to_json(
+        persisted_frame.reset_index().to_json(
             orient="records",
             date_format="iso",
             date_unit="ms",
