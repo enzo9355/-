@@ -11,6 +11,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import stock_papi.quant.tw_legacy_reconciliation as reconciliation
 from stock_papi.quant.tw_legacy_reconciliation import (
     LegacyArtifactBackupStore,
     LegacyReconciliationError,
@@ -204,6 +205,222 @@ class LegacyArtifactBackupStoreTests(unittest.TestCase):
             self.root,
             official_document(self.evidence),
         )[0]
+
+    def prepare_verified_reader(self):
+        self.backup()
+        target = self.write_official()
+        result_sha = hashlib.sha256(target.read_bytes()).hexdigest()
+        self.store.mark_applied(symbol="2330", artifact_path=target)
+        manifest_path, manifest = read_manifest(self.root)
+        entry = manifest["entries"]["2330"]
+        return (
+            manifest_path,
+            manifest,
+            self.store.backup_root / entry["backup_path"],
+            result_sha,
+        )
+
+    @staticmethod
+    def compressed_document(document):
+        decoded = json.dumps(
+            document,
+            ensure_ascii=True,
+            allow_nan=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return gzip.compress(decoded, mtime=0), decoded
+
+    def test_verified_reader_reads_object_once_and_parses_same_bytes(self):
+        manifest_path, manifest, object_path, result_sha = self.prepare_verified_reader()
+        expected = json.loads(self.decoded.decode("utf-8"))
+        object_reads = []
+        original_read = reconciliation._read_bytes
+
+        def read_once(path, **kwargs):
+            if Path(path) == object_path:
+                object_reads.append(path)
+                return (self.original, gzip.compress(b'{"market":"US"}', mtime=0))[len(object_reads) - 1]
+            return original_read(path, **kwargs)
+
+        with patch.object(reconciliation, "_read_bytes", side_effect=read_once):
+            document, entry = self.store.read_original_document(
+                symbol="2330",
+                original_sha256=manifest["entries"]["2330"]["original_sha256"],
+                expected_result_sha256=result_sha,
+            )
+
+        self.assertEqual(object_reads, [object_path])
+        self.assertEqual(document, expected)
+        entry["symbol"] = "2303"
+        self.assertEqual(read_manifest(self.root)[1]["entries"]["2330"]["symbol"], "2330")
+
+    def test_verified_reader_rejects_changed_bytes_before_decode(self):
+        _manifest_path, manifest, object_path, result_sha = self.prepare_verified_reader()
+        original_read = reconciliation._read_bytes
+
+        def changed_object(path, **kwargs):
+            if Path(path) == object_path:
+                return b"changed"
+            return original_read(path, **kwargs)
+
+        with (
+            patch.object(reconciliation, "_read_bytes", side_effect=changed_object),
+            patch.object(reconciliation, "_decode_gzip", side_effect=AssertionError),
+            self.assertRaises(LegacyReconciliationError),
+        ):
+            self.store.read_original_document(
+                symbol="2330",
+                original_sha256=manifest["entries"]["2330"]["original_sha256"],
+                expected_result_sha256=result_sha,
+            )
+
+    def test_verified_reader_binds_all_sizes_hash_gzip_and_path_checks(self):
+        manifest_path, manifest, object_path, result_sha = self.prepare_verified_reader()
+        original_manifest = json.dumps(manifest).encode("utf-8")
+        original_object = object_path.read_bytes()
+
+        def replace_object(entry, raw, decoded):
+            original_sha = hashlib.sha256(raw).hexdigest()
+            entry.update(
+                original_sha256=original_sha,
+                original_size=len(raw),
+                original_uncompressed_size=len(decoded),
+                backup_path=f"objects/{original_sha}.json.gz",
+            )
+            path = self.store.backup_root / entry["backup_path"]
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(raw)
+
+        cases = (
+            ("compressed size", lambda entry: entry.update(original_size=entry["original_size"] + 1)),
+            ("compressed sha", lambda entry: entry.update(original_sha256="f" * 64)),
+            ("invalid gzip", lambda entry: replace_object(entry, b"not-gzip", b"not-gzip")),
+            (
+                "gzip expansion",
+                lambda entry: replace_object(
+                    entry,
+                    gzip.compress(b"x" * (reconciliation.MAX_UNCOMPRESSED_BYTES + 1), mtime=0),
+                    b"x" * (reconciliation.MAX_UNCOMPRESSED_BYTES + 1),
+                ),
+            ),
+            (
+                "uncompressed size",
+                lambda entry: entry.update(
+                    original_uncompressed_size=entry["original_uncompressed_size"] + 1
+                ),
+            ),
+            ("backup path", lambda entry: entry.update(backup_path="../escape.json.gz")),
+            ("entry symbol", lambda entry: entry.update(symbol="2303")),
+            ("entry status", lambda entry: entry.update(status="backup_complete")),
+            ("overlap dates", lambda entry: entry.update(overlap_dates=[])),
+            ("result sha", lambda entry: entry.update(new_sha256="f" * 64)),
+        )
+        for name, mutate in cases:
+            with self.subTest(name=name):
+                manifest_path.write_bytes(original_manifest)
+                object_path.write_bytes(original_object)
+                current = json.loads(original_manifest)
+                entry = current["entries"]["2330"]
+                mutate(entry)
+                manifest_path.write_text(json.dumps(current), encoding="utf-8")
+                with self.assertRaises(LegacyReconciliationError):
+                    self.store.read_original_document(
+                        symbol="2330",
+                        original_sha256=entry["original_sha256"],
+                        expected_result_sha256=result_sha,
+                    )
+
+    def test_verified_reader_rejects_symbol_market_or_daily_identity_mismatch(self):
+        manifest_path, manifest, object_path, result_sha = self.prepare_verified_reader()
+        original_manifest = json.dumps(manifest).encode("utf-8")
+        original_object = object_path.read_bytes()
+        original_document = json.loads(self.decoded.decode("utf-8"))
+
+        def write_document(document):
+            raw, decoded = self.compressed_document(document)
+            entry = manifest["entries"]["2330"]
+            original_sha = hashlib.sha256(raw).hexdigest()
+            entry.update(
+                original_sha256=original_sha,
+                original_size=len(raw),
+                original_uncompressed_size=len(decoded),
+                backup_path=f"objects/{original_sha}.json.gz",
+            )
+            path = self.store.backup_root / entry["backup_path"]
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(raw)
+
+        cases = (
+            ("market", lambda document: document.update(market="US")),
+            ("symbol", lambda document: document.update(symbol="2303")),
+            ("declared date", lambda document: document.update(as_of="2026-07-15")),
+            (
+                "duplicate daily date",
+                lambda document: document["daily"].append(dict(document["daily"][0])),
+            ),
+            ("boolean OHLCV", lambda document: document["daily"][0].update(Open=True)),
+            ("nonfinite OHLCV", lambda document: document["daily"][0].update(Close=float("nan"))),
+            ("oversized OHLCV", lambda document: document["daily"][0].update(Volume=10**400)),
+        )
+        for name, mutate in cases:
+            with self.subTest(name=name):
+                manifest_path.write_bytes(original_manifest)
+                object_path.write_bytes(original_object)
+                manifest = json.loads(original_manifest)
+                document = copy.deepcopy(original_document)
+                mutate(document)
+                write_document(document)
+                manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+                entry = manifest["entries"]["2330"]
+                with self.assertRaises(LegacyReconciliationError):
+                    self.store.read_original_document(
+                        symbol="2330",
+                        original_sha256=entry["original_sha256"],
+                        expected_result_sha256=result_sha,
+                    )
+
+    def test_verified_reader_rejects_symlink_and_windows_reparse_components(self):
+        manifest_path, manifest, object_path, result_sha = self.prepare_verified_reader()
+        original_sha = manifest["entries"]["2330"]["original_sha256"]
+        with (
+            patch.object(
+                reconciliation,
+                "_is_reparse",
+                side_effect=lambda path: Path(path) == object_path.parent,
+            ),
+            self.assertRaises(LegacyReconciliationError),
+        ):
+            self.store.read_original_document(
+                symbol="2330",
+                original_sha256=original_sha,
+                expected_result_sha256=result_sha,
+            )
+        real = object_path.with_name("object-real.json.gz")
+        os.replace(object_path, real)
+        try:
+            os.symlink(real, object_path)
+        except OSError:
+            os.replace(real, object_path)
+            with (
+                patch.object(
+                    reconciliation,
+                    "_is_reparse",
+                    side_effect=lambda path: Path(path) == object_path,
+                ),
+                self.assertRaises(LegacyReconciliationError),
+            ):
+                self.store.read_original_document(
+                    symbol="2330",
+                    original_sha256=original_sha,
+                    expected_result_sha256=result_sha,
+                )
+            return
+        with self.assertRaises(LegacyReconciliationError):
+            self.store.read_original_document(
+                symbol="2330",
+                original_sha256=original_sha,
+                expected_result_sha256=result_sha,
+            )
 
     def test_backup_is_written_before_artifact_replacement(self):
         self.assertEqual(self.backup(), "write")

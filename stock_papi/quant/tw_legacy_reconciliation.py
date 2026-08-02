@@ -8,6 +8,7 @@ import gzip
 import hashlib
 import io
 import json
+import math
 import os
 import re
 import stat
@@ -119,6 +120,33 @@ def _read_bytes(path: Path, *, max_bytes: int = MAX_COMPRESSED_BYTES) -> bytes:
     if len(raw) != size or len(raw) > max_bytes:
         raise LegacyReconciliationError("legacy reconciliation artifact changed")
     return raw
+
+
+def _read_verified_object(
+    root: Path,
+    path: Path,
+    *,
+    expected_sha256: str,
+    expected_size: int,
+    expected_uncompressed_size: int,
+    expected_bytes: bytes | None = None,
+) -> tuple[bytes, bytes]:
+    _assert_safe_child(root, path)
+    raw = _read_bytes(path)
+    if (
+        len(raw) != expected_size
+        or _sha256(raw) != expected_sha256
+        or (expected_bytes is not None and raw != expected_bytes)
+    ):
+        raise LegacyReconciliationError(
+            "legacy reconciliation backup object conflicts"
+        )
+    decoded = _decode_gzip(raw)
+    if len(decoded) != expected_uncompressed_size:
+        raise LegacyReconciliationError(
+            "legacy reconciliation backup object conflicts"
+        )
+    return raw, decoded
 
 
 def _dates(value: Any) -> tuple[datetime.date, ...] | None:
@@ -382,18 +410,105 @@ class LegacyArtifactBackupStore:
         expected_uncompressed_size: int,
         expected_bytes: bytes | None = None,
     ) -> None:
-        _assert_safe_child(self.root, path)
-        raw = _read_bytes(path)
-        decoded = _decode_gzip(raw)
+        _read_verified_object(
+            self.root,
+            path,
+            expected_sha256=expected_sha256,
+            expected_size=expected_size,
+            expected_uncompressed_size=expected_uncompressed_size,
+            expected_bytes=expected_bytes,
+        )
+
+    def read_original_document(
+        self,
+        *,
+        symbol: str,
+        original_sha256: str,
+        expected_result_sha256: str,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
         if (
-            _sha256(raw) != expected_sha256
-            or len(raw) != expected_size
-            or len(decoded) != expected_uncompressed_size
-            or (expected_bytes is not None and raw != expected_bytes)
+            not isinstance(symbol, str)
+            or _SYMBOL_RE.fullmatch(symbol) is None
+            or not _is_sha256(original_sha256)
+            or not _is_sha256(expected_result_sha256)
         ):
             raise LegacyReconciliationError(
                 "legacy reconciliation backup object conflicts"
             )
+        manifest = self._load_manifest(required=True)
+        entry = manifest["entries"].get(symbol)
+        if entry is None:
+            raise LegacyReconciliationError(
+                "legacy reconciliation backup object conflicts"
+            )
+        entry = self._validate_entry(symbol, entry)
+        if (
+            entry["status"] != "applied"
+            or entry["original_sha256"] != original_sha256
+            or entry["new_sha256"] != expected_result_sha256
+            or entry["backup_path"] != f"objects/{original_sha256}.json.gz"
+        ):
+            raise LegacyReconciliationError(
+                "legacy reconciliation backup object conflicts"
+            )
+        _raw, decoded = _read_verified_object(
+            self.root,
+            self.backup_root / entry["backup_path"],
+            expected_sha256=original_sha256,
+            expected_size=entry["original_size"],
+            expected_uncompressed_size=entry["original_uncompressed_size"],
+        )
+        try:
+            document = json.loads(decoded.decode("utf-8"))
+            daily = document["daily"]
+            as_of = datetime.date.fromisoformat(document["as_of"])
+        except (KeyError, TypeError, UnicodeError, ValueError) as exc:
+            raise LegacyReconciliationError(
+                "legacy reconciliation backup object conflicts"
+            ) from exc
+        if (
+            not isinstance(document, dict)
+            or document.get("schema_version") != 1
+            or document.get("market") != "TW"
+            or document.get("symbol") != symbol
+            or not isinstance(daily, list)
+            or not daily
+        ):
+            raise LegacyReconciliationError(
+                "legacy reconciliation backup object conflicts"
+            )
+        dates = []
+        for row in daily:
+            try:
+                date = datetime.datetime.fromisoformat(row["Date"]).date()
+            except (KeyError, TypeError, ValueError) as exc:
+                raise LegacyReconciliationError(
+                    "legacy reconciliation backup object conflicts"
+                ) from exc
+            if not isinstance(row, dict):
+                raise LegacyReconciliationError(
+                    "legacy reconciliation backup object conflicts"
+                )
+            for name in ("Open", "High", "Low", "Close", "Volume"):
+                value = row.get(name)
+                if not isinstance(value, (int, float)) or isinstance(value, bool):
+                    raise LegacyReconciliationError(
+                        "legacy reconciliation backup object conflicts"
+                    )
+                try:
+                    valid_number = math.isfinite(value)
+                except OverflowError:
+                    valid_number = False
+                if not valid_number:
+                    raise LegacyReconciliationError(
+                        "legacy reconciliation backup object conflicts"
+                    )
+            dates.append(date)
+        if dates != sorted(set(dates)) or as_of != dates[-1]:
+            raise LegacyReconciliationError(
+                "legacy reconciliation backup object conflicts"
+            )
+        return document, dict(entry)
 
     def _publish_object(
         self,
