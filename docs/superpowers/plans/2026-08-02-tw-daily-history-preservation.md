@@ -44,9 +44,13 @@
 - The decoded backup object must match `TW:<symbol>` and contain valid, strictly ordered, unique daily dates whose declared dates agree with its rows.
 - Zero or multiple distinct qualifying backup objects fail closed. Repeated references with the same validated original-object SHA deduplicate only when their complete authorization binding tuples are identical; conflicting target, series, result, path, size, uncompressed-size, or manifest-entry bindings fail as ambiguous. Missing manifest/object, changed bytes, hash/size/gzip/path/symbol/result mismatch, duplicate input dates, or overlap OHLCV conflict has no fallback source.
 - On matching overlap OHLCV, the current row wins as a whole; backup-only earlier rows restore the prefix; current-only rows remain unchanged.
-- Apply the normal target-date and 730-day range after merge. Receipt start/end/count and `restored_daily_sha256` cover only ordered backup-only canonical rows actually retained and restored after that filter.
+- Apply the normal target-date and 730-day range after merge. Receipt start/end/count and `restored_daily_sha256` cover only ordered backup-authorized dates actually retained in final persisted `daily` after that filter.
 - A zero-added-row opt-in rerun with an existing valid matching receipt retains it unchanged only after rebinding the current validated manifest entry and object. A zero-added-row run without a prior valid matching receipt writes no receipt.
-- Opt-in receipt revalidation binds the complete manifest-entry SHA, original artifact SHA, expected reconciliation result SHA, backup target date, series manifest SHA, compressed size, uncompressed size, symbol, restored-row identity, and canonical receipt SHA. A changed but parseable entry fails closed.
+- The manifest and verified backup authorize the symbol, immutable original-object identity, eligible historical dates, and direct or historical reconciliation-result binding; they do not require every final source field to reproduce the backup object.
+- `restored_daily_sha256` hashes the ordered canonical source projections actually retained in final persisted `daily`. Recomputed `MARKET_*`, `ETF50_*`, `OPTION_*`, `DATA_PRICE_*`, and `YF_CLOSE` context values are included in that final hash but never reject recovery merely because they differ from backup values.
+- Outside validated official-reconciliation coverage, each authorized final row must retain the verified backup `Date` and canonical OHLCV. Within a validated `replace_verified_legacy` action, final OHLCV, institutional/chip, and margin values may differ only where the existing reconciliation evidence records the corresponding replacement and the resulting values pass existing official-source validation. Any other OHLCV difference fails closed.
+- Opt-in receipt revalidation binds the complete manifest-entry SHA, original artifact SHA, expected reconciliation result SHA, backup target date, series manifest SHA, compressed size, uncompressed size, symbol, authorized date identity, final persisted-row canonical receipt hash, and canonical receipt SHA. It recomputes the final-row hash for rows inside retention and permits absence only below the current retention floor. A changed but parseable entry, an in-window row mutation, or an unauthorized OHLCV difference fails closed.
+- Before canonical JSON hashing or exact receipt validation, recursively normalize each `Mapping` to a plain `dict` and each tuple/list to a plain `list`; preserve JSON scalars without numeric coercion, reject unsupported objects and non-finite numbers, and never treat `bool` as a numeric value. `backup_manifest_entry_sha256` and every other digest field must be lowercase 64-hex SHA-256.
 - A successful direct recovery promotes that direct reconciliation to one validated schema-v2 history envelope with `reconciled_artifact_sha256 == input_artifact_sha256` before persisting the recovered artifact. The recovered artifact no longer carries the direct record, so its next opt-in rerun uses the approved historical result-SHA binding.
 - A later normal flag-off run validates and carries the receipt from artifact metadata without quarantine access.
 - Recovery errors use the existing generic `run_market_batch` failure path: record the symbol, do not overwrite its artifact, allow `next_index` to advance for a new-symbol failure, retry failed symbols before new symbols on resume, and let `_assert_complete` block publication while an active failure remains.
@@ -103,9 +107,9 @@ Every Python command below assumes this block has succeeded and uses `& $PythonE
 | --- | --- |
 | `tests/report_fixtures.py` | Produce valid OHLCV warm-up rows with every `CALCULATED_COLUMNS` field `None`, finite values for every field on ready rows, and a fully finite latest row. |
 | `tests/test_local_quant_batch.py` | Snapshot serialization, latest/OOS `AI_P`, status dates, checkpoint failure/cursor/retry ordering, unchanged failed artifact, ETF, and short-history gates. |
-| `tests/test_tw_legacy_reconciliation.py` | Single-read backup trust boundary, eligibility, direct/historical result binding, exact target path, merge conflict, ambiguity, existing receipt rebinding, and unsafe path cases. |
-| `tests/test_tw_incremental.py` | One resolver call per symbol, dataset-order independence, range filtering, retention-finalized receipt, zero-row behavior, receipt validation, and flag-off carry-forward. |
-| `tests/test_tw_official_post_close_cli.py` | Flag/default isolation, both-opt-in legacy behavior, resolver wiring, checkpoint identity, status/lifecycle, and publication blocking. |
+| `tests/test_tw_legacy_reconciliation.py` | Single-read backup trust boundary, eligibility, direct/historical result binding, selected reconciliation evidence, exact target path, merge conflict, ambiguity, existing receipt rebinding, and unsafe path cases. |
+| `tests/test_tw_incremental.py` | One resolver call per symbol, dataset-order independence, range filtering, final-persisted-row receipt authorization, immutable canonical JSON normalization, zero-row behavior, receipt validation, and flag-off carry-forward. |
+| `tests/test_tw_official_post_close_cli.py` | Flag/default isolation, both-opt-in legacy and direct-recovery integration, resolver wiring, checkpoint identity, status/lifecycle, and publication blocking. |
 | `tests/test_daily_report_source.py` | Reporting source loading accepts and preserves warm-up rows. |
 | `tests/test_quant_snapshot_repository.py` | Hash-bound quant loading accepts warm-up rows and requires a fully ready latest row. |
 | `tests/test_observation_views.py` | Canonical candles survive while historical MA20 points filter unavailable values. |
@@ -156,6 +160,7 @@ class HistoryRecoveryResult:
     backup_target_market_date: _datetime.date
     backup_series_manifest_sha256: str
     backup_manifest_entry: Mapping[str, Any]
+    reconciliation: Mapping[str, Any]
     existing_receipt: Mapping[str, Any] | None
 
 HistoryRecoveryResolver = Callable[
@@ -172,6 +177,9 @@ def _canonical_recovery_source_row(
     row: Mapping[str, Any],
 ) -> dict[str, Any]:
     """Normalize Date to ISO and return persisted source fields for receipt hashes."""
+
+def _canonical_json_value(value: Any) -> Any:
+    """Return plain JSON-compatible values; reject unsupported and non-finite input."""
 
 def _finalize_daily_history_recovery(
     result: HistoryRecoveryResult,
@@ -200,7 +208,7 @@ OfficialCompatFetcher.lineage_for(
 ) -> dict[str, Any]
 ```
 
-`merged_daily` is the complete validated canonical merge before any dataset range. `restored_candidates` is the ordered backup-only subset relative to the active input. `backup_daily` is retained only to identify and revalidate an existing receipt's authorized date range on opt-in rerun. Individual `_daily_rows(symbol, start, end)` calls filter `merged_daily` after `_ensure_history_recovery(symbol)` returns. `_finalize_daily_history_recovery()` derives receipt rows from the normalized final `persisted_daily`, restricted to authorized restored dates; it never hashes backup candidate objects or uses a dataset request range.
+`merged_daily` is the complete validated canonical merge before any dataset range. `restored_candidates` is the ordered backup-only subset relative to the active input. `backup_daily` is retained only to authorize eligible dates and revalidate an existing receipt on opt-in rerun. Individual `_daily_rows(symbol, start, end)` calls filter `merged_daily` after `_ensure_history_recovery(symbol)` returns. `_finalize_daily_history_recovery()` derives receipt rows from normalized final `persisted_daily`, restricted to authorized restored dates; it never hashes backup candidate objects or uses a dataset request range.
 
 The receipt exact field set is:
 
@@ -216,7 +224,7 @@ DAILY_HISTORY_RECOVERY_FIELDS = frozenset({
 })
 ```
 
-`backup_manifest_entry_sha256` hashes the complete currently validated entry. `restored_daily_sha256` hashes the ordered canonical source-row projection copied from final normalized `persisted_daily` for authorized backup-only dates that survived retention, using sorted compact JSON with `allow_nan=False`. The projection contains every persisted source field and excludes all `CALCULATED_COLUMNS`, `OBSERVATION_MODEL_COLUMNS`, and private transport keys; its full canonical identity must equal the corresponding source projection of the verified backup row. `receipt_sha256` hashes every receipt field except itself with the same canonical JSON encoding.
+`_canonical_json_value()` recursively converts `Mapping` (including `MappingProxyType`) to plain `dict` and tuple/list to plain `list`; it accepts only JSON scalars without coercion, rejects unsupported values and non-finite floats, and leaves booleans as booleans so numeric field validation can reject bool-as-number. `OfficialCompatFetcher._canonical_json_sha256()` must call it before `json.dumps(..., sort_keys=True, separators=(",", ":"), allow_nan=False)`. `backup_manifest_entry_sha256` hashes the complete currently validated normalized entry and is validated as lowercase 64-hex. `restored_daily_sha256` hashes the ordered canonical source-row projection copied from final normalized `persisted_daily` for authorized backup-only dates that survived retention. The projection contains every persisted source field and excludes all `CALCULATED_COLUMNS`, `OBSERVATION_MODEL_COLUMNS`, and private transport keys. The verified backup remains authorization evidence: outside official reconciliation coverage final `Date` and canonical OHLCV equal backup; within a validated recorded `replace_verified_legacy` action only the corresponding official-validated OHLCV, institutional/chip, or margin replacements may differ. Recomputed `MARKET_*`, `ETF50_*`, `OPTION_*`, `DATA_PRICE_*`, and `YF_CLOSE` fields are hashed as final persisted values without backup-equality rejection. `receipt_sha256` hashes every receipt field except itself with the same canonical JSON encoding.
 
 If a non-`None` finalized receipt came from the cached direct reconciliation, `lineage_for()` replaces that direct record with one schema-v2 `legacy_reconciliation_history` item whose `reconciled_artifact_sha256` is `HistoryRecoveryResult.input_artifact_sha256`, recomputes `history_sha256`, and then attaches the receipt. It never persists both forms or invents a receipt-based exception to the direct `entry.new_sha256 == active_artifact.compressed_sha256` rule.
 
@@ -318,13 +326,16 @@ The checkpoint identity always contains `"recover_truncated_history": false|true
 | Canonical history invariants | Task 3; `test_canonical_frame_rejects_duplicate_dates_and_sorts_strictly`, `test_warmup_rows_preserve_ohlcv_and_null_derived_fields` | `& $PythonExe -m unittest tests.test_tw_daily_history_preservation.TWHistoryPersistenceTests -v`: duplicate input rejected; ordered unique rows retained. |
 | Date/status semantics | Tasks 3 and 7; `LocalQuantBatchTests.test_taiwan_status_snapshot_preserves_last_regular_price_date`, `TWOfficialIncrementalTests.test_status_fetcher_preserves_history_and_exposes_target_evidence` | `& $PythonExe -m unittest tests.test_local_quant_batch.LocalQuantBatchTests.test_taiwan_status_snapshot_preserves_last_regular_price_date tests.test_tw_incremental.TWOfficialIncrementalTests.test_status_fetcher_preserves_history_and_exposes_target_evidence -v`: regular and non-price identities unchanged. |
 | Calculated-frame separation and exact inference order | Tasks 1 and 3; `test_calculated_columns_match_calc_all_assignments_in_order`, `test_latest_inference_ai_p_is_joined_after_mutation`, `test_oos_ai_p_is_joined_on_matching_dates` | `& $PythonExe -m unittest tests.test_tw_daily_history_preservation -v`: latest and OOS `AI_P` persist only after inference. |
-| Retention/idempotency | Tasks 3 and 6; `test_retention_keeps_only_normal_730_day_request_result`, `test_receipt_hashes_only_restored_rows_in_final_persisted_daily`, `test_dataset_call_orders_are_byte_identical` | `& $PythonExe -m unittest tests.test_tw_daily_history_preservation tests.test_tw_incremental -v`: GREEN and identical canonical/receipt bytes. |
+| Retention/idempotency | Tasks 3 and 6; `test_retention_keeps_only_normal_730_day_request_result`, `test_receipt_hashes_only_restored_rows_in_final_persisted_daily`, `test_existing_receipt_rejects_in_window_final_persisted_row_mutation`, `test_dataset_call_orders_are_byte_identical` | `& $PythonExe -m unittest tests.test_tw_daily_history_preservation tests.test_tw_incremental -v`: GREEN and identical canonical/receipt bytes; only rows below the retention floor may be absent. |
 | Persisted-reader compatibility/schema decision | Task 2; `PersistedDailyReaderAuditTests.test_only_mapped_production_readers_exist` plus all named warm-up compatibility methods | `& $PythonExe -m unittest tests.test_persisted_daily_reader_audit tests.test_stock_analysis tests.test_daily_report_source tests.test_quant_snapshot_repository tests.test_observation_views tests.test_observation_products tests.test_industry_report_analytics tests.test_industry_report_backtest tests.test_pit_dataset tests.test_oos_diagnostics -v`: every reader classified and compatible before Task 3. |
 | Explicit recovery/default isolation | Tasks 5-7; `test_missing_or_null_lineage_is_legacy_and_not_recovery_eligible`, `test_cli_default_path_never_constructs_resolver_or_touches_quarantine` | `& $PythonExe -m unittest tests.test_tw_legacy_reconciliation tests.test_tw_official_post_close_cli -v`: legacy returns `None`; disabled mode performs zero quarantine calls. |
 | Direct and historical reconciliation binding | Tasks 5 and 6; `test_resolver_binds_direct_result_sha_and_exact_snapshot_date`, `test_resolver_binds_historical_result_sha_and_exact_snapshot_date`, `test_direct_recovery_promotes_reconciliation_to_history_and_artifact_rerun_is_byte_identical` | `& $PythonExe -m unittest tests.test_tw_legacy_reconciliation tests.test_tw_incremental -v`: wrong date/series/result SHA fails; direct A0 rotates to history in A1; second opt-in uses exact historical binding. |
 | Exact backup trust boundary and TOCTOU | Task 4; `test_verified_reader_reads_object_once_and_parses_same_bytes`, `test_verified_reader_binds_all_sizes_hash_gzip_and_path_checks` | `& $PythonExe -m unittest tests.test_tw_legacy_reconciliation -v`: one read; every mutation fails before parse or at its bound check. |
 | Merge rules | Task 5; `test_merge_rejects_duplicate_dates_and_overlap_ohlcv_conflict`, `test_merge_keeps_current_whole_row_when_ohlcv_matches` | `& $PythonExe -m unittest tests.test_tw_legacy_reconciliation -v`: conflicts and non-prefix restoration fail; current overlap row wins. |
-| Deterministic receipt and existing-receipt revalidation | Task 6; `test_receipt_hashes_only_restored_rows_in_final_persisted_daily`, `test_opt_in_rerun_rebinds_existing_receipt_to_current_verified_backup`, `test_existing_receipt_rebind_allows_only_retention_aged_rows_to_be_absent`, `test_zero_retained_rows_without_receipt_returns_none` | `& $PythonExe -m unittest tests.test_tw_incremental tests.test_tw_legacy_reconciliation -v`: receipt bytes stable; changed parseable entry or in-window missing row fails; retention-aged rows and no-zero-row behavior pass. |
+| Receipt authorization versus final persisted rows | Task 6; `test_receipt_allows_recomputed_context_fields_different_from_backup`, `test_receipt_allows_evidenced_official_reconciliation_price_chip_margin_replacements`, `test_receipt_hashes_final_persisted_source_projection_not_backup_candidate`, `test_receipt_rejects_unauthorized_final_ohlcv_difference` | `& $PythonExe -m unittest tests.test_tw_incremental.TWOfficialIncrementalTests.test_receipt_allows_recomputed_context_fields_different_from_backup tests.test_tw_incremental.TWOfficialIncrementalTests.test_receipt_allows_evidenced_official_reconciliation_price_chip_margin_replacements tests.test_tw_incremental.TWOfficialIncrementalTests.test_receipt_hashes_final_persisted_source_projection_not_backup_candidate tests.test_tw_incremental.TWOfficialIncrementalTests.test_receipt_rejects_unauthorized_final_ohlcv_difference -v`: final persisted rows are hashed, legitimate recomputation/replacement passes, and unauthorized OHLCV fails closed. |
+| Deterministic receipt and existing-receipt revalidation | Task 6; `test_opt_in_rerun_rebinds_existing_receipt_to_current_verified_backup`, `test_existing_receipt_rebind_allows_only_retention_aged_rows_to_be_absent`, `test_existing_receipt_rejects_in_window_final_persisted_row_mutation`, `test_zero_retained_rows_without_receipt_returns_none` | `& $PythonExe -m unittest tests.test_tw_incremental tests.test_tw_legacy_reconciliation -v`: receipt bytes stable; changed parseable entry, in-window mutation, or in-window absence fails; retention-aged rows and no-zero-row behavior pass. |
+| Canonical JSON normalization | Task 6; `test_canonical_json_normalizes_immutable_mappings_and_sequences`, `test_canonical_json_normalizes_nested_immutable_mappings`, `test_canonical_json_rejects_unsupported_and_nonfinite_values`, `test_backup_manifest_entry_sha256_is_lowercase_64_hex` | `& $PythonExe -m unittest tests.test_tw_incremental.TWOfficialIncrementalTests.test_canonical_json_normalizes_immutable_mappings_and_sequences tests.test_tw_incremental.TWOfficialIncrementalTests.test_canonical_json_normalizes_nested_immutable_mappings tests.test_tw_incremental.TWOfficialIncrementalTests.test_canonical_json_rejects_unsupported_and_nonfinite_values tests.test_tw_incremental.TWOfficialIncrementalTests.test_backup_manifest_entry_sha256_is_lowercase_64_hex -v`: immutable mappings/sequences normalize identically, hostile values fail closed, and manifest-entry digest format is enforced. |
+| Combined recovery/reconciliation integration | Task 7; `test_both_flags_direct_recovery_rotates_history_writes_once_and_reruns_stably` | `& $PythonExe -m unittest tests.test_tw_official_post_close_cli.TWOfficialPostCloseCLITests.test_both_flags_direct_recovery_rotates_history_writes_once_and_reruns_stably -v`: direct A0 rotates to historical A1, the recovered artifact writes exactly once, `_assert_complete` sees a consistent state, and the second opt-in rerun uses historical result-SHA with stable daily/receipt bytes. |
 | Checkpoint/resume/publication | Task 7; `test_recovery_failure_advances_cursor_without_overwriting_artifact`, `test_recovery_failure_resume_retries_failed_before_new`, `test_recovery_failure_blocks_assert_complete_and_publication` | `& $PythonExe -m unittest tests.test_tw_official_post_close_cli tests.test_local_quant_batch -v`: existing cursor semantics preserved and publication blocked. |
 | Normal runtime quarantine isolation | Tasks 6 and 7; `test_flag_off_carries_valid_receipt_without_quarantine`, `test_cli_default_path_never_constructs_resolver_or_touches_quarantine` | `& $PythonExe -m unittest tests.test_tw_incremental tests.test_tw_official_post_close_cli -v`: patched quarantine access is never called. |
 | ETF and short history | Task 3; `test_etf_history_preserves_warmup_rows`, `test_short_history_still_fails_closed_when_latest_is_not_calculated` | `& $PythonExe -m unittest tests.test_tw_daily_history_preservation.TWHistoryPersistenceTests -v`: ETF retains canonical rows; insufficient latest calculation raises the existing error. |
@@ -1008,7 +1019,7 @@ git commit -m "feat: read verified TW reconciliation backups"
 **Interfaces:**
 
 - Produces `HistoryRecoveryResult`, `HistoryRecoveryResolver`, and `resolve_truncated_daily_history(root, symbol, artifact)` exactly as frozen.
-- Resolver has no dataset start/end and does not build or finalize a receipt.
+- Resolver has no dataset start/end and does not build or finalize a receipt; it returns the selected immutable reconciliation evidence needed to authorize final persisted-row differences in Task 6.
 - Preserves the one-way import direction from `tw_legacy_reconciliation` to `tw_incremental`.
 
 - [ ] **Step 1 — RED: write eligibility, binding, ambiguity, and merge tests**
@@ -1027,12 +1038,13 @@ LegacyArtifactBackupStoreTests.test_merge_rejects_bool_nan_and_infinite_ohlcv
 LegacyArtifactBackupStoreTests.test_merge_rejects_non_prefix_backup_only_rows
 LegacyArtifactBackupStoreTests.test_merge_keeps_current_whole_row_when_ohlcv_matches
 LegacyArtifactBackupStoreTests.test_resolver_returns_full_merge_and_candidates_without_range_filter
+LegacyArtifactBackupStoreTests.test_resolver_preserves_selected_reconciliation_evidence_for_receipt_finalization
 ```
 
 - [ ] **Step 2 — RED command and expected evidence**
 
 ```powershell
-& $PythonExe -m unittest tests.test_tw_legacy_reconciliation.LegacyArtifactBackupStoreTests.test_missing_or_null_lineage_is_legacy_and_not_recovery_eligible tests.test_tw_legacy_reconciliation.LegacyArtifactBackupStoreTests.test_present_invalid_lineage_fails_closed_for_recovery tests.test_tw_legacy_reconciliation.LegacyArtifactBackupStoreTests.test_valid_official_lineage_without_reconciliation_returns_none tests.test_tw_legacy_reconciliation.LegacyArtifactBackupStoreTests.test_resolver_binds_direct_result_sha_and_exact_snapshot_date tests.test_tw_legacy_reconciliation.LegacyArtifactBackupStoreTests.test_resolver_binds_historical_result_sha_and_exact_snapshot_date tests.test_tw_legacy_reconciliation.LegacyArtifactBackupStoreTests.test_resolver_rejects_missing_or_multiple_distinct_backups tests.test_tw_legacy_reconciliation.LegacyArtifactBackupStoreTests.test_resolver_deduplicates_identical_repeated_history_bindings tests.test_tw_legacy_reconciliation.LegacyArtifactBackupStoreTests.test_resolver_rejects_same_object_sha_with_conflicting_authorization_bindings tests.test_tw_legacy_reconciliation.LegacyArtifactBackupStoreTests.test_merge_rejects_duplicate_dates_and_overlap_ohlcv_conflict tests.test_tw_legacy_reconciliation.LegacyArtifactBackupStoreTests.test_merge_rejects_bool_nan_and_infinite_ohlcv tests.test_tw_legacy_reconciliation.LegacyArtifactBackupStoreTests.test_merge_rejects_non_prefix_backup_only_rows tests.test_tw_legacy_reconciliation.LegacyArtifactBackupStoreTests.test_merge_keeps_current_whole_row_when_ohlcv_matches tests.test_tw_legacy_reconciliation.LegacyArtifactBackupStoreTests.test_resolver_returns_full_merge_and_candidates_without_range_filter -v
+& $PythonExe -m unittest tests.test_tw_legacy_reconciliation.LegacyArtifactBackupStoreTests.test_missing_or_null_lineage_is_legacy_and_not_recovery_eligible tests.test_tw_legacy_reconciliation.LegacyArtifactBackupStoreTests.test_present_invalid_lineage_fails_closed_for_recovery tests.test_tw_legacy_reconciliation.LegacyArtifactBackupStoreTests.test_valid_official_lineage_without_reconciliation_returns_none tests.test_tw_legacy_reconciliation.LegacyArtifactBackupStoreTests.test_resolver_binds_direct_result_sha_and_exact_snapshot_date tests.test_tw_legacy_reconciliation.LegacyArtifactBackupStoreTests.test_resolver_binds_historical_result_sha_and_exact_snapshot_date tests.test_tw_legacy_reconciliation.LegacyArtifactBackupStoreTests.test_resolver_rejects_missing_or_multiple_distinct_backups tests.test_tw_legacy_reconciliation.LegacyArtifactBackupStoreTests.test_resolver_deduplicates_identical_repeated_history_bindings tests.test_tw_legacy_reconciliation.LegacyArtifactBackupStoreTests.test_resolver_rejects_same_object_sha_with_conflicting_authorization_bindings tests.test_tw_legacy_reconciliation.LegacyArtifactBackupStoreTests.test_merge_rejects_duplicate_dates_and_overlap_ohlcv_conflict tests.test_tw_legacy_reconciliation.LegacyArtifactBackupStoreTests.test_merge_rejects_bool_nan_and_infinite_ohlcv tests.test_tw_legacy_reconciliation.LegacyArtifactBackupStoreTests.test_merge_rejects_non_prefix_backup_only_rows tests.test_tw_legacy_reconciliation.LegacyArtifactBackupStoreTests.test_merge_keeps_current_whole_row_when_ohlcv_matches tests.test_tw_legacy_reconciliation.LegacyArtifactBackupStoreTests.test_resolver_returns_full_merge_and_candidates_without_range_filter tests.test_tw_legacy_reconciliation.LegacyArtifactBackupStoreTests.test_resolver_preserves_selected_reconciliation_evidence_for_receipt_finalization -v
 ```
 
 Expected RED: import of `resolve_truncated_daily_history` or `HistoryRecoveryResult` fails; fixtures and the Task 4 verified reader succeed independently.
@@ -1104,7 +1116,7 @@ def _merge_recovery_daily(active_daily, backup_daily):
     )
 ```
 
-`_validated_daily_by_date()` rejects non-list/non-dict rows, booleans, NaN, infinity, invalid dates, duplicate dates, and non-increasing input dates. Build `HistoryRecoveryResult` with full `merged_daily`, `restored_candidates`, and verified `backup_daily` rows each wrapped as `MappingProxyType(copy.deepcopy(row))`; artifact input SHA; entry original SHA; candidate result SHA; exact target/series; `MappingProxyType(copy.deepcopy(entry))`; and `MappingProxyType(copy.deepcopy(existing_receipt))` or `None`. Do not apply a request range and do not compute retention fields.
+`_validated_daily_by_date()` rejects non-list/non-dict rows, booleans, NaN, infinity, invalid dates, duplicate dates, and non-increasing input dates. Build `HistoryRecoveryResult` with full `merged_daily`, `restored_candidates`, and verified `backup_daily` rows each wrapped as `MappingProxyType(copy.deepcopy(row))`; artifact input SHA; entry original SHA; candidate result SHA; exact target/series; `MappingProxyType(copy.deepcopy(entry))`; `MappingProxyType(copy.deepcopy(selected_reconciliation))`; and `MappingProxyType(copy.deepcopy(existing_receipt))` or `None`. The selected reconciliation evidence is immutable input to Task 6's exact per-date `replace_verified_legacy` authorization, not a reason to broaden merge acceptance. Do not apply a request range and do not compute retention fields.
 
 Extend the inventory with the direct backup-document readers introduced here:
 
@@ -1127,7 +1139,7 @@ READER_CONTRACTS.update({
 & $PythonExe -m unittest tests.test_tw_legacy_reconciliation tests.test_persisted_daily_reader_audit -v
 ```
 
-Expected GREEN: missing/null legacy lineage and valid no-reconciliation lineage return `None`; present invalid lineage and every hostile binding fail closed; direct/historical exact bindings, prefix-only restoration, and current-row precedence pass; the AST inventory contains each new recovery reader.
+Expected GREEN: missing/null legacy lineage and valid no-reconciliation lineage return `None`; present invalid lineage and every hostile binding fail closed; direct/historical exact bindings, immutable selected reconciliation evidence, prefix-only restoration, and current-row precedence pass; the AST inventory contains each new recovery reader.
 
 - [ ] **Step 5 — Commit**
 
@@ -1161,12 +1173,20 @@ TWOfficialIncrementalTests.test_recovered_daily_rows_filter_each_requested_range
 TWOfficialIncrementalTests.test_dataset_call_orders_are_byte_identical
 TWOfficialIncrementalTests.test_receipt_hashes_only_restored_rows_in_final_persisted_daily
 TWOfficialIncrementalTests.test_receipt_hashes_final_persisted_source_projection_not_backup_candidate
+TWOfficialIncrementalTests.test_receipt_allows_recomputed_context_fields_different_from_backup
+TWOfficialIncrementalTests.test_receipt_allows_evidenced_official_reconciliation_price_chip_margin_replacements
+TWOfficialIncrementalTests.test_receipt_rejects_unauthorized_final_ohlcv_difference
 TWOfficialIncrementalTests.test_zero_retained_rows_without_receipt_returns_none
 TWOfficialIncrementalTests.test_opt_in_rerun_rebinds_existing_receipt_to_current_verified_backup
 TWOfficialIncrementalTests.test_existing_receipt_revalidation_uses_current_persisted_source_projection
+TWOfficialIncrementalTests.test_existing_receipt_rejects_in_window_final_persisted_row_mutation
 TWOfficialIncrementalTests.test_direct_recovery_promotes_reconciliation_to_history_and_artifact_rerun_is_byte_identical
 TWOfficialIncrementalTests.test_existing_receipt_rebind_allows_only_retention_aged_rows_to_be_absent
 TWOfficialIncrementalTests.test_changed_parseable_manifest_entry_fails_existing_receipt_revalidation
+TWOfficialIncrementalTests.test_canonical_json_normalizes_immutable_mappings_and_sequences
+TWOfficialIncrementalTests.test_canonical_json_normalizes_nested_immutable_mappings
+TWOfficialIncrementalTests.test_canonical_json_rejects_unsupported_and_nonfinite_values
+TWOfficialIncrementalTests.test_backup_manifest_entry_sha256_is_lowercase_64_hex
 TWOfficialIncrementalTests.test_flag_off_carries_valid_receipt_without_quarantine
 TWOfficialIncrementalTests.test_lineage_rejects_malformed_tampered_cross_symbol_or_zero_row_receipt
 ```
@@ -1175,10 +1195,12 @@ The order test executes all six permutations through a pipeline adapter whose `g
 
 The direct-rerun integration test writes an A0 artifact carrying a valid direct reconciliation whose manifest `entry.new_sha256 == A0.compressed_sha256`, runs real opt-in resolution/finalization, and asserts the A1 lineage has no `legacy_reconciliation` and exactly one valid history envelope with `reconciled_artifact_sha256 == A0.compressed_sha256`. It atomically writes and reloads A1, constructs a fresh opt-in resolver, reruns through the historical binding, and requires byte-identical `daily_history_recovery` plus no duplicate daily rows. A finalizer-only synthetic result is not sufficient evidence.
 
+The receipt-authorization tests retain a verified backup row while changing final `MARKET_*`, `ETF50_*`, `OPTION_*`, `DATA_PRICE_*`, and `YF_CLOSE` values, and require success with the receipt hash computed from those final rows. A second case uses validated `replace_verified_legacy` evidence to replace the corresponding final OHLCV, `InstitutionalNet`/`ForeignNet`, `MarginBalance`, and `ShortBalance` values, then proves the existing official-source validation remains mandatory. A non-evidenced OHLCV replacement fails closed. The rerun test changes one in-window final persisted source field and requires receipt revalidation failure; it separately proves only rows below the final retention floor may be absent. The canonical-JSON tests use `MappingProxyType`, tuples, nested immutable mappings, an unsupported object, `float("nan")`, and both infinities; equivalent JSON values hash identically, hostile values fail before hashing, and the emitted manifest-entry digest matches `^[0-9a-f]{64}$`.
+
 - [ ] **Step 2 — RED command and expected evidence**
 
 ```powershell
-& $PythonExe -m unittest tests.test_tw_incremental.TWOfficialIncrementalTests.test_recovery_resolver_is_optional_and_not_called_by_default tests.test_tw_incremental.TWOfficialIncrementalTests.test_recovery_resolver_is_called_once_for_all_dataset_orders tests.test_tw_incremental.TWOfficialIncrementalTests.test_recovered_daily_rows_filter_each_requested_range_after_cache tests.test_tw_incremental.TWOfficialIncrementalTests.test_dataset_call_orders_are_byte_identical tests.test_tw_incremental.TWOfficialIncrementalTests.test_receipt_hashes_only_restored_rows_in_final_persisted_daily tests.test_tw_incremental.TWOfficialIncrementalTests.test_receipt_hashes_final_persisted_source_projection_not_backup_candidate tests.test_tw_incremental.TWOfficialIncrementalTests.test_zero_retained_rows_without_receipt_returns_none tests.test_tw_incremental.TWOfficialIncrementalTests.test_opt_in_rerun_rebinds_existing_receipt_to_current_verified_backup tests.test_tw_incremental.TWOfficialIncrementalTests.test_existing_receipt_revalidation_uses_current_persisted_source_projection tests.test_tw_incremental.TWOfficialIncrementalTests.test_direct_recovery_promotes_reconciliation_to_history_and_artifact_rerun_is_byte_identical tests.test_tw_incremental.TWOfficialIncrementalTests.test_existing_receipt_rebind_allows_only_retention_aged_rows_to_be_absent tests.test_tw_incremental.TWOfficialIncrementalTests.test_changed_parseable_manifest_entry_fails_existing_receipt_revalidation tests.test_tw_incremental.TWOfficialIncrementalTests.test_flag_off_carries_valid_receipt_without_quarantine tests.test_tw_incremental.TWOfficialIncrementalTests.test_lineage_rejects_malformed_tampered_cross_symbol_or_zero_row_receipt -v
+& $PythonExe -m unittest tests.test_tw_incremental.TWOfficialIncrementalTests.test_recovery_resolver_is_optional_and_not_called_by_default tests.test_tw_incremental.TWOfficialIncrementalTests.test_recovery_resolver_is_called_once_for_all_dataset_orders tests.test_tw_incremental.TWOfficialIncrementalTests.test_recovered_daily_rows_filter_each_requested_range_after_cache tests.test_tw_incremental.TWOfficialIncrementalTests.test_dataset_call_orders_are_byte_identical tests.test_tw_incremental.TWOfficialIncrementalTests.test_receipt_hashes_only_restored_rows_in_final_persisted_daily tests.test_tw_incremental.TWOfficialIncrementalTests.test_receipt_hashes_final_persisted_source_projection_not_backup_candidate tests.test_tw_incremental.TWOfficialIncrementalTests.test_receipt_allows_recomputed_context_fields_different_from_backup tests.test_tw_incremental.TWOfficialIncrementalTests.test_receipt_allows_evidenced_official_reconciliation_price_chip_margin_replacements tests.test_tw_incremental.TWOfficialIncrementalTests.test_receipt_rejects_unauthorized_final_ohlcv_difference tests.test_tw_incremental.TWOfficialIncrementalTests.test_zero_retained_rows_without_receipt_returns_none tests.test_tw_incremental.TWOfficialIncrementalTests.test_opt_in_rerun_rebinds_existing_receipt_to_current_verified_backup tests.test_tw_incremental.TWOfficialIncrementalTests.test_existing_receipt_revalidation_uses_current_persisted_source_projection tests.test_tw_incremental.TWOfficialIncrementalTests.test_existing_receipt_rejects_in_window_final_persisted_row_mutation tests.test_tw_incremental.TWOfficialIncrementalTests.test_direct_recovery_promotes_reconciliation_to_history_and_artifact_rerun_is_byte_identical tests.test_tw_incremental.TWOfficialIncrementalTests.test_existing_receipt_rebind_allows_only_retention_aged_rows_to_be_absent tests.test_tw_incremental.TWOfficialIncrementalTests.test_changed_parseable_manifest_entry_fails_existing_receipt_revalidation tests.test_tw_incremental.TWOfficialIncrementalTests.test_canonical_json_normalizes_immutable_mappings_and_sequences tests.test_tw_incremental.TWOfficialIncrementalTests.test_canonical_json_normalizes_nested_immutable_mappings tests.test_tw_incremental.TWOfficialIncrementalTests.test_canonical_json_rejects_unsupported_and_nonfinite_values tests.test_tw_incremental.TWOfficialIncrementalTests.test_backup_manifest_entry_sha256_is_lowercase_64_hex tests.test_tw_incremental.TWOfficialIncrementalTests.test_flag_off_carries_valid_receipt_without_quarantine tests.test_tw_incremental.TWOfficialIncrementalTests.test_lineage_rejects_malformed_tampered_cross_symbol_or_zero_row_receipt -v
 ```
 
 Expected RED: `OfficialCompatFetcher.__init__` rejects `recovery_resolver`, `lineage_for` rejects `persisted_daily`, and receipt finalization is absent. Test fixtures use the Task 5 result type exactly.
@@ -1215,9 +1237,29 @@ rows = [
 ]
 ```
 
-Import `CALCULATED_COLUMNS` from `stock_papi.quant.features`, define `RECOVERY_DERIVED_FIELDS` exactly as frozen, and implement `_canonical_recovery_source_row()` by copying the row, parsing `Date` with the existing strict date helper, replacing it with `date.isoformat()`, and excluding derived fields plus private keys beginning with `_`. The helper preserves every remaining source key/value; callers compare the complete resulting mappings, not OHLCV alone.
+Import `math`, import `Mapping` from `collections.abc`, import `CALCULATED_COLUMNS` from `stock_papi.quant.features`, define `RECOVERY_DERIVED_FIELDS` exactly as frozen, and implement `_canonical_recovery_source_row()` by copying the row, parsing `Date` with the existing strict date helper, replacing it with `date.isoformat()`, and excluding derived fields plus private keys beginning with `_`. The helper preserves every remaining source key/value. Implement the one normalizer used by every canonical JSON hash and receipt comparison:
 
-`_finalize_daily_history_recovery()` first validates final `persisted_daily` as strictly ordered, unique canonical rows and normalizes each `Date` to ISO text. With no existing receipt, it takes the authorized dates from `restored_candidates`, selects those dates from final `persisted_daily`, projects each selected persisted row through `_canonical_recovery_source_row()`, and requires exact equality with the same projection of the verified candidate row. It hashes only those ordered final persisted projections. Zero retained authorized dates returns `None`; otherwise it emits the exact 16-field receipt and canonical hashes. It uses the existing `OfficialCompatFetcher._canonical_json_sha256()` encoding for manifest entry, projected persisted rows, and receipt hashes.
+```python
+def _canonical_json_value(value):
+    if isinstance(value, Mapping):
+        return {
+            str(key): _canonical_json_value(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, (tuple, list)):
+        return [_canonical_json_value(item) for item in value]
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise IncrementalHistoryError("canonical JSON value is invalid")
+        return value
+    raise IncrementalHistoryError("canonical JSON value is invalid")
+```
+
+Do not pass `MappingProxyType` to `json.dumps()`. `_canonical_json_sha256()` applies this helper and uses `allow_nan=False`. Source-row numeric validation continues to reject `bool` before numeric comparison, so a JSON boolean is never accepted as `0` or `1`.
+
+`_finalize_daily_history_recovery()` first validates final `persisted_daily` as strictly ordered, unique canonical rows and normalizes each `Date` to ISO text. With no existing receipt, it takes the authorized dates from `restored_candidates`, selects those dates from final `persisted_daily`, validates each final row against the verified backup authorization, and hashes only those ordered final projections. For a date outside validated official reconciliation coverage, require backup-equal `Date` and canonical OHLCV. For a date covered by the selected validated `replace_verified_legacy` reconciliation, permit only each explicitly recorded `replaced_official` OHLCV, institutional/chip, or margin field and require its final value to pass the existing official-source validation. Do not compare recomputed `MARKET_*`, `ETF50_*`, `OPTION_*`, `DATA_PRICE_*`, or `YF_CLOSE` context fields to backup. Zero retained authorized dates returns `None`; otherwise emit the exact 16-field receipt and canonical hashes. It uses the normalized `OfficialCompatFetcher._canonical_json_sha256()` encoding for manifest entry, final persisted projections, and receipt hashes.
 
 With an existing receipt, it recomputes and requires:
 
@@ -1232,13 +1274,13 @@ backup_manifest_entry.original_uncompressed_size == receipt.backup_object_uncomp
 receipt.symbol == requested symbol
 receipt.input_artifact_sha256 is a lowercase 64-hex SHA retained as historical provenance, not rebound to the current active artifact
 ordered authorized dates come from verified backup_daily rows inside the receipt range
-canonical hash/count/start/end of all verified backup_daily source projections in the original receipt range == receipt restored fields
-each receipt-range row still present in final persisted_daily has a complete source projection equal to its verified backup-row projection
+canonical hash/count/start/end of all final persisted source projections for authorized receipt-range rows currently inside retention == receipt restored fields
+each receipt-range row still present in final persisted_daily passes the same backup authorization: backup-equal Date/OHLCV outside official reconciliation coverage, or only explicit validated `replaced_official` OHLCV/institutional/chip/margin differences inside it; recomputed context fields remain final-row hash inputs without equality comparison
 any receipt-range date absent from final persisted_daily is strictly earlier than min(final persisted_daily dates); absence inside the current retained window fails
 sha256(canonical_json(receipt without receipt_sha256)) == receipt.receipt_sha256
 ```
 
-This permits only rows aged out by the later normal retention floor; it does not rewrite the historical receipt for a later target. The finalizer returns a new plain `dict` with unchanged fields only when every comparison passes. `_valid_official_lineage()` validates the exact optional receipt fields and reconciliation cross-binding without filesystem access. `_lineage_kind()` caches a valid existing receipt. `lineage_for(symbol, persisted_daily=final_daily)` always calls `_ensure_history_recovery(symbol)` before choosing the finalizer or carry-forward path, so receipt creation is independent of whether any dataset method ran first; when recovery ran it calls `_finalize_daily_history_recovery(result, symbol=symbol, recovery_target_market_date=self.target_date, persisted_daily=final_daily)`, otherwise it carries the cached valid receipt unchanged.
+This permits only rows aged out by the later normal retention floor; it does not rewrite the historical receipt for a later target. The finalizer returns a new plain `dict` with unchanged fields only when every comparison passes. `_valid_official_lineage()` validates the exact optional receipt fields, lowercase 64-hex `backup_manifest_entry_sha256`, and reconciliation cross-binding without filesystem access. `_lineage_kind()` caches a valid existing receipt. `lineage_for(symbol, persisted_daily=final_daily)` always calls `_ensure_history_recovery(symbol)` before choosing the finalizer or carry-forward path, so receipt creation is independent of whether any dataset method ran first; when recovery ran it calls `_finalize_daily_history_recovery(result, symbol=symbol, recovery_target_market_date=self.target_date, persisted_daily=final_daily)`, otherwise it carries the cached valid receipt unchanged.
 
 When that call returns a non-`None` receipt and `self._existing_reconciliations.get(symbol)` is a direct record, `lineage_for()` performs this exact inline rotation before attaching the receipt:
 
@@ -1277,7 +1319,7 @@ The direct record has already passed `_valid_official_lineage`; the extra compar
 & $PythonExe -m unittest tests.test_tw_incremental tests.test_tw_legacy_reconciliation tests.test_persisted_daily_reader_audit -v
 ```
 
-Expected GREEN: one resolution per symbol, six call orders with identical bytes, per-dataset range filtering, post-retention receipt fields, no zero-row receipt, changed parseable entry failure, first-write direct-to-history rotation, second opt-in historical rebinding with byte-identical receipt, and flag-off carry-forward with a patched quarantine accessor that raises if called.
+Expected GREEN: one resolution per symbol, six call orders with identical bytes, per-dataset range filtering, post-retention final-row receipt fields, legitimate recomputed context and evidenced official replacement acceptance, unauthorized OHLCV and in-window mutation failure, immutable canonical-JSON normalization, lowercase manifest-entry digest validation, no zero-row receipt, changed parseable entry failure, first-write direct-to-history rotation, second opt-in historical rebinding with byte-identical receipt, and flag-off carry-forward with a patched quarantine accessor that raises if called.
 
 - [ ] **Step 5 — Commit**
 
@@ -1309,20 +1351,21 @@ TWOfficialPostCloseCLITests.test_cli_default_path_never_constructs_resolver_or_t
 TWOfficialPostCloseCLITests.test_cli_wires_recovery_resolver_only_when_enabled
 TWOfficialPostCloseCLITests.test_cli_checkpoint_identity_rejects_changed_recovery_mode
 TWOfficialPostCloseCLITests.test_both_recovery_and_reconcile_flags_keep_legacy_artifact_in_existing_reconciliation_flow
+TWOfficialPostCloseCLITests.test_both_flags_direct_recovery_rotates_history_writes_once_and_reruns_stably
 TWOfficialPostCloseCLITests.test_recovery_failure_blocks_assert_complete_and_publication
 LocalQuantBatchTests.test_recovery_failure_advances_cursor_without_overwriting_artifact
 LocalQuantBatchTests.test_recovery_failure_resume_retries_failed_before_new
 ```
 
-The combined-flags test writes both missing-lineage and explicit-`null`-lineage legacy artifacts, enables both flags, asserts recovery returns `None`, and proves existing `replace_verified_legacy` reconciliation writes the expected official overlap. Failure tests snapshot artifact bytes, checkpoint failures, `next_index`, and call order.
+The first combined-flags test writes both missing-lineage and explicit-`null`-lineage legacy artifacts, enables both flags, asserts recovery returns `None`, and proves existing `replace_verified_legacy` reconciliation writes the expected official overlap. The required integration test starts with an already-official A0 artifact carrying valid direct reconciliation and enables both `--recover-truncated-history` and `--reconcile-legacy-overlaps`: it proves direct A0 to historical A1 rotation is valid, the backup writer does not suppress the recovered artifact write, `_assert_complete` observes consistent reconciliation/history state, and exactly one artifact write occurs. It reloads A1 for a second opt-in rerun, proves historical result-SHA binding is used, and asserts stable `daily` and `daily_history_recovery` canonical bytes. Failure tests snapshot artifact bytes, checkpoint failures, `next_index`, and call order.
 
 - [ ] **Step 2 — RED command and expected evidence**
 
 ```powershell
-& $PythonExe -m unittest tests.test_tw_official_post_close_cli.TWOfficialPostCloseCLITests.test_cli_recovery_flag_is_explicit_opt_in tests.test_tw_official_post_close_cli.TWOfficialPostCloseCLITests.test_cli_default_path_never_constructs_resolver_or_touches_quarantine tests.test_tw_official_post_close_cli.TWOfficialPostCloseCLITests.test_cli_wires_recovery_resolver_only_when_enabled tests.test_tw_official_post_close_cli.TWOfficialPostCloseCLITests.test_cli_checkpoint_identity_rejects_changed_recovery_mode tests.test_tw_official_post_close_cli.TWOfficialPostCloseCLITests.test_both_recovery_and_reconcile_flags_keep_legacy_artifact_in_existing_reconciliation_flow tests.test_tw_official_post_close_cli.TWOfficialPostCloseCLITests.test_recovery_failure_blocks_assert_complete_and_publication tests.test_local_quant_batch.LocalQuantBatchTests.test_recovery_failure_advances_cursor_without_overwriting_artifact tests.test_local_quant_batch.LocalQuantBatchTests.test_recovery_failure_resume_retries_failed_before_new -v
+& $PythonExe -m unittest tests.test_tw_official_post_close_cli.TWOfficialPostCloseCLITests.test_cli_recovery_flag_is_explicit_opt_in tests.test_tw_official_post_close_cli.TWOfficialPostCloseCLITests.test_cli_default_path_never_constructs_resolver_or_touches_quarantine tests.test_tw_official_post_close_cli.TWOfficialPostCloseCLITests.test_cli_wires_recovery_resolver_only_when_enabled tests.test_tw_official_post_close_cli.TWOfficialPostCloseCLITests.test_cli_checkpoint_identity_rejects_changed_recovery_mode tests.test_tw_official_post_close_cli.TWOfficialPostCloseCLITests.test_both_recovery_and_reconcile_flags_keep_legacy_artifact_in_existing_reconciliation_flow tests.test_tw_official_post_close_cli.TWOfficialPostCloseCLITests.test_both_flags_direct_recovery_rotates_history_writes_once_and_reruns_stably tests.test_tw_official_post_close_cli.TWOfficialPostCloseCLITests.test_recovery_failure_blocks_assert_complete_and_publication tests.test_local_quant_batch.LocalQuantBatchTests.test_recovery_failure_advances_cursor_without_overwriting_artifact tests.test_local_quant_batch.LocalQuantBatchTests.test_recovery_failure_resume_retries_failed_before_new -v
 ```
 
-Expected RED: CLI/signature/identity/combined-flag tests fail because the recovery option is absent. The two `LocalQuantBatchTests` characterize the current generic failure behavior and may already pass; they must not motivate a `run_market_batch` edit.
+Expected RED: CLI/signature/identity/combined-flag integration tests fail because the recovery option is absent. The two `LocalQuantBatchTests` characterize the current generic failure behavior and may already pass; they must not motivate a `run_market_batch` edit.
 
 - [ ] **Step 3 — Implementation: pass the opt-in through existing boundaries**
 
@@ -1354,6 +1397,8 @@ result["source_lineage"] = fetcher.lineage_for(
 
 Any resolver/finalizer error propagates to the existing generic per-symbol path before `write_stock_artifact`; the failed artifact remains byte-identical. `_assert_complete` remains unchanged.
 
+When both flags are enabled, preserve the existing reconciliation write path and run recovery finalization against the final recovered `result["daily"]` before the single normal artifact write. Do not treat `backup_store` activity as an artifact write and do not skip `write_stock_artifact` because the direct record is being rotated: the integration test must observe one recovered A1 artifact write and a lineage that `_assert_complete` accepts.
+
 Extend the inventory for the wrapper's new direct `result["daily"]` access:
 
 ```python
@@ -1371,7 +1416,7 @@ READER_CONTRACTS.update({
 & $PythonExe -m unittest tests.test_tw_official_post_close_cli tests.test_local_quant_batch tests.test_tw_incremental.TWOfficialIncrementalTests.test_status_fetcher_preserves_history_and_exposes_target_evidence tests.test_tw_incremental.TWLegacyOverlapReconciliationTests.test_official_lineage_allows_symbol_history_after_series_start tests.test_tw_trading_status -v
 ```
 
-Expected GREEN: opt-in/default isolation, both flags on legacy artifacts, identity mismatch, unchanged failed artifact, new-symbol cursor advance, failed-first resume, active-failure publication block, regular/status dates, reconciliation, ETF, short history, and reused-symbol lifecycle all pass.
+Expected GREEN: opt-in/default isolation, both flags on legacy artifacts, the already-official direct A0 to historical A1 integration with exactly one recovered artifact write and stable second-run daily/receipt bytes, identity mismatch, unchanged failed artifact, new-symbol cursor advance, failed-first resume, active-failure publication block, regular/status dates, reconciliation, ETF, short history, and reused-symbol lifecycle all pass.
 
 - [ ] **Step 5 — Commit**
 
@@ -1416,19 +1461,20 @@ Expected: every command exits `0`. Report each environment-only skip by exact te
 
 ```powershell
 & $PythonExe -m unittest tests.test_tw_daily_history_preservation.TWHistoryPersistenceTests.test_multistage_history_does_not_erode_and_rerun_is_byte_stable -v
+& $PythonExe -m unittest tests.test_tw_incremental.TWOfficialIncrementalTests.test_receipt_allows_recomputed_context_fields_different_from_backup tests.test_tw_incremental.TWOfficialIncrementalTests.test_receipt_allows_evidenced_official_reconciliation_price_chip_margin_replacements tests.test_tw_incremental.TWOfficialIncrementalTests.test_receipt_hashes_final_persisted_source_projection_not_backup_candidate tests.test_tw_incremental.TWOfficialIncrementalTests.test_receipt_rejects_unauthorized_final_ohlcv_difference tests.test_tw_incremental.TWOfficialIncrementalTests.test_existing_receipt_rejects_in_window_final_persisted_row_mutation tests.test_tw_incremental.TWOfficialIncrementalTests.test_canonical_json_normalizes_immutable_mappings_and_sequences tests.test_tw_incremental.TWOfficialIncrementalTests.test_canonical_json_normalizes_nested_immutable_mappings tests.test_tw_incremental.TWOfficialIncrementalTests.test_canonical_json_rejects_unsupported_and_nonfinite_values tests.test_tw_incremental.TWOfficialIncrementalTests.test_backup_manifest_entry_sha256_is_lowercase_64_hex tests.test_tw_official_post_close_cli.TWOfficialPostCloseCLITests.test_both_flags_direct_recovery_rotates_history_writes_once_and_reruns_stably -v
 git diff --check 0d2293d6fa8fb61a740a949f8ad084c24a266a2c..HEAD
 git diff --name-only 0d2293d6fa8fb61a740a949f8ad084c24a266a2c..HEAD
 git status --short
 rg -n 'rglob\(|canonical_daily|source_daily' local_quant.py stock_papi tests
 ```
 
-Expected GREEN: the five-stage simulation passes in a temporary directory; diff check is empty; changed names equal the responsibility map plus this committed plan document; status is clean; no production `rglob(` or extra daily-history field exists. A test-only `Path.rglob("*.py")` in the AST inventory is permitted because it scans repository source, not recovery storage.
+Expected GREEN: the five-stage simulation and the explicit receipt/reconciliation integration command pass in temporary directories; final persisted rows authorize and hash correctly, hostile canonical JSON fails closed, and combined flags write the recovered artifact once before a stable historical-binding rerun. Diff check is empty; changed names equal the responsibility map plus this committed plan document; status is clean; no production `rglob(` or extra daily-history field exists. A test-only `Path.rglob("*.py")` in the AST inventory is permitted because it scans repository source, not recovery storage.
 
 - [ ] **Step 4 — Independent review and findings repair**
 
 ```powershell
 $reviewLog = Join-Path $env:TEMP "agy-tw-daily-history-preservation-review.log"
-agy --sandbox --print "Read-only review of this branch against design commit 0d2293d6fa8fb61a740a949f8ad084c24a266a2c. Inspect repository APIs, canonical/calculated ordering, all persisted daily readers, recovery eligibility, exact manifest/object single-read binding, direct and historical SHA binding, receipt retention and rerun revalidation, checkpoint/resume, runtime quarantine isolation, status/lifecycle, ETF, short history, tests, and scope. Report Critical or Important findings; do not modify files." 2>&1 | Tee-Object -FilePath $reviewLog
+agy --sandbox --print "Read-only review of this branch against design commit 0d2293d6fa8fb61a740a949f8ad084c24a266a2c. Inspect repository APIs, canonical/calculated ordering, all persisted daily readers, recovery eligibility, exact manifest/object single-read binding, direct and historical SHA binding, receipt authorization versus final persisted rows, explicit official replacement evidence, canonical JSON Mapping/Sequence normalization and digest format, retention rerun revalidation, the both-flags direct-A0-to-historical-A1 one-write integration, checkpoint/resume, runtime quarantine isolation, status/lifecycle, ETF, short history, tests, and scope. Report Critical or Important findings; do not modify files." 2>&1 | Tee-Object -FilePath $reviewLog
 Get-Content -Raw -Encoding utf8 $reviewLog
 ```
 
