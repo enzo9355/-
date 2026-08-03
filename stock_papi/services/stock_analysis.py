@@ -13,7 +13,7 @@ def snapshot_dataframe(snapshot, *, pd):
         frame = frame.dropna(subset=["Date"]).set_index("Date").sort_index()
         required = [
             "Open", "High", "Low", "Close", "MA20", "RSI", "Volat",
-            "MACD_OSC", "K", "D", "AI_P", "ForeignNet",
+            "MACD_OSC", "K", "D", "ForeignNet",
         ]
         if frame.empty or not set(required).issubset(frame.columns):
             return None
@@ -32,6 +32,8 @@ def snapshot_dataframe(snapshot, *, pd):
             complete &= frame[name].map(finite_numeric)
         frame = frame.loc[complete]
         if len(frame) < 200 or frame.index[-1] != persisted_latest_date:
+            return None
+        if "AI_P" not in frame.columns or not finite_numeric(frame["AI_P"].iloc[-1]):
             return None
         return frame
     except (KeyError, TypeError, ValueError):
