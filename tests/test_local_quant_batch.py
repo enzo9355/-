@@ -245,6 +245,66 @@ File Creation Time: 07082026||||||
             self.assertEqual(checkpoint["next_index"], 2)
             self.assertNotIn("secret upstream response", json.dumps(checkpoint))
 
+    def test_recovery_failure_advances_cursor_without_overwriting_artifact(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            ensure_layout(root)
+            artifact = write_stock_artifact(
+                root, "TW", "2330", {"as_of": "2026-07-23", "daily": []}
+            )
+            before = artifact.read_bytes()
+            calls = []
+
+            def analyze(symbol):
+                calls.append(symbol)
+                if symbol == "2330":
+                    raise RuntimeError("daily history recovery failed")
+                return {"as_of": "2026-07-23"}
+
+            result = run_market_batch(
+                root,
+                "TW",
+                ["2330", "2303"],
+                analyze,
+                limit=2,
+                now_fn=lambda: datetime.datetime(2026, 7, 6, 6, tzinfo=TAIPEI),
+                delay=0,
+            )
+
+            self.assertEqual(calls, ["2330", "2303"])
+            self.assertEqual(result["next_index"], 2)
+            self.assertEqual(result["failed"], [{"symbol": "2330", "error": "RuntimeError"}])
+            self.assertEqual(artifact.read_bytes(), before)
+
+    def test_recovery_failure_resume_retries_failed_before_new(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            ensure_layout(root)
+            save_checkpoint(
+                root,
+                {
+                    "stage": "market_batch",
+                    "market": "TW",
+                    "next_index": 1,
+                    "failed": [{"symbol": "2330", "error": "RuntimeError"}],
+                },
+            )
+            calls = []
+
+            result = run_market_batch(
+                root,
+                "TW",
+                ["2330", "2303", "2317"],
+                lambda symbol: calls.append(symbol) or {"as_of": "2026-07-23"},
+                limit=2,
+                now_fn=lambda: datetime.datetime(2026, 7, 6, 6, tzinfo=TAIPEI),
+                delay=0,
+            )
+
+            self.assertEqual(calls, ["2330", "2303"])
+            self.assertEqual(result["next_index"], 2)
+            self.assertEqual(result["failed"], [])
+
     def test_market_batch_fails_fast_and_preserves_provider_failure(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
