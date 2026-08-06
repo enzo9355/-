@@ -1115,10 +1115,13 @@ class OfficialCompatFetcher:
             if receipt is not None:
                 self._existing_recovery_receipts[symbol] = copy.deepcopy(receipt)
         else:
-            raise IncrementalHistoryError(
-                "historical artifact lineage is not eligible for reconciliation: "
-                f"TW:{symbol}"
-            )
+            if isinstance(lineage, dict) and lineage.get("source_mode") == SOURCE_MODE:
+                kind = "legacy"
+            else:
+                raise IncrementalHistoryError(
+                    "historical artifact lineage is not eligible for reconciliation: "
+                    f"TW:{symbol}"
+                )
         self._lineage_kinds[symbol] = kind
         return kind
 

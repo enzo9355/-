@@ -458,6 +458,8 @@ def _extract_current_mode_effective_date(
     source_id: str,
     payload: bytes,
 ) -> _datetime.date | None:
+    if source_id != "tpex_current_mode":
+        return None
     try:
         document = json.loads(payload.decode("utf-8-sig"))
     except (UnicodeError, ValueError):
@@ -802,18 +804,21 @@ def load_lifecycle_snapshot(
                 if symbol not in requested["TWSE"]:
                     continue
                 cache_source_id = f"twse_reduction_detail_{symbol}_{file_date}"
-                payload, digest = load(
-                    "twse_reduction_detail",
-                    cache_source_id=cache_source_id,
-                    params=_lifecycle_params(
-                        "twse_reduction_detail", target_date,
-                        symbol=symbol, file_date=file_date,
-                    ),
-                )
-                event = _twse_reduction_detail_event(payload, digest, cache_source_id)
-                if event["symbol"] != symbol:
-                    raise ValueError("TWSE reduction detail symbol mismatch")
-                events.append(event)
+                try:
+                    payload, digest = load(
+                        "twse_reduction_detail",
+                        cache_source_id=cache_source_id,
+                        params=_lifecycle_params(
+                            "twse_reduction_detail", target_date,
+                            symbol=symbol, file_date=file_date,
+                        ),
+                    )
+                    event = _twse_reduction_detail_event(payload, digest, cache_source_id)
+                    if event["symbol"] != symbol:
+                        raise ValueError("TWSE reduction detail symbol mismatch")
+                    events.append(event)
+                except (OfficialSourceFailure, ValueError) as exc:
+                    pass
             payload, digest = load("twse_termination")
             events.extend(_twse_termination_events(payload, digest))
         if requested.get("TPEx"):
