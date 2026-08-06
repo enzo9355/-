@@ -1663,8 +1663,8 @@ def build_stock_snapshot(
     canonical_frame = _canonical_history_frame(frame)
     calculated_frame = pipeline.calc_all(canonical_frame.copy())
     if calculated_frame is None or calculated_frame.empty:
-        raise ValueError("calculated history is unavailable")
-    if canonical_frame.index[-1] not in calculated_frame.index:
+        calculated_frame = canonical_frame.iloc[0:0].copy()
+    elif canonical_frame.index[-1] not in calculated_frame.index:
         raise ValueError("calculated history is unavailable")
     compatibility = None
     if observation_only:
