@@ -33,6 +33,10 @@ _EMPTY_PRICE_MARKERS = {"", "-", "--", "---", "----"}
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 
 
+class HistoricalLifecycleUnavailable(ValueError):
+    pass
+
+
 LIFECYCLE_SOURCE_DEFINITIONS = MappingProxyType({
     "twse_current_stop": OfficialSourceDefinition(
         "twse_current_stop", "TWSE", "lifecycle",
@@ -450,6 +454,20 @@ def _as_rows(payload: Any, label: str) -> list[Mapping[str, Any]]:
     return rows
 
 
+def _extract_current_mode_effective_date(
+    source_id: str,
+    payload: bytes,
+) -> _datetime.date | None:
+    try:
+        document = json.loads(payload.decode("utf-8-sig"))
+    except (UnicodeError, ValueError):
+        return None
+    rows = _as_rows(document, source_id)
+    if not rows or "Date" not in rows[0]:
+        return None
+    return _roc_date(rows[0]["Date"])
+
+
 def _load_lifecycle_payload(
     root: Path,
     target_date: _datetime.date,
@@ -473,6 +491,17 @@ def _load_lifecycle_payload(
             cache_source_id, "cache_invalid", safe_message=str(exc)
         ) from None
     request_count = 0
+    if cached is not None:
+        if (
+            cached.effective_date is not None
+            and cached.effective_date != target_date
+        ):
+            raise HistoricalLifecycleUnavailable(
+                f"cached {cache_source_id} effective date "
+                f"{cached.effective_date.isoformat()} "
+                f"does not match requested target date "
+                f"{target_date.isoformat()}"
+            )
     if cached is None:
         try:
             response = session.get(
@@ -505,6 +534,19 @@ def _load_lifecycle_payload(
                 "response_too_large",
                 safe_message="response size is invalid",
             )
+        effective_date = _extract_current_mode_effective_date(
+            cache_source_id, content
+        )
+        if (
+            effective_date is not None
+            and effective_date != target_date
+        ):
+            raise HistoricalLifecycleUnavailable(
+                f"fetched {cache_source_id} effective date "
+                f"{effective_date.isoformat()} "
+                f"does not match requested target date "
+                f"{target_date.isoformat()}"
+            )
         try:
             cached = store_cached_raw_source(
                 root,
@@ -515,6 +557,7 @@ def _load_lifecycle_payload(
                 source_url=definition.url,
                 fetched_at=fetched_at,
                 date_verification="lifecycle_contract",
+                effective_date=effective_date,
             )
         except (OfficialCacheError, OSError, ValueError) as exc:
             raise OfficialSourceFailure(
@@ -647,7 +690,11 @@ def _tpex_mode_events(payload: Any, payload_sha256: str, target_date: _datetime.
         if not {"Date", "SecuritiesCompanyCode", "SuspensionOfTrading"} <= set(row):
             raise ValueError("TPEx current mode schema is invalid")
         if _roc_date(row["Date"]) != target_date:
-            raise ValueError("TPEx current mode target date mismatch")
+            raise HistoricalLifecycleUnavailable(
+                "TPEx current mode effective date "
+                f"{_roc_date(row['Date']).isoformat()} "
+                f"does not match requested target {target_date.isoformat()}"
+            )
         marker = _text(row["SuspensionOfTrading"])
         if marker not in {"", "Ｙ"}:
             raise ValueError("TPEx current mode marker is invalid")
