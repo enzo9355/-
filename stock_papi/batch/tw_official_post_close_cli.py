@@ -52,6 +52,36 @@ def _universe_sha256(symbols: list[str]) -> str:
     ).hexdigest()
 
 
+def _load_recovery_symbol_allowlist(
+    path: Path,
+    *,
+    expected_sha256: str | None,
+) -> set[str]:
+    if not isinstance(path, Path):
+        raise TypeError("recovery symbol allowlist path is invalid")
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ValueError("recovery symbol allowlist is unreadable") from exc
+    symbols: list[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if _SYMBOL_RE.fullmatch(stripped) is None:
+            raise ValueError("recovery symbol allowlist is invalid")
+        symbols.append(stripped)
+    canonical = sorted(symbols)
+    if len(canonical) != len(set(canonical)):
+        raise ValueError("recovery symbol allowlist is invalid")
+    if expected_sha256 is not None:
+        if not re.fullmatch(r"[0-9a-f]{64}", expected_sha256):
+            raise ValueError("recovery symbol allowlist identity is invalid")
+        if _universe_sha256(canonical) != expected_sha256:
+            raise ValueError("recovery symbol allowlist identity does not match")
+    return set(canonical)
+
+
 def _required_symbols_by_exchange(
     symbols: list[str], *, registry: Mapping[str, Any] | None = None
 ) -> dict[str, set[str]]:
@@ -633,6 +663,7 @@ def _run_stage(
     reconcile_legacy_overlaps: bool,
     recover_truncated_history: bool,
     publish: bool,
+    recovery_symbol_allowlist: set[str] | None = None,
 ) -> tuple[int, set[str]]:
     if type(recover_truncated_history) is not bool:
         raise TypeError("recover_truncated_history must be bool")
@@ -727,9 +758,18 @@ def _run_stage(
     )
     recovery_resolver = None
     if recover_truncated_history:
-        recovery_resolver = lambda symbol, artifact: (
-            resolve_truncated_daily_history(root, symbol, artifact)
+        allowlist = (
+            None
+            if recovery_symbol_allowlist is None
+            else frozenset(recovery_symbol_allowlist)
         )
+
+        def _recovery_resolver(symbol, artifact, _root=root, _allowlist=allowlist):
+            if _allowlist is not None and symbol not in _allowlist:
+                return None
+            return resolve_truncated_daily_history(_root, symbol, artifact)
+
+        recovery_resolver = _recovery_resolver
     fetcher = OfficialCompatFetcher(
         root,
         series,
@@ -836,6 +876,7 @@ def run(
     series_builder=build_official_snapshot_series,
     reconcile_legacy_overlaps: bool = False,
     recover_truncated_history: bool = False,
+    recovery_symbol_allowlist: set[str] | None = None,
 ) -> int:
     if type(recover_truncated_history) is not bool:
         raise TypeError("recover_truncated_history must be bool")
@@ -880,6 +921,7 @@ def run(
             reconcile_legacy_overlaps=reconcile_legacy_overlaps,
             recover_truncated_history=recover_truncated_history,
             publish=stage_target == target_market_date,
+            recovery_symbol_allowlist=recovery_symbol_allowlist,
         )
         if result != 0 or stage_target == target_market_date:
             return result
@@ -917,10 +959,38 @@ def main(argv=None) -> int:
     parser.add_argument("--delay", type=float, default=0.5)
     parser.add_argument("--reconcile-legacy-overlaps", action="store_true")
     parser.add_argument("--recover-truncated-history", action="store_true")
+    parser.add_argument(
+        "--recovery-symbol-allowlist",
+        type=Path,
+        default=None,
+        help=(
+            "Path to a text file (one symbol per line) listing the exact "
+            "symbols eligible for truncated-history recovery; gates the "
+            "fallback resolver so unrelated symbols are never modified."
+        ),
+    )
+    parser.add_argument(
+        "--recovery-allowlist-sha256",
+        default=None,
+        help=(
+            "Expected SHA-256 of the canonical sorted recovery symbol "
+            "allowlist; required when --recovery-symbol-allowlist is set."
+        ),
+    )
     args = parser.parse_args(argv)
     try:
         if args.limit < 1 or args.delay < 0:
             raise ValueError("limit and delay are invalid")
+        recovery_symbol_allowlist: set[str] | None = None
+        if args.recovery_symbol_allowlist is not None:
+            if args.recovery_allowlist_sha256 is None:
+                raise ValueError(
+                    "recovery symbol allowlist identity is required"
+                )
+            recovery_symbol_allowlist = _load_recovery_symbol_allowlist(
+                args.recovery_symbol_allowlist,
+                expected_sha256=args.recovery_allowlist_sha256,
+            )
         return run(
             root=Path(args.root),
             target_market_date=args.target_market_date,
@@ -929,6 +999,7 @@ def main(argv=None) -> int:
             delay=args.delay,
             reconcile_legacy_overlaps=args.reconcile_legacy_overlaps,
             recover_truncated_history=args.recover_truncated_history,
+            recovery_symbol_allowlist=recovery_symbol_allowlist,
         )
     except (
         OfficialSourceFailure,

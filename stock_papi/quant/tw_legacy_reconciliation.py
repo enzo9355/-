@@ -21,6 +21,7 @@ from typing import Any
 from stock_papi.quant.tw_incremental import (
     MAX_COMPRESSED_BYTES,
     MAX_UNCOMPRESSED_BYTES,
+    SOURCE_MODE,
     HistoryRecoveryResult,
     IncrementalArtifact,
     IncrementalHistoryError,
@@ -231,6 +232,188 @@ def _immutable_copy(value: Any) -> Any:
     return copy.deepcopy(value)
 
 
+_FALLBACK_RECOVERY_KIND = "historical_artifact_sha256"
+
+
+def _recovery_fallback_snapshot_manifest(
+    root: Path,
+    as_of: datetime.date,
+) -> tuple[str, str]:
+    from stock_papi.integrations.market_data.tw_official_historical import (
+        build_historical_daily_snapshot,
+    )
+
+    snapshot = build_historical_daily_snapshot(root, as_of)
+    return snapshot.manifest_sha256, snapshot.source_schema_version
+
+
+def _recover_via_historical_artifact_sha256(
+    root: Path,
+    symbol: str,
+    artifact: IncrementalArtifact,
+) -> HistoryRecoveryResult | None:
+    lineage = artifact.document.get("source_lineage") or {}
+    historical_sha = lineage.get("historical_artifact_sha256")
+    historical_as_of = lineage.get("historical_as_of")
+    if not _is_sha256(historical_sha) or not isinstance(historical_as_of, str):
+        raise LegacyReconciliationError(
+            "daily history recovery fallback binding is unavailable"
+        )
+    try:
+        historical_as_of_date = datetime.date.fromisoformat(historical_as_of)
+    except ValueError as exc:
+        raise LegacyReconciliationError(
+            "daily history recovery fallback binding is unavailable"
+        ) from exc
+
+    base = (
+        Path(root)
+        / "quarantine"
+        / "tw-recovery"
+        / "legacy-reconciliation"
+        / "v2"
+    )
+    if not base.is_dir():
+        raise LegacyReconciliationError(
+            "daily history recovery fallback backup is unavailable"
+        )
+    _assert_safe_child(Path(root), base)
+
+    candidates: list[
+        tuple[datetime.date, str, dict[str, Any], dict[str, Any]]
+    ] = []
+    for target_dir in sorted(base.iterdir()):
+        if not target_dir.is_dir():
+            continue
+        try:
+            target_date = datetime.date.fromisoformat(target_dir.name)
+        except ValueError:
+            continue
+        for series_dir in sorted(target_dir.iterdir()):
+            if not series_dir.is_dir() or not _is_sha256(series_dir.name):
+                continue
+            store = LegacyArtifactBackupStore(
+                Path(root),
+                target_date=target_date,
+                series_manifest_sha256=series_dir.name,
+            )
+            try:
+                manifest = store._load_manifest(required=True)
+            except LegacyReconciliationError as exc:
+                raise LegacyReconciliationError(
+                    "daily history recovery fallback backup is invalid"
+                ) from exc
+            entry = manifest["entries"].get(symbol)
+            if (
+                entry is None
+                or entry.get("original_sha256") != historical_sha
+                or entry.get("status") != "applied"
+                or not _is_sha256(entry.get("new_sha256"))
+            ):
+                continue
+            try:
+                backup_document, verified_entry = store.read_original_document(
+                    symbol=symbol,
+                    original_sha256=historical_sha,
+                    expected_result_sha256=entry["new_sha256"],
+                )
+            except LegacyReconciliationError as exc:
+                raise LegacyReconciliationError(
+                    "daily history recovery fallback backup object conflicts"
+                ) from exc
+            candidates.append(
+                (target_date, series_dir.name, backup_document, verified_entry)
+            )
+
+    if not candidates:
+        raise LegacyReconciliationError(
+            "daily history recovery fallback backup is unavailable"
+        )
+
+    identities = {
+        (entry["original_sha256"], entry["original_size"], entry["original_uncompressed_size"])
+        for _target, _series, _document, entry in candidates
+    }
+    new_shas = {entry["new_sha256"] for _target, _series, _document, entry in candidates}
+    as_ofs = {document["as_of"] for _target, _series, document, _entry in candidates}
+    if len(identities) != 1 or len(new_shas) != 1 or len(as_ofs) != 1:
+        raise LegacyReconciliationError(
+            "daily history recovery fallback authorization is ambiguous"
+        )
+
+    _target, _series, backup_document, entry = candidates[0]
+    backup_as_of = datetime.date.fromisoformat(backup_document["as_of"])
+    if backup_as_of != historical_as_of_date:
+        raise LegacyReconciliationError(
+            "daily history recovery fallback identity is invalid"
+        )
+
+    manifest_sha256, source_schema_version = _recovery_fallback_snapshot_manifest(
+        Path(root), backup_as_of
+    )
+    as_of_text = backup_as_of.isoformat()
+    series_manifest_sha256 = OfficialCompatFetcher._canonical_series_sha256(
+        SOURCE_MODE,
+        source_schema_version,
+        backup_as_of,
+        [(backup_as_of, manifest_sha256)],
+    )
+    reconciliation: dict[str, Any] = {
+        "schema_version": 2,
+        "mode": "replace_verified_legacy",
+        "legacy_artifact_sha256": historical_sha,
+        "legacy_artifact_as_of": as_of_text,
+        "official_source_mode": SOURCE_MODE,
+        "official_source_schema_version": source_schema_version,
+        "official_series_manifest_sha256": series_manifest_sha256,
+        "official_snapshot_dates": [as_of_text],
+        "official_snapshot_manifests": [
+            {"date": as_of_text, "manifest_sha256": manifest_sha256}
+        ],
+        "overlap_dates": [as_of_text],
+        "price_replaced_dates": [],
+        "price_preserved_no_official_row_dates": [as_of_text],
+        "institutional_replaced_dates": [],
+        "institutional_preserved_no_official_row_dates": [as_of_text],
+        "margin_replaced_dates": [],
+        "margin_preserved_no_official_row_dates": [as_of_text],
+        "date_evidence": [
+            {
+                "date": as_of_text,
+                "price_action": "preserved_legacy_no_official_row",
+                "institutional_action": "preserved_legacy_no_official_row",
+                "margin_action": "preserved_legacy_no_official_row",
+            }
+        ],
+        "recovery_kind": _FALLBACK_RECOVERY_KIND,
+    }
+
+    merged_daily, restored_candidates = _merge_recovery_daily(
+        artifact.document.get("daily"), backup_document.get("daily")
+    )
+    existing_receipt = lineage.get("daily_history_recovery")
+    if existing_receipt is not None and not isinstance(existing_receipt, dict):
+        raise LegacyReconciliationError("daily history recovery receipt is invalid")
+    return HistoryRecoveryResult(
+        merged_daily=tuple(_immutable_copy(row) for row in merged_daily),
+        restored_candidates=tuple(_immutable_copy(row) for row in restored_candidates),
+        backup_daily=tuple(
+            _immutable_copy(row)
+            for row in _validated_daily_by_date(backup_document.get("daily")).values()
+        ),
+        input_artifact_sha256=artifact.compressed_sha256,
+        original_artifact_sha256=historical_sha,
+        expected_result_sha256=entry["new_sha256"],
+        backup_target_market_date=backup_as_of,
+        backup_series_manifest_sha256=series_manifest_sha256,
+        backup_manifest_entry=_immutable_copy(entry),
+        reconciliation=_immutable_copy(reconciliation),
+        existing_receipt=(
+            _immutable_copy(existing_receipt) if existing_receipt is not None else None
+        ),
+    )
+
+
 def resolve_truncated_daily_history(
     root: Path,
     symbol: str,
@@ -243,13 +426,25 @@ def resolve_truncated_daily_history(
         raise LegacyReconciliationError(
             f"daily history recovery lineage is invalid for TW:{symbol}"
         )
-    if (
-        "legacy_reconciliation" not in lineage
-        and "legacy_reconciliation_history" not in lineage
-    ):
-        return None
     if artifact.symbol != symbol:
         raise LegacyReconciliationError("daily history recovery symbol is invalid")
+    has_direct = "legacy_reconciliation" in lineage
+    history = lineage.get("legacy_reconciliation_history", _RECOVERY_MISSING)
+    has_history = history is not _RECOVERY_MISSING
+    if not has_direct and not has_history:
+        return _recover_via_historical_artifact_sha256(root, symbol, artifact)
+    if (
+        not has_direct
+        and has_history
+        and isinstance(history, list)
+        and all(
+            isinstance(item, dict)
+            and isinstance(item.get("reconciliation"), dict)
+            and item["reconciliation"].get("recovery_kind") == _FALLBACK_RECOVERY_KIND
+            for item in history
+        )
+    ):
+        return None
 
     candidates: list[tuple[dict[str, Any], str]] = []
     direct = lineage.get("legacy_reconciliation", _RECOVERY_MISSING)

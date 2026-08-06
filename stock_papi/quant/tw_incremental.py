@@ -1701,11 +1701,28 @@ class OfficialCompatFetcher:
                         "symbol": symbol,
                         "reconciled_artifact_sha256": recovery.input_artifact_sha256,
                         "reconciliation": copy.deepcopy(direct),
-                    }
+}
                     history_item["history_sha256"] = self._canonical_json_sha256(
                         history_item
                     )
                     lineage.pop("legacy_reconciliation", None)
+                    lineage["legacy_reconciliation_history"] = [history_item]
+                elif not self._existing_reconciliation_history.get(symbol):
+                    if recovery.reconciliation is None:
+                        raise IncrementalHistoryError(
+                            "daily history recovery binding is invalid"
+                        )
+                    history_item = {
+                        "schema_version": 2,
+                        "symbol": symbol,
+                        "reconciled_artifact_sha256": recovery.input_artifact_sha256,
+                        "reconciliation": _canonical_json_value(
+                            recovery.reconciliation
+                        ),
+                    }
+                    history_item["history_sha256"] = self._canonical_json_sha256(
+                        history_item
+                    )
                     lineage["legacy_reconciliation_history"] = [history_item]
                 lineage["daily_history_recovery"] = dict(receipt)
         elif symbol in self._existing_recovery_receipts:

@@ -16,6 +16,7 @@ import stock_papi.quant.tw_legacy_reconciliation as reconciliation
 from stock_papi.quant.tw_legacy_reconciliation import (
     LegacyArtifactBackupStore,
     LegacyReconciliationError,
+    _FALLBACK_RECOVERY_KIND,
 )
 from stock_papi.quant.tw_incremental import (
     OfficialCompatFetcher,
@@ -26,6 +27,7 @@ from stock_papi.quant.tw_incremental import (
 TARGET = datetime.date(2026, 7, 24)
 BASELINE = datetime.date(2026, 7, 16)
 SERIES_SHA = "56cc6940752cb667e5225ece40685236148cef14dd7e6b3b7c3a50a6079b941a"
+_FALLBACK_FAKE_MANIFEST = "0" * 64
 
 
 def artifact_path(root, symbol="2330"):
@@ -281,12 +283,12 @@ class LegacyArtifactBackupStoreTests(unittest.TestCase):
 
         from stock_papi.quant.tw_legacy_reconciliation import (
             resolve_truncated_daily_history,
-        )
+)
 
         with self.assertRaises(LegacyReconciliationError):
             resolve_truncated_daily_history(self.root, "2330", artifact)
 
-    def test_valid_official_lineage_without_reconciliation_returns_none(self):
+    def test_official_lineage_without_reconciliation_fails_closed_without_backup(self):
         document = official_document(self.evidence)
         document["source_lineage"].pop("legacy_reconciliation")
         write_artifact(self.root, document)
@@ -296,9 +298,237 @@ class LegacyArtifactBackupStoreTests(unittest.TestCase):
             resolve_truncated_daily_history,
         )
 
-        self.assertIsNone(
-            resolve_truncated_daily_history(self.root, "2330", artifact)
+        with patch.object(
+            reconciliation,
+            "_recovery_fallback_snapshot_manifest",
+            return_value=(_FALLBACK_FAKE_MANIFEST, "tw-official-historical-v2"),
+        ):
+            with self.assertRaises(LegacyReconciliationError):
+                resolve_truncated_daily_history(self.root, "2330", artifact)
+
+    def test_fallback_binds_historical_artifact_sha256_and_merges_missing_prefix(self):
+        _manifest_path, _manifest, _object_path, result_sha = self.prepare_verified_reader()
+        document = official_document(self.evidence)
+        document["source_lineage"].pop("legacy_reconciliation")
+        write_artifact(self.root, document)
+        artifact = self.recovery_artifact()
+
+        from stock_papi.quant.tw_legacy_reconciliation import (
+            _FALLBACK_RECOVERY_KIND,
+            resolve_truncated_daily_history,
         )
+
+        with patch.object(
+            reconciliation,
+            "_recovery_fallback_snapshot_manifest",
+            return_value=(_FALLBACK_FAKE_MANIFEST, "tw-official-historical-v2"),
+        ):
+            result = resolve_truncated_daily_history(self.root, "2330", artifact)
+
+        self.assertEqual(result.input_artifact_sha256, artifact.compressed_sha256)
+        self.assertEqual(result.original_artifact_sha256, self.original_sha)
+        self.assertEqual(result.expected_result_sha256, result_sha)
+        self.assertEqual(result.backup_target_market_date, BASELINE)
+        self.assertEqual(
+            result.reconciliation.get("recovery_kind"), _FALLBACK_RECOVERY_KIND
+        )
+        self.assertEqual(
+            [row["Date"][:10] for row in result.merged_daily],
+            [BASELINE.isoformat(), TARGET.isoformat()],
+        )
+        self.assertEqual(
+            [row["Date"][:10] for row in result.restored_candidates],
+            [BASELINE.isoformat()],
+        )
+        self.assertTrue(
+            OfficialCompatFetcher._valid_reconciliation(
+                result.reconciliation, target_date=BASELINE
+            )
+        )
+        self.assertTrue(
+            OfficialCompatFetcher._valid_reconciliation(
+                result.reconciliation, target_date=TARGET
+            )
+        )
+
+    def test_fallback_fails_closed_when_historical_sha_matches_no_backup(self):
+        self.prepare_verified_reader()
+        document = official_document(self.evidence)
+        document["source_lineage"].pop("legacy_reconciliation")
+        document["source_lineage"]["historical_artifact_sha256"] = "e" * 64
+        write_artifact(self.root, document)
+        artifact = self.recovery_artifact()
+
+        from stock_papi.quant.tw_legacy_reconciliation import (
+            resolve_truncated_daily_history,
+        )
+
+        with patch.object(
+            reconciliation,
+            "_recovery_fallback_snapshot_manifest",
+            return_value=(_FALLBACK_FAKE_MANIFEST, "tw-official-historical-v2"),
+        ):
+            with self.assertRaises(LegacyReconciliationError):
+                resolve_truncated_daily_history(self.root, "2330", artifact)
+
+    def test_fallback_fails_closed_on_ambiguous_distinct_result_shas(self):
+        self.prepare_verified_reader()
+        backup_document = json.loads(self.decoded.decode("utf-8"))
+        first_entry = dict(
+            read_manifest(self.root)[1]["entries"]["2330"],
+            new_sha256="1" * 64,
+        )
+        second_entry = dict(first_entry, new_sha256="2" * 64)
+        second_series = "c" * 64
+        for series_sha in (SERIES_SHA, second_series):
+            store_dir = (
+                self.root
+                / "quarantine"
+                / "tw-recovery"
+                / "legacy-reconciliation"
+                / "v2"
+                / TARGET.isoformat()
+                / series_sha
+            )
+            store_dir.mkdir(parents=True, exist_ok=True)
+            (store_dir / "manifest.json").write_text("{}", encoding="utf-8")
+        document = official_document(self.evidence)
+        document["source_lineage"].pop("legacy_reconciliation")
+        write_artifact(self.root, document)
+        artifact = self.recovery_artifact()
+
+        from stock_papi.quant.tw_legacy_reconciliation import (
+            resolve_truncated_daily_history,
+        )
+
+        with (
+            patch.object(
+                LegacyArtifactBackupStore,
+                "_load_manifest",
+                autospec=True,
+                return_value={
+                    "schema_version": 2,
+                    "target_market_date": TARGET.isoformat(),
+                    "official_series_manifest_sha256": SERIES_SHA,
+                    "entries": {"2330": dict(first_entry, new_sha256="1" * 64)},
+                },
+            ),
+            patch.object(
+                LegacyArtifactBackupStore,
+                "read_original_document",
+                autospec=True,
+                side_effect=[
+                    (backup_document, first_entry),
+                    (backup_document, second_entry),
+                ],
+            ),
+            patch.object(
+                reconciliation,
+                "_recovery_fallback_snapshot_manifest",
+                return_value=(_FALLBACK_FAKE_MANIFEST, "tw-official-historical-v2"),
+            ),
+            self.assertRaises(LegacyReconciliationError),
+        ):
+            resolve_truncated_daily_history(self.root, "2330", artifact)
+
+    def test_fallback_fails_closed_on_manifest_symbol_mismatch(self):
+        manifest_path, manifest, _object_path, _result_sha = self.prepare_verified_reader()
+        manifest["entries"]["2330"]["symbol"] = "2303"
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        document = official_document(self.evidence)
+        document["source_lineage"].pop("legacy_reconciliation")
+        write_artifact(self.root, document)
+        artifact = self.recovery_artifact()
+
+        from stock_papi.quant.tw_legacy_reconciliation import (
+            resolve_truncated_daily_history,
+        )
+
+        with patch.object(
+            reconciliation,
+            "_recovery_fallback_snapshot_manifest",
+            return_value=(_FALLBACK_FAKE_MANIFEST, "tw-official-historical-v2"),
+        ):
+            with self.assertRaises(LegacyReconciliationError):
+                resolve_truncated_daily_history(self.root, "2330", artifact)
+
+    def test_fallback_fails_closed_when_restore_is_not_a_missing_prefix(self):
+        self.prepare_verified_reader()
+        document = official_document(self.evidence)
+        document["source_lineage"].pop("legacy_reconciliation")
+        document["daily"] = [
+            {
+                "Date": "2026-07-15T00:00:00.000",
+                "Open": 1.0, "High": 1.0, "Low": 1.0, "Close": 1.0,
+                "Volume": 1.0, "InstitutionalNet": 0.0, "ForeignNet": 0.0,
+                "MarginBalance": 0.0, "ShortBalance": 0.0,
+            },
+            dict(document["daily"][0]),
+        ]
+        write_artifact(self.root, document)
+        artifact = self.recovery_artifact()
+
+        from stock_papi.quant.tw_legacy_reconciliation import (
+            resolve_truncated_daily_history,
+        )
+
+        with patch.object(
+            reconciliation,
+            "_recovery_fallback_snapshot_manifest",
+            return_value=(_FALLBACK_FAKE_MANIFEST, "tw-official-historical-v2"),
+        ):
+            with self.assertRaises(LegacyReconciliationError):
+                resolve_truncated_daily_history(self.root, "2330", artifact)
+
+    def test_normal_reconciliation_lineage_takes_precedence_over_fallback(self):
+        artifact = self.prepare_direct_recovery()
+
+        from stock_papi.quant.tw_legacy_reconciliation import (
+            resolve_truncated_daily_history,
+        )
+
+        result = resolve_truncated_daily_history(self.root, "2330", artifact)
+
+        self.assertEqual(result.expected_result_sha256, artifact.compressed_sha256)
+        self.assertNotIn("recovery_kind", result.reconciliation)
+
+    def test_fallback_short_circuits_to_none_on_recovered_fallback_lineage(self):
+        self.prepare_verified_reader()
+        document = official_document(self.evidence)
+        document["source_lineage"].pop("legacy_reconciliation")
+        marked_reconciliation = copy.deepcopy(self.evidence)
+        marked_reconciliation["recovery_kind"] = _FALLBACK_RECOVERY_KIND
+        artifact = self.recovery_artifact()
+        history_item = {
+            "schema_version": 2,
+            "symbol": "2330",
+            "reconciled_artifact_sha256": artifact.compressed_sha256,
+            "reconciliation": marked_reconciliation,
+        }
+        history_item["history_sha256"] = (
+            OfficialCompatFetcher._canonical_json_sha256(history_item)
+        )
+        document["source_lineage"]["legacy_reconciliation_history"] = [history_item]
+        write_artifact(self.root, document)
+        recovered = self.recovery_artifact()
+        self.assertTrue(
+            OfficialCompatFetcher._valid_official_lineage(
+                recovered.document["source_lineage"], recovered
+            )
+        )
+
+        from stock_papi.quant.tw_legacy_reconciliation import (
+            resolve_truncated_daily_history,
+        )
+
+        with patch.object(
+            reconciliation,
+            "_recovery_fallback_snapshot_manifest",
+            side_effect=AssertionError,
+        ):
+            self.assertIsNone(
+                resolve_truncated_daily_history(self.root, "2330", recovered)
+            )
 
     def test_resolver_binds_direct_result_sha_and_exact_snapshot_date(self):
         artifact = self.prepare_direct_recovery()

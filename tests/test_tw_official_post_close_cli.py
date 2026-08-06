@@ -361,6 +361,7 @@ class TWOfficialPostCloseCLITests(unittest.TestCase):
         symbols=("2303", "2330"),
         builder=None,
         final_status_symbols=(),
+        recovery_symbol_allowlist=None,
     ):
         root = Path(root)
         pipeline = Pipeline()
@@ -489,6 +490,7 @@ class TWOfficialPostCloseCLITests(unittest.TestCase):
                 series_builder=chosen_builder,
                 reconcile_legacy_overlaps=reconcile,
                 recover_truncated_history=recover,
+                recovery_symbol_allowlist=recovery_symbol_allowlist,
             )
         finally:
             if old is None:
@@ -835,10 +837,75 @@ class TWOfficialPostCloseCLITests(unittest.TestCase):
                 )
                 self.assertEqual(
                     cli.main(arguments + ["--recover-truncated-history"]), 0
-                )
+)
                 self.assertIs(
                     run_mock.call_args.kwargs["recover_truncated_history"], True
                 )
+
+    def test_allowlist_loader_validates_symbols_comments_and_sha_identity(self):
+        from stock_papi.batch.tw_official_post_close_cli import (
+            _load_recovery_symbol_allowlist,
+            _universe_sha256,
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "allow.txt"
+            symbols = ["0051", "0050", "# header", "", "0053"]
+            path.write_text("\n".join(symbols), encoding="utf-8")
+            canonical = ["0050", "0051", "0053"]
+            expected = _universe_sha256(canonical)
+            loaded = _load_recovery_symbol_allowlist(
+                path, expected_sha256=expected
+            )
+            self.assertEqual(loaded, {"0050", "0051", "0053"})
+            with self.assertRaises(ValueError):
+                _load_recovery_symbol_allowlist(
+                    path, expected_sha256="0" * 64
+                )
+            bad = Path(temporary) / "bad.txt"
+            bad.write_text("0050\nnotasymbol\n", encoding="utf-8")
+            with self.assertRaises(ValueError):
+                _load_recovery_symbol_allowlist(bad, expected_sha256=None)
+            dup = Path(temporary) / "dup.txt"
+            dup.write_text("0050\n0050\n", encoding="utf-8")
+            with self.assertRaises(ValueError):
+                _load_recovery_symbol_allowlist(dup, expected_sha256=None)
+
+    def test_cli_recovery_symbol_allowlist_is_threaded_to_run(self):
+        from stock_papi.batch.tw_official_post_close_cli import _universe_sha256
+        with tempfile.TemporaryDirectory() as temporary:
+            calendar = write_calendar(temporary)
+            allow = Path(temporary) / "allow.txt"
+            allow.write_text("0051\n# header\n0050\n", encoding="utf-8")
+            expected = _universe_sha256(["0050", "0051"])
+            arguments = [
+                "--root", temporary,
+                "--target-market-date", TARGET.isoformat(),
+                "--calendar-artifact", str(calendar),
+                "--recover-truncated-history",
+                "--recovery-symbol-allowlist", str(allow),
+                "--recovery-allowlist-sha256", expected,
+            ]
+            with patch.object(cli, "run", return_value=0) as run_mock:
+                self.assertEqual(cli.main(arguments), 0)
+                self.assertEqual(
+                    run_mock.call_args.kwargs["recovery_symbol_allowlist"],
+                    {"0050", "0051"},
+                )
+
+    def test_cli_recovery_allowlist_requires_identity_sha(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            calendar = write_calendar(temporary)
+            allow = Path(temporary) / "allow.txt"
+            allow.write_text("0050\n", encoding="utf-8")
+            arguments = [
+                "--root", temporary,
+                "--target-market-date", TARGET.isoformat(),
+                "--calendar-artifact", str(calendar),
+                "--recover-truncated-history",
+                "--recovery-symbol-allowlist", str(allow),
+            ]
+            with patch.object(cli, "run", return_value=0):
+                self.assertEqual(cli.main(arguments), 2)
 
     def test_cli_default_path_never_constructs_resolver_or_touches_quarantine(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -880,7 +947,7 @@ class TWOfficialPostCloseCLITests(unittest.TestCase):
                     recover=True,
                     final_dates={
                         "2303": TARGET.isoformat(), "2330": TARGET.isoformat()
-                    },
+},
                 )
                 recovery_resolver = constructor.call_args.kwargs[
                     "recovery_resolver"
@@ -888,6 +955,44 @@ class TWOfficialPostCloseCLITests(unittest.TestCase):
                 recovery_resolver("2330", object())
         self.assertEqual(result, 0)
         resolver.assert_called_once()
+
+    def test_cli_recovery_allowlist_gates_fallback_to_allowed_symbols_only(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            for symbol in ("2303", "2330"):
+                write_artifact(temporary, symbol)
+            calls = []
+
+            def tracking_resolver(root, symbol, artifact):
+                calls.append(symbol)
+                return None
+
+            with (
+                patch.object(
+                    cli,
+                    "resolve_truncated_daily_history",
+                    create=True,
+                    side_effect=tracking_resolver,
+                ),
+                patch.object(
+                    cli, "OfficialCompatFetcher", wraps=OfficialCompatFetcher
+                ) as constructor,
+            ):
+                result, _observed, _builder, _module = self._run_fake(
+                    temporary,
+                    recover=True,
+                    symbols=("2303", "2330"),
+                    recovery_symbol_allowlist={"2330"},
+                    final_dates={
+                        "2303": TARGET.isoformat(), "2330": TARGET.isoformat()
+                    },
+                )
+                gated_resolver = constructor.call_args.kwargs[
+                    "recovery_resolver"
+                ]
+                self.assertIsNone(gated_resolver("2303", object()))
+                gated_resolver("2330", object())
+        self.assertEqual(result, 0)
+        self.assertEqual(calls, ["2330"])
 
     def test_cli_checkpoint_identity_rejects_changed_recovery_mode(self):
         series = snapshot_series()
