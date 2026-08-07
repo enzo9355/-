@@ -1,5 +1,7 @@
 """Stock analysis orchestration without Flask or LINE dependencies."""
 
+import math
+
 from reporting.interpretation import interpret_backtest
 from stock_papi.services.recommendation_engine import recommend_analysis
 
@@ -9,11 +11,31 @@ def snapshot_dataframe(snapshot, *, pd):
         frame = pd.DataFrame(snapshot["daily"])
         frame["Date"] = pd.to_datetime(frame["Date"], errors="coerce")
         frame = frame.dropna(subset=["Date"]).set_index("Date").sort_index()
-        required = {
+        required = [
             "Open", "High", "Low", "Close", "MA20", "RSI", "Volat",
-            "MACD_OSC", "K", "D", "AI_P", "ForeignNet",
-        }
-        return frame if len(frame) >= 200 and required.issubset(frame.columns) else None
+            "MACD_OSC", "K", "D", "ForeignNet",
+        ]
+        if frame.empty or not set(required).issubset(frame.columns):
+            return None
+        persisted_latest_date = frame.index[-1]
+
+        def finite_numeric(value):
+            if value is None or isinstance(value, (bool, str, bytes)):
+                return False
+            try:
+                return math.isfinite(float(value))
+            except (TypeError, ValueError, OverflowError):
+                return False
+
+        complete = pd.Series(True, index=frame.index)
+        for name in required:
+            complete &= frame[name].map(finite_numeric)
+        frame = frame.loc[complete]
+        if len(frame) < 200 or frame.index[-1] != persisted_latest_date:
+            return None
+        if "AI_P" not in frame.columns or not finite_numeric(frame["AI_P"].iloc[-1]):
+            return None
+        return frame
     except (KeyError, TypeError, ValueError):
         return None
 

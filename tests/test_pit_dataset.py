@@ -14,6 +14,7 @@ from stock_papi.research.pit_dataset import (
     build_price_research_dataset,
     write_pit_audit,
 )
+from tests.report_fixtures import warmup_stock_document
 
 
 def canonical(document):
@@ -107,6 +108,23 @@ def build_quant_fixture(root):
 
 
 class PitDatasetTests(unittest.TestCase):
+    def test_pit_history_uses_ohlcv_when_indicators_are_null(self):
+        from stock_papi.research.pit_dataset import _history_rows
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            document = warmup_stock_document("2330")
+            raw = canonical(document)
+            compressed = gzip_bytes(raw)
+            path = root / "object.json.gz"
+            path.write_bytes(compressed)
+            rows = _history_rows(
+                {"quant_root": root, "manifest": {"market": "TW"}}, "2330",
+                {"path": path.name, "size": len(compressed), "sha256": hashlib.sha256(compressed).hexdigest(),
+                 "uncompressed_size": len(raw), "as_of": document["as_of"]},
+            )
+        self.assertEqual(len(rows), 70)
+        self.assertEqual(rows[0][0], document["daily"][0]["Date"][:10])
     def test_audit_records_every_requirement_with_evidence(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

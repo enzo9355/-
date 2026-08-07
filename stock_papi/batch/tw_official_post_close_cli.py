@@ -26,7 +26,10 @@ from stock_papi.quant.tw_incremental import (
     OfficialCompatFetcher,
     load_incremental_artifact,
 )
-from stock_papi.quant.tw_legacy_reconciliation import LegacyArtifactBackupStore
+from stock_papi.quant.tw_legacy_reconciliation import (
+    LegacyArtifactBackupStore,
+    resolve_truncated_daily_history,
+)
 
 
 _INCOMPLETE = "TW official observation recovery is incomplete"
@@ -47,6 +50,36 @@ def _universe_sha256(symbols: list[str]) -> str:
     return hashlib.sha256(
         json.dumps(symbols, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
+
+
+def _load_recovery_symbol_allowlist(
+    path: Path,
+    *,
+    expected_sha256: str | None,
+) -> set[str]:
+    if not isinstance(path, Path):
+        raise TypeError("recovery symbol allowlist path is invalid")
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ValueError("recovery symbol allowlist is unreadable") from exc
+    symbols: list[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if _SYMBOL_RE.fullmatch(stripped) is None:
+            raise ValueError("recovery symbol allowlist is invalid")
+        symbols.append(stripped)
+    canonical = sorted(symbols)
+    if len(canonical) != len(set(canonical)):
+        raise ValueError("recovery symbol allowlist is invalid")
+    if expected_sha256 is not None:
+        if not re.fullmatch(r"[0-9a-f]{64}", expected_sha256):
+            raise ValueError("recovery symbol allowlist identity is invalid")
+        if _universe_sha256(canonical) != expected_sha256:
+            raise ValueError("recovery symbol allowlist identity does not match")
+    return set(canonical)
 
 
 def _required_symbols_by_exchange(
@@ -201,8 +234,10 @@ def _enrich_batch_identity(
     audit: Any,
     symbols: list[str],
     reconcile_legacy_overlaps: bool,
+    recover_truncated_history: bool = False,
 ) -> dict[str, Any]:
     result = dict(identity)
+    result["recover_truncated_history"] = bool(recover_truncated_history)
     result.update(
         {
             "source_mode": series.source_mode,
@@ -450,7 +485,23 @@ def _patched_pipeline(
     *,
     backup_store: LegacyArtifactBackupStore | None = None,
     symbols: list[str] | None = None,
+    recover_truncated_history: bool = False,
+    reconcile_legacy_overlaps: bool = False,
+    recovery_rotated_symbols: set[str] | None = None,
+    applied_reconciliation_artifacts: dict[str, str] | None = None,
 ) -> Iterator[None]:
+    if type(recover_truncated_history) is not bool:
+        raise TypeError("recover_truncated_history must be bool")
+    if type(reconcile_legacy_overlaps) is not bool:
+        raise TypeError("reconcile_legacy_overlaps must be bool")
+    recovery_rotated_symbols = (
+        recovery_rotated_symbols if recovery_rotated_symbols is not None else set()
+    )
+    applied_reconciliation_artifacts = (
+        applied_reconciliation_artifacts
+        if applied_reconciliation_artifacts is not None
+        else {}
+    )
     original_fetch = pipeline.fetch_finmind_dataset
     original_loader = local_quant.load_stock_pipeline
     original_batch = local_quant.run_market_batch
@@ -479,7 +530,8 @@ def _patched_pipeline(
                 series=series,
                 audit=audit,
                 symbols=[str(item) for item in symbols],
-                reconcile_legacy_overlaps=backup_store is not None,
+                reconcile_legacy_overlaps=reconcile_legacy_overlaps,
+                recover_truncated_history=recover_truncated_history,
             )
         return original_batch(
             root,
@@ -503,7 +555,9 @@ def _patched_pipeline(
         )
         if market == "TW":
             result = dict(result)
-            result["source_lineage"] = fetcher.lineage_for(str(symbol))
+            result["source_lineage"] = fetcher.lineage_for(
+                str(symbol), persisted_daily=result.get("daily")
+            )
         return result
 
     def load_exclusion_list_with_official_status(root, market):
@@ -529,6 +583,14 @@ def _patched_pipeline(
             if isinstance(lineage, dict)
             else None
         )
+        if (
+            recover_truncated_history
+            and
+            isinstance(lineage, dict)
+            and lineage.get("legacy_reconciliation_history")
+        ):
+            recovery_rotated_symbols.add(str(symbol))
+            return original_writer(root, market, symbol, payload, *args, **kwargs)
         artifact_path = (
             Path(root) / "artifacts" / "stocks" / "TW" / f"{symbol}.json.gz"
         )
@@ -538,12 +600,21 @@ def _patched_pipeline(
             evidence=evidence,
         )
         if action == "noop":
+            if evidence is not None and artifact_path.is_file():
+                applied_reconciliation_artifacts[str(symbol)] = hashlib.sha256(
+                    artifact_path.read_bytes()
+                ).hexdigest()
             return artifact_path
         result = original_writer(root, market, symbol, payload, *args, **kwargs)
         if action == "write":
             backup_store.mark_applied(
                 symbol=str(symbol), artifact_path=Path(result)
             )
+            result_path = Path(result)
+            if result_path.is_file():
+                applied_reconciliation_artifacts[str(symbol)] = hashlib.sha256(
+                    result_path.read_bytes()
+                ).hexdigest()
         return result
 
     try:
@@ -590,8 +661,12 @@ def _run_stage(
     delay: float,
     series_builder: Any,
     reconcile_legacy_overlaps: bool,
+    recover_truncated_history: bool,
     publish: bool,
+    recovery_symbol_allowlist: set[str] | None = None,
 ) -> tuple[int, set[str]]:
+    if type(recover_truncated_history) is not bool:
+        raise TypeError("recover_truncated_history must be bool")
     audit = audit_artifact_dates(
         root,
         symbols,
@@ -606,9 +681,33 @@ def _run_stage(
 
     resume = None
     if reconcile_legacy_overlaps:
-        resume = LegacyArtifactBackupStore.discover_resume(
-            root, target_date=target_market_date
-        )
+        if recover_truncated_history:
+            historical = []
+            for symbol in symbols:
+                artifact = load_incremental_artifact(root, str(symbol))
+                lineage = artifact.document.get("source_lineage")
+                if not OfficialCompatFetcher._valid_official_lineage(lineage, artifact):
+                    continue
+                for item in lineage.get("legacy_reconciliation_history", []):
+                    reconciliation = item["reconciliation"]
+                    historical.append(
+                        (
+                            reconciliation["official_series_manifest_sha256"],
+                            min(
+                                datetime.date.fromisoformat(value)
+                                for value in reconciliation["overlap_dates"]
+                            ),
+                        )
+                    )
+            manifests = {manifest for manifest, _baseline in historical}
+            if len(manifests) > 1:
+                raise RuntimeError("recovery reconciliation series is ambiguous")
+            if manifests:
+                resume = (manifests.pop(), min(baseline for _manifest, baseline in historical))
+        if resume is None:
+            resume = LegacyArtifactBackupStore.discover_resume(
+                root, target_date=target_market_date
+            )
         baseline_date = (
             min(baseline_date, resume[1])
             if resume is not None
@@ -657,11 +756,26 @@ def _run_stage(
     policy = (
         "replace_verified_legacy" if reconcile_legacy_overlaps else "strict"
     )
+    recovery_resolver = None
+    if recover_truncated_history:
+        allowlist = (
+            None
+            if recovery_symbol_allowlist is None
+            else frozenset(recovery_symbol_allowlist)
+        )
+
+        def _recovery_resolver(symbol, artifact, _root=root, _allowlist=allowlist):
+            if _allowlist is not None and symbol not in _allowlist:
+                return None
+            return resolve_truncated_daily_history(_root, symbol, artifact)
+
+        recovery_resolver = _recovery_resolver
     fetcher = OfficialCompatFetcher(
         root,
         series,
         pd=pipeline.pd,
         legacy_overlap_policy=policy,
+        recovery_resolver=recovery_resolver,
     )
     backup_store = (
         LegacyArtifactBackupStore(
@@ -686,6 +800,8 @@ def _run_stage(
         "--delay",
         str(delay),
     ]
+    recovery_rotated_symbols: set[str] = set()
+    applied_reconciliation_artifacts: dict[str, str] = {}
     with _patched_pipeline(
         local_quant,
         pipeline,
@@ -694,15 +810,23 @@ def _run_stage(
         audit,
         backup_store=backup_store,
         symbols=symbols,
+        recover_truncated_history=recover_truncated_history,
+        reconcile_legacy_overlaps=reconcile_legacy_overlaps,
+        recovery_rotated_symbols=recovery_rotated_symbols,
+        applied_reconciliation_artifacts=applied_reconciliation_artifacts,
     ):
         result = int(local_quant.main(argv))
     if result != 0:
         return result, set()
-    applied_reconciliation_artifacts = {}
     if backup_store is not None:
-        applied_reconciliation_artifacts = (
-            backup_store.assert_current_state_complete() or {}
-        )
+        if recovery_rotated_symbols:
+            applied_reconciliation_artifacts = dict(
+                applied_reconciliation_artifacts
+            )
+        else:
+            applied_reconciliation_artifacts = (
+                backup_store.assert_current_state_complete() or {}
+            )
     expected_identity = _enrich_batch_identity(
         {
             "target_market_date": target_market_date.isoformat(),
@@ -713,6 +837,7 @@ def _run_stage(
         audit=audit,
         symbols=[str(value) for value in symbols],
         reconcile_legacy_overlaps=reconcile_legacy_overlaps,
+        recover_truncated_history=recover_truncated_history,
     )
     _assert_complete(
         root,
@@ -750,7 +875,11 @@ def run(
     delay: float,
     series_builder=build_official_snapshot_series,
     reconcile_legacy_overlaps: bool = False,
+    recover_truncated_history: bool = False,
+    recovery_symbol_allowlist: set[str] | None = None,
 ) -> int:
+    if type(recover_truncated_history) is not bool:
+        raise TypeError("recover_truncated_history must be bool")
     import local_quant
 
     pipeline = local_quant.load_stock_pipeline(root)
@@ -790,7 +919,9 @@ def run(
             delay=delay,
             series_builder=series_builder,
             reconcile_legacy_overlaps=reconcile_legacy_overlaps,
+            recover_truncated_history=recover_truncated_history,
             publish=stage_target == target_market_date,
+            recovery_symbol_allowlist=recovery_symbol_allowlist,
         )
         if result != 0 or stage_target == target_market_date:
             return result
@@ -827,10 +958,39 @@ def main(argv=None) -> int:
     parser.add_argument("--limit", type=int, default=5000)
     parser.add_argument("--delay", type=float, default=0.5)
     parser.add_argument("--reconcile-legacy-overlaps", action="store_true")
+    parser.add_argument("--recover-truncated-history", action="store_true")
+    parser.add_argument(
+        "--recovery-symbol-allowlist",
+        type=Path,
+        default=None,
+        help=(
+            "Path to a text file (one symbol per line) listing the exact "
+            "symbols eligible for truncated-history recovery; gates the "
+            "fallback resolver so unrelated symbols are never modified."
+        ),
+    )
+    parser.add_argument(
+        "--recovery-allowlist-sha256",
+        default=None,
+        help=(
+            "Expected SHA-256 of the canonical sorted recovery symbol "
+            "allowlist; required when --recovery-symbol-allowlist is set."
+        ),
+    )
     args = parser.parse_args(argv)
     try:
         if args.limit < 1 or args.delay < 0:
             raise ValueError("limit and delay are invalid")
+        recovery_symbol_allowlist: set[str] | None = None
+        if args.recovery_symbol_allowlist is not None:
+            if args.recovery_allowlist_sha256 is None:
+                raise ValueError(
+                    "recovery symbol allowlist identity is required"
+                )
+            recovery_symbol_allowlist = _load_recovery_symbol_allowlist(
+                args.recovery_symbol_allowlist,
+                expected_sha256=args.recovery_allowlist_sha256,
+            )
         return run(
             root=Path(args.root),
             target_market_date=args.target_market_date,
@@ -838,6 +998,8 @@ def main(argv=None) -> int:
             limit=args.limit,
             delay=args.delay,
             reconcile_legacy_overlaps=args.reconcile_legacy_overlaps,
+            recover_truncated_history=args.recover_truncated_history,
+            recovery_symbol_allowlist=recovery_symbol_allowlist,
         )
     except (
         OfficialSourceFailure,

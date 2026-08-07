@@ -2,6 +2,7 @@ import json
 import unittest
 
 from stock_papi.services.observation_view import build_stock_observation
+from tests.report_fixtures import warmup_stock_document
 
 
 def snapshot():
@@ -43,6 +44,11 @@ def snapshot():
 
 
 class ObservationViewTests(unittest.TestCase):
+    def test_warmup_rows_remain_candles_and_null_ma20_is_filtered(self):
+        document = build_stock_observation(warmup_stock_document("2330"))
+        self.assertEqual(len(json.loads(document["candles"])), 70)
+        self.assertEqual(len(json.loads(document["ma20_line"])), 50)
+
     def test_stock_view_contains_only_actual_observations(self):
         document = build_stock_observation(snapshot())
 

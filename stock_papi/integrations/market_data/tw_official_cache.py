@@ -50,6 +50,7 @@ class OfficialRawCacheEntry:
     parser_version: str
     payload_path: Path
     metadata_path: Path
+    effective_date: _datetime.date | None = None
 
 
 def _canonical_json_bytes(rows: Iterable[Mapping[str, Any]]) -> bytes:
@@ -118,6 +119,7 @@ def store_cached_raw_source(
     source_url: str,
     fetched_at: _datetime.datetime,
     date_verification: str = "explicit",
+    effective_date: _datetime.date | None = None,
 ) -> OfficialRawCacheEntry:
     if not isinstance(target_date, _datetime.date) or isinstance(
         target_date, _datetime.datetime
@@ -159,6 +161,8 @@ def store_cached_raw_source(
         "fetched_at": fetched_at.isoformat(),
         "date_verification": str(date_verification),
     }
+    if effective_date is not None:
+        metadata["effective_date"] = effective_date.isoformat()
     _atomic_write_json(metadata_path, metadata)
     return OfficialRawCacheEntry(
         source_id=source_id,
@@ -170,6 +174,7 @@ def store_cached_raw_source(
         parser_version=parser_version,
         payload_path=payload_path,
         metadata_path=metadata_path,
+        effective_date=effective_date,
     )
 
 
@@ -226,6 +231,14 @@ def load_cached_raw_source(
         raise
     except (KeyError, OSError, TypeError, ValueError, gzip.BadGzipFile) as exc:
         raise OfficialCacheError("raw source cache is invalid") from exc
+    effective_date = None
+    if "effective_date" in metadata:
+        try:
+            effective_date = _datetime.date.fromisoformat(metadata["effective_date"])
+        except (TypeError, ValueError) as exc:
+            raise OfficialCacheError(
+                "raw source cache effective date is invalid"
+            ) from exc
     return OfficialRawCacheEntry(
         source_id=source_id,
         target_date=target_date,
@@ -236,6 +249,7 @@ def load_cached_raw_source(
         parser_version=parser_version,
         payload_path=payload_path,
         metadata_path=metadata_path,
+        effective_date=effective_date,
     )
 
 

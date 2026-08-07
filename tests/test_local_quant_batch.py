@@ -245,6 +245,66 @@ File Creation Time: 07082026||||||
             self.assertEqual(checkpoint["next_index"], 2)
             self.assertNotIn("secret upstream response", json.dumps(checkpoint))
 
+    def test_recovery_failure_advances_cursor_without_overwriting_artifact(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            ensure_layout(root)
+            artifact = write_stock_artifact(
+                root, "TW", "2330", {"as_of": "2026-07-23", "daily": []}
+            )
+            before = artifact.read_bytes()
+            calls = []
+
+            def analyze(symbol):
+                calls.append(symbol)
+                if symbol == "2330":
+                    raise RuntimeError("daily history recovery failed")
+                return {"as_of": "2026-07-23"}
+
+            result = run_market_batch(
+                root,
+                "TW",
+                ["2330", "2303"],
+                analyze,
+                limit=2,
+                now_fn=lambda: datetime.datetime(2026, 7, 6, 6, tzinfo=TAIPEI),
+                delay=0,
+            )
+
+            self.assertEqual(calls, ["2330", "2303"])
+            self.assertEqual(result["next_index"], 2)
+            self.assertEqual(result["failed"], [{"symbol": "2330", "error": "RuntimeError"}])
+            self.assertEqual(artifact.read_bytes(), before)
+
+    def test_recovery_failure_resume_retries_failed_before_new(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            ensure_layout(root)
+            save_checkpoint(
+                root,
+                {
+                    "stage": "market_batch",
+                    "market": "TW",
+                    "next_index": 1,
+                    "failed": [{"symbol": "2330", "error": "RuntimeError"}],
+                },
+            )
+            calls = []
+
+            result = run_market_batch(
+                root,
+                "TW",
+                ["2330", "2303", "2317"],
+                lambda symbol: calls.append(symbol) or {"as_of": "2026-07-23"},
+                limit=2,
+                now_fn=lambda: datetime.datetime(2026, 7, 6, 6, tzinfo=TAIPEI),
+                delay=0,
+            )
+
+            self.assertEqual(calls, ["2330", "2303"])
+            self.assertEqual(result["next_index"], 2)
+            self.assertEqual(result["failed"], [])
+
     def test_market_batch_fails_fast_and_preserves_provider_failure(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -732,6 +792,47 @@ File Creation Time: 07082026||||||
         self.assertEqual(payload["model_version"], "lgbm-5d-v1")
         self.assertEqual(len(payload["daily"]), 2)
         self.assertEqual(payload["daily"][-1]["Date"], "2026-07-03T00:00:00.000")
+
+    def test_taiwan_snapshot_persists_latest_and_oos_ai_p_after_model_mutation(self):
+        frame = pd.DataFrame(
+            {
+                "Open": [99.0, 100.0, 101.0],
+                "High": [101.0, 102.0, 103.0],
+                "Low": [98.0, 99.0, 100.0],
+                "Close": [100.0, 101.0, 102.0],
+                "Volume": [1000.0, 1100.0, 1200.0],
+            },
+            index=pd.to_datetime(["2026-07-01", "2026-07-02", "2026-07-03"]),
+        )
+        frame.index.name = "Date"
+
+        def calc_all(data):
+            result = data.iloc[1:].copy()
+            result["RSI"] = [51.0, 52.0]
+            return result
+
+        def run_ai_engine(data):
+            data.loc[data.index[-2], "AI_P"] = 58.0
+            data.loc[data.index[-1], "AI_P"] = 63.0
+            return {"accuracy": 50.0}
+
+        pipeline = SimpleNamespace(
+            get_data=lambda _symbol, _days: frame.copy(),
+            calc_all=calc_all,
+            run_ai_engine=run_ai_engine,
+            get_stock_name=lambda _symbol: "台積電",
+            PREDICTION_HORIZON=5,
+        )
+
+        payload = build_stock_snapshot(pipeline, "TW", "2330")
+        by_date = {
+            row["Date"].split("T", 1)[0]: row for row in payload["daily"]
+        }
+
+        self.assertEqual(len(payload["daily"]), 3)
+        self.assertIsNone(by_date["2026-07-01"]["RSI"])
+        self.assertEqual(by_date["2026-07-02"]["AI_P"], 58.0)
+        self.assertEqual(payload["latest"]["AI_P"], 63.0)
 
     def test_taiwan_snapshot_rejects_missing_history_or_backtest(self):
         empty = SimpleNamespace(

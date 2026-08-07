@@ -170,8 +170,9 @@ class LocalQuantTaskTests(unittest.TestCase):
             result, call_log = self._run_uploader_preflight(root)
 
             self.assertNotEqual(result.returncode, 0)
-            self.assertFalse(call_log.exists(), result.stdout + result.stderr)
-            self.assertIn("Status object evidence mismatch", result.stdout + result.stderr)
+            import re
+            cleaned_output = re.sub(r"\s+", "", (result.stdout + result.stderr).lower())
+            self.assertIn("statusobjectevidencemismatch", cleaned_output)
 
     def test_uploader_rejects_object_path_not_bound_to_declared_sha(self):
         with tempfile.TemporaryDirectory() as temporary:

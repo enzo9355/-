@@ -32,8 +32,15 @@ from stock_papi.integrations.market_data.tw_official_historical import (
     OfficialSnapshotSeries,
 )
 from stock_papi.integrations.market_data.tw_trading_status import evidence_sha256
-from stock_papi.quant.tw_incremental import OfficialCompatFetcher
-from stock_papi.quant.tw_legacy_reconciliation import LegacyArtifactBackupStore
+from stock_papi.quant.tw_incremental import (
+    IncrementalHistoryError,
+    OfficialCompatFetcher,
+    load_incremental_artifact,
+)
+from stock_papi.quant.tw_legacy_reconciliation import (
+    LegacyArtifactBackupStore,
+    resolve_truncated_daily_history,
+)
 
 TARGET = datetime.date(2026, 7, 24)
 BASELINE = datetime.date(2026, 7, 16)
@@ -169,7 +176,9 @@ def write_calendar(root, year=2026):
     return path
 
 
-def write_artifact(root, symbol, as_of="2026-07-23", source_lineage=None):
+def write_artifact(
+    root, symbol, as_of="2026-07-23", source_lineage=None, *, lineage_present=False
+):
     path = Path(root) / "artifacts" / "stocks" / "TW" / f"{symbol}.json.gz"
     path.parent.mkdir(parents=True, exist_ok=True)
     document = {
@@ -183,12 +192,28 @@ def write_artifact(root, symbol, as_of="2026-07-23", source_lineage=None):
             "Close": 1.0, "Volume": 1.0,
         }],
     }
-    if source_lineage is not None:
+    if lineage_present or source_lineage is not None:
         document["source_lineage"] = source_lineage
     with path.open("wb") as raw:
         with gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as stream:
             stream.write(json.dumps(document).encode())
     return path
+
+
+def write_payload_artifact(root, symbol, payload):
+    path = Path(root) / "artifacts" / "stocks" / "TW" / f"{symbol}.json.gz"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    document = dict(payload, market="TW", symbol=str(symbol))
+    with path.open("wb") as raw:
+        with gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as stream:
+            stream.write(json.dumps(document, separators=(",", ":")).encode())
+    return path
+
+
+def canonical_bytes(value):
+    return json.dumps(
+        value, sort_keys=True, separators=(",", ":"), allow_nan=False
+    ).encode("utf-8")
 
 
 def write_checkpoint(root, document):
@@ -326,6 +351,7 @@ class TWOfficialPostCloseCLITests(unittest.TestCase):
         root,
         *,
         reconcile=False,
+        recover=False,
         series=None,
         status=0,
         final_dates=None,
@@ -335,6 +361,7 @@ class TWOfficialPostCloseCLITests(unittest.TestCase):
         symbols=("2303", "2330"),
         builder=None,
         final_status_symbols=(),
+        recovery_symbol_allowlist=None,
     ):
         root = Path(root)
         pipeline = Pipeline()
@@ -462,6 +489,8 @@ class TWOfficialPostCloseCLITests(unittest.TestCase):
                 delay=0,
                 series_builder=chosen_builder,
                 reconcile_legacy_overlaps=reconcile,
+                recover_truncated_history=recover,
+                recovery_symbol_allowlist=recovery_symbol_allowlist,
             )
         finally:
             if old is None:
@@ -469,6 +498,181 @@ class TWOfficialPostCloseCLITests(unittest.TestCase):
             else:
                 sys.modules["local_quant"] = old
         return result, observed, chosen_builder, module
+
+    @staticmethod
+    def _official_payload(fetcher, symbol):
+        price = fetcher(
+            "TaiwanStockPrice", symbol, BASELINE.isoformat(), TARGET.isoformat()
+        )
+        fetcher(
+            "TaiwanStockInstitutionalInvestorsBuySell",
+            symbol,
+            BASELINE.isoformat(),
+            TARGET.isoformat(),
+        )
+        fetcher(
+            "TaiwanStockMarginPurchaseShortSale",
+            symbol,
+            BASELINE.isoformat(),
+            TARGET.isoformat(),
+        )
+        daily = [
+            {
+                "Date": f"{row.date}T00:00:00.000",
+                "Open": float(row.open),
+                "High": float(row.max),
+                "Low": float(row.min),
+                "Close": float(row.close),
+                "Volume": float(row.Trading_Volume),
+            }
+            for row in price.itertuples(index=False)
+        ]
+        return {
+            "schema_version": 1,
+            "as_of": daily[-1]["Date"][:10],
+            "daily": daily,
+        }
+
+    def _run_recovery_runtime(
+        self,
+        root,
+        *,
+        series,
+        reconcile,
+        recover,
+    ):
+        root = Path(root)
+        pipeline = Pipeline()
+        events = []
+        self._recovery_runtime_events = events
+        module = types.ModuleType("local_quant")
+        module.OBSERVATION_SOURCE_VERSION = "observation-source-v1"
+        module.get_taiwan_symbols = lambda _pipeline: ["2330"]
+        module.load_stock_pipeline = lambda _root: pipeline
+
+        def original_build(pipeline_arg, market, symbol, *_args, **_kwargs):
+            events.append("build")
+            return self._official_payload(
+                pipeline_arg.fetch_finmind_dataset, str(symbol)
+            )
+
+        def original_writer(data_root, market, symbol, payload, *_args, **_kwargs):
+            self.assertEqual(market, "TW")
+            events.append("write")
+            return write_payload_artifact(data_root, symbol, payload)
+
+        def original_batch(
+            data_root,
+            market,
+            symbols,
+            analyze,
+            *_args,
+            batch_identity=None,
+            **_kwargs,
+        ):
+            failures = []
+            for index, symbol in enumerate(symbols, start=1):
+                try:
+                    payload = module.build_stock_snapshot(
+                        pipeline,
+                        market,
+                        str(symbol),
+                        target_market_date=TARGET,
+                        observation_only=True,
+                    )
+                    module.write_stock_artifact(data_root, market, str(symbol), payload)
+                except Exception as exc:
+                    failures.append({"symbol": str(symbol), "error": type(exc).__name__})
+                checkpoint = {
+                    "stage": "market_batch",
+                    "market": market,
+                    "next_index": index,
+                    "failed": list(failures),
+                    "batch_identity": batch_identity,
+                }
+                write_checkpoint(data_root, checkpoint)
+                events.append("checkpoint")
+            return checkpoint
+
+        module.build_stock_snapshot = original_build
+        module.write_stock_artifact = original_writer
+        module.run_market_batch = original_batch
+        module.publish_market_snapshot = lambda *_args, **_kwargs: events.append("publish")
+
+        def local_main(_argv):
+            module.run_market_batch(
+                root,
+                "TW",
+                ["2330"],
+                lambda _symbol: {},
+                batch_identity={
+                    "target_market_date": TARGET.isoformat(),
+                    "product_mode": "observation",
+                    "source_version": module.OBSERVATION_SOURCE_VERSION,
+                },
+            )
+            return 0
+
+        module.main = local_main
+        previous = sys.modules.get("local_quant")
+        sys.modules["local_quant"] = module
+        try:
+            with patch.object(
+                cli,
+                "_required_symbols_by_exchange",
+                return_value={"TWSE": {"2330"}, "TPEx": set()},
+            ):
+                result = run(
+                    root=root,
+                    target_market_date=TARGET,
+                    calendar_artifacts=[write_calendar(root)],
+                    limit=1,
+                    delay=0,
+                    series_builder=Mock(return_value=series),
+                    reconcile_legacy_overlaps=reconcile,
+                    recover_truncated_history=recover,
+                )
+        finally:
+            if previous is None:
+                sys.modules.pop("local_quant", None)
+            else:
+                sys.modules["local_quant"] = previous
+        return result, events
+
+    def _prepare_truncated_direct_artifact(self, root, series):
+        root = Path(root)
+        original = write_artifact(root, "2330", BASELINE.isoformat())
+        direct_fetcher = OfficialCompatFetcher(
+            root,
+            series,
+            pd=pd,
+            legacy_overlap_policy="replace_verified_legacy",
+        )
+        direct_payload = self._official_payload(direct_fetcher, "2330")
+        direct_lineage = direct_fetcher.lineage_for(
+            "2330", persisted_daily=direct_payload["daily"]
+        )
+        store = LegacyArtifactBackupStore(
+            root,
+            target_date=TARGET,
+            series_manifest_sha256=series.manifest_sha256,
+        )
+        self.assertEqual(
+            store.backup_before_write(
+                symbol="2330",
+                artifact_path=original,
+                evidence=direct_lineage["legacy_reconciliation"],
+            ),
+            "write",
+        )
+        direct_payload["daily"] = [direct_payload["daily"][-1]]
+        direct_path = write_payload_artifact(
+            root,
+            "2330",
+            {**direct_payload, "source_lineage": direct_lineage},
+        )
+        store.mark_applied(symbol="2330", artifact_path=direct_path)
+        return direct_path, hashlib.sha256(direct_path.read_bytes()).hexdigest()
 
     def test_calendar_lists_every_missing_trading_session(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -617,6 +821,339 @@ class TWOfficialPostCloseCLITests(unittest.TestCase):
                 self.assertTrue(
                     run_mock.call_args.kwargs["reconcile_legacy_overlaps"]
                 )
+
+    def test_cli_recovery_flag_is_explicit_opt_in(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            calendar = write_calendar(temporary)
+            arguments = [
+                "--root", temporary,
+                "--target-market-date", TARGET.isoformat(),
+                "--calendar-artifact", str(calendar),
+            ]
+            with patch.object(cli, "run", return_value=0) as run_mock:
+                self.assertEqual(cli.main(arguments), 0)
+                self.assertIs(
+                    run_mock.call_args.kwargs["recover_truncated_history"], False
+                )
+                self.assertEqual(
+                    cli.main(arguments + ["--recover-truncated-history"]), 0
+)
+                self.assertIs(
+                    run_mock.call_args.kwargs["recover_truncated_history"], True
+                )
+
+    def test_allowlist_loader_validates_symbols_comments_and_sha_identity(self):
+        from stock_papi.batch.tw_official_post_close_cli import (
+            _load_recovery_symbol_allowlist,
+            _universe_sha256,
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "allow.txt"
+            symbols = ["0051", "0050", "# header", "", "0053"]
+            path.write_text("\n".join(symbols), encoding="utf-8")
+            canonical = ["0050", "0051", "0053"]
+            expected = _universe_sha256(canonical)
+            loaded = _load_recovery_symbol_allowlist(
+                path, expected_sha256=expected
+            )
+            self.assertEqual(loaded, {"0050", "0051", "0053"})
+            with self.assertRaises(ValueError):
+                _load_recovery_symbol_allowlist(
+                    path, expected_sha256="0" * 64
+                )
+            bad = Path(temporary) / "bad.txt"
+            bad.write_text("0050\nnotasymbol\n", encoding="utf-8")
+            with self.assertRaises(ValueError):
+                _load_recovery_symbol_allowlist(bad, expected_sha256=None)
+            dup = Path(temporary) / "dup.txt"
+            dup.write_text("0050\n0050\n", encoding="utf-8")
+            with self.assertRaises(ValueError):
+                _load_recovery_symbol_allowlist(dup, expected_sha256=None)
+
+    def test_cli_recovery_symbol_allowlist_is_threaded_to_run(self):
+        from stock_papi.batch.tw_official_post_close_cli import _universe_sha256
+        with tempfile.TemporaryDirectory() as temporary:
+            calendar = write_calendar(temporary)
+            allow = Path(temporary) / "allow.txt"
+            allow.write_text("0051\n# header\n0050\n", encoding="utf-8")
+            expected = _universe_sha256(["0050", "0051"])
+            arguments = [
+                "--root", temporary,
+                "--target-market-date", TARGET.isoformat(),
+                "--calendar-artifact", str(calendar),
+                "--recover-truncated-history",
+                "--recovery-symbol-allowlist", str(allow),
+                "--recovery-allowlist-sha256", expected,
+            ]
+            with patch.object(cli, "run", return_value=0) as run_mock:
+                self.assertEqual(cli.main(arguments), 0)
+                self.assertEqual(
+                    run_mock.call_args.kwargs["recovery_symbol_allowlist"],
+                    {"0050", "0051"},
+                )
+
+    def test_cli_recovery_allowlist_requires_identity_sha(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            calendar = write_calendar(temporary)
+            allow = Path(temporary) / "allow.txt"
+            allow.write_text("0050\n", encoding="utf-8")
+            arguments = [
+                "--root", temporary,
+                "--target-market-date", TARGET.isoformat(),
+                "--calendar-artifact", str(calendar),
+                "--recover-truncated-history",
+                "--recovery-symbol-allowlist", str(allow),
+            ]
+            with patch.object(cli, "run", return_value=0):
+                self.assertEqual(cli.main(arguments), 2)
+
+    def test_cli_default_path_never_constructs_resolver_or_touches_quarantine(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            for symbol in ("2303", "2330"):
+                write_artifact(temporary, symbol)
+            with patch.object(
+                cli,
+                "resolve_truncated_daily_history",
+                create=True,
+            ) as resolver:
+                result, _observed, _builder, _module = self._run_fake(
+                    temporary,
+                    recover=False,
+                    final_dates={
+                        "2303": TARGET.isoformat(), "2330": TARGET.isoformat()
+                    },
+                )
+        self.assertEqual(result, 0)
+        resolver.assert_not_called()
+        self.assertFalse((Path(temporary) / "quarantine").exists())
+
+    def test_cli_wires_recovery_resolver_only_when_enabled(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            for symbol in ("2303", "2330"):
+                write_artifact(temporary, symbol)
+            with (
+                patch.object(
+                    cli,
+                    "resolve_truncated_daily_history",
+                    create=True,
+                    return_value=None,
+                ) as resolver,
+                patch.object(
+                    cli, "OfficialCompatFetcher", wraps=OfficialCompatFetcher
+                ) as constructor,
+            ):
+                result, _observed, _builder, _module = self._run_fake(
+                    temporary,
+                    recover=True,
+                    final_dates={
+                        "2303": TARGET.isoformat(), "2330": TARGET.isoformat()
+},
+                )
+                recovery_resolver = constructor.call_args.kwargs[
+                    "recovery_resolver"
+                ]
+                recovery_resolver("2330", object())
+        self.assertEqual(result, 0)
+        resolver.assert_called_once()
+
+    def test_cli_recovery_allowlist_gates_fallback_to_allowed_symbols_only(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            for symbol in ("2303", "2330"):
+                write_artifact(temporary, symbol)
+            calls = []
+
+            def tracking_resolver(root, symbol, artifact):
+                calls.append(symbol)
+                return None
+
+            with (
+                patch.object(
+                    cli,
+                    "resolve_truncated_daily_history",
+                    create=True,
+                    side_effect=tracking_resolver,
+                ),
+                patch.object(
+                    cli, "OfficialCompatFetcher", wraps=OfficialCompatFetcher
+                ) as constructor,
+            ):
+                result, _observed, _builder, _module = self._run_fake(
+                    temporary,
+                    recover=True,
+                    symbols=("2303", "2330"),
+                    recovery_symbol_allowlist={"2330"},
+                    final_dates={
+                        "2303": TARGET.isoformat(), "2330": TARGET.isoformat()
+                    },
+                )
+                gated_resolver = constructor.call_args.kwargs[
+                    "recovery_resolver"
+                ]
+                self.assertIsNone(gated_resolver("2303", object()))
+                gated_resolver("2330", object())
+        self.assertEqual(result, 0)
+        self.assertEqual(calls, ["2330"])
+
+    def test_cli_checkpoint_identity_rejects_changed_recovery_mode(self):
+        series = snapshot_series()
+        audit = types.SimpleNamespace(
+            latest_date_counts=MappingProxyType({BASELINE.isoformat(): 1}),
+            unavailable_symbols=(),
+        )
+        common = {
+            "target_market_date": TARGET.isoformat(),
+            "product_mode": "observation",
+        }
+        disabled = cli._enrich_batch_identity(
+            common,
+            series=series,
+            audit=audit,
+            symbols=["2330"],
+            reconcile_legacy_overlaps=False,
+            recover_truncated_history=False,
+        )
+        enabled = cli._enrich_batch_identity(
+            common,
+            series=series,
+            audit=audit,
+            symbols=["2330"],
+            reconcile_legacy_overlaps=False,
+            recover_truncated_history=True,
+        )
+
+        self.assertIs(disabled["recover_truncated_history"], False)
+        self.assertIs(enabled["recover_truncated_history"], True)
+        self.assertNotEqual(disabled, enabled)
+
+    def test_both_recovery_and_reconcile_flags_keep_legacy_artifact_in_existing_reconciliation_flow(self):
+        series = snapshot_series(FULL_SERIES_DATES, price_symbols=("2330",))
+        for explicit_null in (False, True):
+            with self.subTest(explicit_null=explicit_null), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                write_artifact(
+                    root,
+                    "2330",
+                    BASELINE.isoformat(),
+                    source_lineage=None,
+                    lineage_present=explicit_null,
+                )
+                resolved = []
+
+                def resolver(data_root, symbol, artifact):
+                    value = resolve_truncated_daily_history(data_root, symbol, artifact)
+                    resolved.append(value)
+                    return value
+
+                with patch.object(
+                    cli,
+                    "resolve_truncated_daily_history",
+                    create=True,
+                    side_effect=resolver,
+                ):
+                    result, events = self._run_recovery_runtime(
+                        root,
+                        series=series,
+                        reconcile=True,
+                        recover=True,
+                    )
+                artifact = load_incremental_artifact(root, "2330")
+                lineage_value = artifact.document["source_lineage"]
+                store = LegacyArtifactBackupStore(
+                    root,
+                    target_date=TARGET,
+                    series_manifest_sha256=series.manifest_sha256,
+                )
+                manifest = json.loads(store.manifest_path.read_text(encoding="utf-8"))
+
+                self.assertEqual(result, 0)
+                self.assertEqual(resolved, [None])
+                self.assertEqual(events.count("write"), 1)
+                self.assertEqual(
+                    lineage_value["legacy_reconciliation"]["overlap_dates"],
+                    [BASELINE.isoformat()],
+                )
+                self.assertEqual(manifest["entries"]["2330"]["status"], "applied")
+
+    def test_both_flags_direct_recovery_rotates_history_writes_once_and_reruns_stably(self):
+        series = snapshot_series(FULL_SERIES_DATES, price_symbols=("2330",))
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _direct_path, direct_sha = self._prepare_truncated_direct_artifact(
+                root, series
+            )
+            first_result, first_events = self._run_recovery_runtime(
+                root,
+                series=series,
+                reconcile=True,
+                recover=True,
+            )
+            first_artifact = load_incremental_artifact(root, "2330")
+            first_lineage = first_artifact.document["source_lineage"]
+            first_bytes = canonical_bytes({
+                "daily": first_artifact.document["daily"],
+                "daily_history_recovery": first_lineage["daily_history_recovery"],
+            })
+            second_result, second_events = self._run_recovery_runtime(
+                root,
+                series=series,
+                reconcile=True,
+                recover=True,
+            )
+            second_artifact = load_incremental_artifact(root, "2330")
+            second_lineage = second_artifact.document["source_lineage"]
+
+        self.assertEqual(first_result, 0)
+        self.assertEqual(first_events.count("write"), 1)
+        self.assertNotIn("legacy_reconciliation", first_lineage)
+        self.assertEqual(
+            first_lineage["legacy_reconciliation_history"][0][
+                "reconciled_artifact_sha256"
+            ],
+            direct_sha,
+        )
+        self.assertTrue(
+            OfficialCompatFetcher._valid_official_lineage(
+                first_lineage, first_artifact
+            )
+        )
+        self.assertEqual(second_result, 0)
+        self.assertEqual(second_events.count("write"), 1)
+        self.assertEqual(
+            first_bytes,
+            canonical_bytes({
+                "daily": second_artifact.document["daily"],
+                "daily_history_recovery": second_lineage["daily_history_recovery"],
+            }),
+        )
+
+    def test_recovery_failure_blocks_assert_complete_and_publication(self):
+        series = snapshot_series(FULL_SERIES_DATES, price_symbols=("2330",))
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            artifact = write_artifact(root, "2330", BASELINE.isoformat())
+            before = artifact.read_bytes()
+            with patch.object(
+                cli,
+                "resolve_truncated_daily_history",
+                create=True,
+                side_effect=IncrementalHistoryError("recovery failed"),
+            ), self.assertRaisesRegex(RuntimeError, "recovery is incomplete"):
+                self._run_recovery_runtime(
+                    root,
+                    series=series,
+                    reconcile=False,
+                    recover=True,
+                )
+            checkpoint = json.loads(
+                (root / "checkpoints" / "progress.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(artifact.read_bytes(), before)
+            self.assertNotIn("write", self._recovery_runtime_events)
+            self.assertNotIn("publish", self._recovery_runtime_events)
+            self.assertEqual(checkpoint["next_index"], 1)
+            self.assertEqual(
+                checkpoint["failed"], [{"symbol": "2330", "error": "IncrementalHistoryError"}]
+            )
 
     def test_cli_default_path_remains_strict(self):
         with tempfile.TemporaryDirectory() as temporary:

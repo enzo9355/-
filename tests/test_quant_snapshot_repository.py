@@ -2,6 +2,7 @@ import datetime
 import gzip
 import hashlib
 import json
+import math
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,6 +11,7 @@ import app as stock_app
 from stock_papi.repositories import market_insights, quant_snapshots
 from tests.report_fixtures import (
     stock_document,
+    warmup_stock_document,
     write_quant_publish,
     write_quant_publish_v3,
 )
@@ -29,6 +31,24 @@ def rewrite_repository_manifest(publish: Path, manifest: dict) -> None:
 
 
 class QuantSnapshotRepositoryTests(unittest.TestCase):
+    def test_repository_accepts_warmup_rows_and_finite_latest(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            publish = write_quant_publish(Path(temporary), [warmup_stock_document("2330")])
+
+            def load_object(name, _limit):
+                path = publish / name.removeprefix("quant/v1/")
+                return path.read_bytes() if path.is_file() else None
+
+            manifest = quant_snapshots.published_quant_manifest(
+                "TW", today=datetime.date(2026, 7, 3), load_object=load_object, cache={}
+            )
+            document = quant_snapshots.fetch_quant_snapshot(
+                "2330", today=datetime.date(2026, 7, 3), is_us_ticker_fn=lambda _code: False,
+                load_manifest=lambda _market, today=None: manifest, load_object=load_object,
+            )
+        self.assertIsNone(document["daily"][0]["MA20"])
+        self.assertTrue(math.isfinite(document["latest"]["AI_P"]))
+
     def test_repository_accepts_hash_bound_v3_status_snapshot(self):
         with tempfile.TemporaryDirectory() as temporary:
             publish = write_quant_publish_v3(Path(temporary))
