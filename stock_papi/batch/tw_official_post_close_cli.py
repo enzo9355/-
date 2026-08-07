@@ -378,17 +378,9 @@ def _assert_complete(
         - (pending - status_symbols)
         - (excluded - status_symbols)
         - terminated_symbols
-        - failed_symbols
     )
     if failed_symbols & active:
-        non_blocking = {
-            item["symbol"]
-            for item in failures
-            if item.get("error") in {"ValueError", "IncrementalHistoryError"}
-        }
-        blocking = (failed_symbols & active) - non_blocking
-        if blocking:
-            raise RuntimeError(_INCOMPLETE)
+        raise RuntimeError(_INCOMPLETE)
     if not active:
         return
     try:
@@ -404,8 +396,8 @@ def _assert_complete(
         or set(audit.latest_by_symbol) != active
         or set(audit.observation_by_symbol) != active
         or any(
-            value != target_market_date and symbol not in failed_symbols
-            for symbol, value in audit.observation_by_symbol.items()
+            value != target_market_date
+            for value in audit.observation_by_symbol.values()
         )
         or ((regular_symbols & active) | (status_symbols & active)) != active
         or any(
@@ -431,8 +423,6 @@ def _assert_complete(
         for value, snapshot in official_series.snapshots.items()
     ]
     for symbol in sorted(active):
-        if symbol in failed_symbols:
-            continue
         try:
             artifact = load_incremental_artifact(root, symbol)
         except IncrementalHistoryError as exc:
@@ -849,33 +839,22 @@ def _run_stage(
         reconcile_legacy_overlaps=reconcile_legacy_overlaps,
         recover_truncated_history=recover_truncated_history,
     )
-    try:
-        _assert_complete(
-            root,
-            symbols=[str(value) for value in symbols],
-            target_market_date=target_market_date,
-            expected_identity=expected_identity,
-            official_series=series,
-            applied_reconciliation_artifacts=applied_reconciliation_artifacts,
-        )
-    except RuntimeError:
-        pass
+    _assert_complete(
+        root,
+        symbols=[str(value) for value in symbols],
+        target_market_date=target_market_date,
+        expected_identity=expected_identity,
+        official_series=series,
+        applied_reconciliation_artifacts=applied_reconciliation_artifacts,
+    )
     pending, excluded = _load_exclusion_state(root)
-    checkpoint = _load_checkpoint(root)
-    checkpoint_failed = {
-        item["symbol"]
-        for item in (checkpoint.get("failed") or [])
-        if isinstance(item, dict)
-    }
     target_snapshot = series.snapshots[target_market_date]
     status_symbols = set(target_snapshot.trading_status_by_symbol)
     operational_failures = (
         pending
         | excluded
         | set(target_snapshot.terminated_by_symbol)
-        - status_symbols
-        | checkpoint_failed
-    )
+    ) - status_symbols
     if publish:
         local_quant.publish_market_snapshot(
             root,
