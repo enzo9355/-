@@ -32,7 +32,7 @@ else {
 }
 $CalendarPaths = New-Object System.Collections.Generic.List[string]
 $CalendarPaths.Add($PrimaryCalendarPath)
-foreach ($CandidateYear in @($Year - 1, $Year + 1)) {
+foreach ($CandidateYear in @(($Year - 1), ($Year + 1))) {
     $CandidatePath = Join-Path $DataRoot "publish\calendars\v1\TW-$CandidateYear.json"
     if (
         (Test-Path -LiteralPath $CandidatePath -PathType Leaf) -and

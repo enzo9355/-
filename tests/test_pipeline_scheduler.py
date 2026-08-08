@@ -83,6 +83,7 @@ class PipelineSchedulerTests(unittest.TestCase):
         self.assertNotIn("AllowDegradedBootstrap", post_close)
         self.assertIn("-RequireDashboard", post_close)
         self.assertIn("$ParsedTargetDate.Year", post_close)
+        self.assertIn("@(($Year - 1), ($Year + 1))", post_close)
         self.assertIn("$Year - 1", post_close)
         self.assertIn("$Year + 1", post_close)
         self.assertGreaterEqual(post_close.count("'--calendar-artifact'"), 2)
