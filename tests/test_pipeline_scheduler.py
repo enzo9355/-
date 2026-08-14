@@ -118,6 +118,43 @@ class PipelineSchedulerTests(unittest.TestCase):
                 self.assertNotIn("codex-runtimes", source)
                 self.assertNotIn("$BundledPython", source)
 
+    def test_post_close_source_market_date_has_fail_closed_manifest_fallback(self):
+        script = (
+            Path(__file__).parents[1] / "scripts" / "run_tw_post_close_pipeline.ps1"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("$SourceMarketDate", script)
+        for required in (
+            "$LatestSchema = [int]$Latest.schema_version",
+            "Manifest path is not allowlisted",
+            "Manifest hash mismatch",
+            "Source market date does not match TargetDate",
+            "Get-Date -Date",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, script)
+        fallback = script[script.index("$SourceMarketDate") : script.index("$CandidateArguments")]
+        market_as_of = fallback.index("market_as_of")
+        observation_as_of = fallback.index("observation_as_of")
+        target_market_date = fallback.index("target_market_date")
+        self.assertLess(market_as_of, observation_as_of)
+        self.assertLess(observation_as_of, target_market_date)
+        self.assertIn("'--source-market-date', $SourceMarketDate", script)
+        self.assertNotIn("'--source-market-date', $Manifest.market_as_of", script)
+
+    def test_observation_only_upload_scopes_pointers_to_tw_post_close(self):
+        script = (
+            Path(__file__).parents[1] / "scripts" / "upload_local_quant.ps1"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("$Markets = if ($ObservationOnly)", script)
+        self.assertIn("@('TW')", script)
+        self.assertIn("if (-not $ObservationOnly -and", script)
+        self.assertIn("$ReportV2Types = if ($ObservationOnly)", script)
+        self.assertIn("@('post_close')", script)
+        self.assertIn("foreach ($Type in $ReportV2Types)", script)
+        self.assertNotIn("foreach ($Market in @('TW', 'US'))", script)
+
     def test_full_backtest_logs_nonfatal_python_warnings_but_keeps_exit_code(self):
         source = (
             Path(__file__).parents[1] / "scripts" / "run_full_backtest.ps1"

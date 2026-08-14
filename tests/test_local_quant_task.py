@@ -12,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 INSTALLER = ROOT / "scripts" / "install_local_quant_task.ps1"
 WRAPPER = ROOT / "scripts" / "run_local_quant_task.ps1"
 UPLOADER = ROOT / "scripts" / "upload_local_quant.ps1"
+COMMON = ROOT / "scripts" / "observation_release_common.ps1"
 LIFECYCLE = ROOT / "config" / "quant-snapshot-lifecycle.json"
 DOCKERIGNORE = ROOT / ".dockerignore"
 GCLOUDIGNORE = ROOT / ".gcloudignore"
@@ -215,6 +216,84 @@ class LocalQuantTaskTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertFalse(call_log.exists(), result.stdout + result.stderr)
+
+    def test_uploader_binds_pointer_updates_to_captured_generations(self):
+        source = UPLOADER.read_text(encoding="utf-8")
+
+        for required in (
+            "$ExpectedPointerGenerations",
+            "-ExpectedGeneration $ExpectedGeneration",
+            "Observation-only pointer destination is not allowlisted",
+            "if ($Matches.Count -eq 0) { throw",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, source)
+
+    def test_uploader_verifies_quant_objects_after_no_clobber_upload(self):
+        source = UPLOADER.read_text(encoding="utf-8")
+        object_upload = source.index("# Upload objects")
+        manifest_upload = source.index("# Upload manifest")
+        section = source[object_upload:manifest_upload]
+
+        self.assertIn("Assert-GcloudFileMatches", section)
+        self.assertIn('"gs://$Bucket/quant/v1/$ObjectRelative"', section)
+
+    def test_uploader_verifies_report_research_objects_before_mutable_pointers(self):
+        source = UPLOADER.read_text(encoding="utf-8")
+
+        for required in (
+            "Publish-VerifiedReportObject",
+            "objects/canonical/",
+            "objects/regression/",
+            "Report object schema or lineage mismatch",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, source)
+        self.assertLess(
+            source.index("Publish-VerifiedReportObject"),
+            source.index("# Upload manifest"),
+        )
+
+    def test_observation_upload_preserves_captured_report_index_entries(self):
+        source = UPLOADER.read_text(encoding="utf-8")
+
+        self.assertIn("Assert-ObservationReportIndexPreservesLkg", source)
+        self.assertIn("would clobber captured entry", source)
+        self.assertIn("previous_file", source)
+
+    def test_mutable_pointer_readback_is_generation_specific_and_journaled(self):
+        common = COMMON.read_text(encoding="utf-8")
+        uploader = UPLOADER.read_text(encoding="utf-8")
+
+        for required in (
+            "Write-GcloudPendingPointerJournal",
+            "Conditional GCS pointer update could not be verified",
+            '"$Destination#$([string]$After.generation)"',
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, common)
+        for required in (
+            "$PendingPointerJournalPath",
+            "pending.json",
+            "Observation LKG pending pointer journal exists",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, uploader)
+
+    def test_mutable_pointer_upload_uses_verified_staging_snapshot(self):
+        source = UPLOADER.read_text(encoding="utf-8")
+
+        for required in (
+            "New-VerifiedPointerSnapshot",
+            "$Global:PointerStagingRunPath",
+            "-ExpectedSha256 $ExpectedSha256",
+            "-Source $Snapshot",
+            "pointer-staging",
+            "pointer-update.lock",
+            "[IO.FileShare]::None",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, source)
 
     def test_uploader_uploads_v3_objects_and_manifest_before_pointer(self):
         source = UPLOADER.read_text(encoding="utf-8")

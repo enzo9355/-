@@ -14,6 +14,8 @@ from unittest.mock import Mock, patch
 
 import pandas as pd
 
+import local_quant
+
 from stock_papi.batch.calendar import TWSE_CALENDAR_URL, TradingCalendarSet
 from stock_papi.batch import tw_official_post_close_cli as cli
 from stock_papi.batch.tw_official_post_close_cli import (
@@ -1155,6 +1157,188 @@ class TWOfficialPostCloseCLITests(unittest.TestCase):
                 checkpoint["failed"], [{"symbol": "2330", "error": "IncrementalHistoryError"}]
             )
 
+    def _prepare_terminal_gate(
+        self, root, series, price_symbols, lineage_symbol="2330", artifact_lineage=None
+    ):
+        root = Path(root)
+        write_artifact(
+            root,
+            lineage_symbol,
+            TARGET.isoformat(),
+            (
+                artifact_lineage
+                if artifact_lineage is not None
+                else official_lineage(lineage_symbol, series)
+            ),
+        )
+        expected_identity = cli._enrich_batch_identity(
+            {
+                "target_market_date": TARGET.isoformat(),
+                "product_mode": "observation",
+                "source_version": local_quant.OBSERVATION_SOURCE_VERSION,
+            },
+            series=series,
+            audit=Mock(latest_date_counts={}, unavailable_symbols=[]),
+            symbols=[lineage_symbol],
+            reconcile_legacy_overlaps=False,
+            recover_truncated_history=False,
+        )
+        write_checkpoint(
+            root,
+            {
+                "stage": "market_batch",
+                "market": "TW",
+                "next_index": 1,
+                "failed": [],
+                "batch_identity": expected_identity,
+            },
+        )
+        return expected_identity
+
+    def test_assert_complete_scopes_raw_snapshot_symbols_to_universe(self):
+        series = snapshot_series(FULL_SERIES_DATES, price_symbols=("2330", "700001"))
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            expected_identity = self._prepare_terminal_gate(root, series, ("2330", "700001"))
+            cli._assert_complete(
+                root,
+                symbols=["2330"],
+                target_market_date=TARGET,
+                expected_identity=expected_identity,
+                official_series=series,
+                applied_reconciliation_artifacts={},
+            )
+
+    def test_assert_complete_rerun_with_same_series_is_deterministic(self):
+        first = snapshot_series(FULL_SERIES_DATES, price_symbols=("2330", "700001"))
+        second = snapshot_series(FULL_SERIES_DATES, price_symbols=("2330", "700001"))
+        self.assertEqual(first.manifest_sha256, second.manifest_sha256)
+        for date in FULL_SERIES_DATES:
+            self.assertEqual(
+                first.snapshots[date].manifest_sha256,
+                second.snapshots[date].manifest_sha256,
+            )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            expected_identity = self._prepare_terminal_gate(root, first, ("2330", "700001"))
+            for series in (first, second):
+                cli._assert_complete(
+                    root,
+                    symbols=["2330"],
+                    target_market_date=TARGET,
+                    expected_identity=expected_identity,
+                    official_series=series,
+                    applied_reconciliation_artifacts={},
+                )
+
+    def test_assert_complete_rejects_lineage_from_different_series(self):
+        current = snapshot_series(FULL_SERIES_DATES, price_symbols=("2330",))
+        stale = snapshot_series((TARGET,), price_symbols=("2330",))
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            expected_identity = self._prepare_terminal_gate(
+                root,
+                current,
+                ("2330",),
+                artifact_lineage=official_lineage("2330", stale),
+            )
+            with self.assertRaisesRegex(RuntimeError, "recovery is incomplete"):
+                cli._assert_complete(
+                    root,
+                    symbols=["2330"],
+                    target_market_date=TARGET,
+                    expected_identity=expected_identity,
+                    official_series=current,
+                    applied_reconciliation_artifacts={},
+                )
+
+    def test_assert_complete_rejects_wrong_target_market_date_lineage(self):
+        series = snapshot_series(FULL_SERIES_DATES, price_symbols=("2330",))
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            lineage = dict(
+                official_lineage("2330", series),
+                target_market_date=BASELINE.isoformat(),
+            )
+            expected_identity = self._prepare_terminal_gate(
+                root, series, ("2330",), artifact_lineage=lineage
+            )
+            with self.assertRaisesRegex(RuntimeError, "recovery is incomplete"):
+                cli._assert_complete(
+                    root,
+                    symbols=["2330"],
+                    target_market_date=TARGET,
+                    expected_identity=expected_identity,
+                    official_series=series,
+                    applied_reconciliation_artifacts={},
+                )
+
+    def test_assert_complete_rejects_wrong_source_mode_or_schema(self):
+        series = snapshot_series(FULL_SERIES_DATES, price_symbols=("2330",))
+        for field, value in (
+            ("source_mode", "legacy_finmind"),
+            ("source_schema_version", "tw-official-historical-v1"),
+        ):
+            with self.subTest(field=field, value=value), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                lineage = dict(official_lineage("2330", series), **{field: value})
+                expected_identity = self._prepare_terminal_gate(
+                    root, series, ("2330",), artifact_lineage=lineage
+                )
+                with self.assertRaisesRegex(RuntimeError, "recovery is incomplete"):
+                    cli._assert_complete(
+                        root,
+                        symbols=["2330"],
+                        target_market_date=TARGET,
+                        expected_identity=expected_identity,
+                        official_series=series,
+                        applied_reconciliation_artifacts={},
+                    )
+
+    def test_assert_complete_rejects_checkpoint_identity_from_other_series(self):
+        series = snapshot_series(FULL_SERIES_DATES, price_symbols=("2330",))
+        other = snapshot_series((TARGET,), price_symbols=("2330",))
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            expected_identity = self._prepare_terminal_gate(root, series, ("2330",))
+            incompatible_identity = dict(
+                expected_identity,
+                official_series_manifest_sha256=other.manifest_sha256,
+            )
+            write_checkpoint(
+                root,
+                {
+                    "stage": "market_batch",
+                    "market": "TW",
+                    "next_index": 1,
+                    "failed": [],
+                    "batch_identity": incompatible_identity,
+                },
+            )
+            with self.assertRaisesRegex(RuntimeError, "recovery is incomplete"):
+                cli._assert_complete(
+                    root,
+                    symbols=["2330"],
+                    target_market_date=TARGET,
+                    expected_identity=expected_identity,
+                    official_series=series,
+                    applied_reconciliation_artifacts={},
+                )
+
+    def test_terminal_validation_failure_blocks_publication_and_propagates(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            write_artifact(temporary, "2303", "2026-07-23")
+            write_artifact(temporary, "2330", "2026-07-23")
+            observed = {}
+            with self.assertRaisesRegex(RuntimeError, "recovery is incomplete"):
+                _result, observed, _builder, _module = self._run_fake(
+                    temporary,
+                    final_dates={"2330": TARGET.isoformat()},
+                )
+            self.assertNotIn("published_args", observed)
+            self.assertNotIn("published_kwargs", observed)
+
+
     def test_cli_default_path_remains_strict(self):
         with tempfile.TemporaryDirectory() as temporary:
             for symbol in ("2303", "2330"):
@@ -1415,6 +1599,40 @@ class TWOfficialPostCloseCLITests(unittest.TestCase):
         self.assertEqual(observed["published_args"][1:3], ("TW", ["2303", "2330"]))
         self.assertEqual(observed["published_kwargs"]["target_market_date"], TARGET)
         self.assertNotIn("2303", observed["published_kwargs"]["failed_symbols"])
+
+    def test_cli_scopes_downstream_operational_failures_to_universe(self):
+        base = snapshot_series((TARGET,), price_symbols=("2330",))
+        snapshot = base.snapshots[TARGET]
+        snapshot = OfficialDailySnapshot(
+            **{
+                **snapshot.__dict__,
+                "terminated_by_symbol": MappingProxyType({"9999": MappingProxyType({})}),
+            }
+        )
+        series = OfficialSnapshotSeries(
+            target_date=base.target_date,
+            snapshots=MappingProxyType({TARGET: snapshot}),
+            manifest_sha256=base.manifest_sha256,
+            request_count=base.request_count,
+            request_budget=base.request_budget,
+            source_mode=base.source_mode,
+            source_schema_version=base.source_schema_version,
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            write_artifact(temporary, "2330", TARGET.isoformat())
+            write_exclusions(
+                temporary,
+                [exclusion_row("8888")],
+            )
+            result, observed, _builder, _module = self._run_fake(
+                temporary,
+                series=series,
+                symbols=("2330",),
+                final_dates={"2330": TARGET.isoformat()},
+            )
+
+        self.assertEqual(result, 0)
+        self.assertEqual(observed["published_kwargs"]["failed_symbols"], [])
 
     def test_cli_restores_all_patches_when_assignment_or_pipeline_fails(self):
         class RejectOnce(types.SimpleNamespace):
