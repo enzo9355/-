@@ -886,14 +886,28 @@ function Get-LocalObservationPointers {
         -Root $DashboardRoot `
         -MaximumBytes 100KB
     $Dashboard = $DashboardInfo.document
+    $ExpectedDashboardKeys = @(
+        'schema_version', 'kind', 'product_mode', 'market',
+        'observation_as_of', 'generated_at', 'source_manifest',
+        'source_manifest_sha256', 'path', 'sha256', 'size'
+    )
+    $DashboardHash = ([string]$Dashboard.sha256).ToLowerInvariant()
+    $DashboardPath = [string]$Dashboard.path
     if (
+        (@($Dashboard.PSObject.Properties.Name | Sort-Object) -join '|') -ne
+            (@($ExpectedDashboardKeys | Sort-Object) -join '|') -or
         [int]$Dashboard.schema_version -ne 2 -or
         [string]$Dashboard.kind -ne 'absorb-observation-dashboard' -or
         [string]$Dashboard.product_mode -ne 'observation' -or
         [string]$Dashboard.market -ne 'TW' -or
         [string]$Dashboard.observation_as_of -ne $TargetDate -or
         [string]$Dashboard.source_manifest -ne "quant/v1/$($Quant.manifest_relative)" -or
-        [string]$Dashboard.source_manifest_sha256 -ne $Quant.manifest_sha256
+        [string]$Dashboard.source_manifest_sha256 -ne $Quant.manifest_sha256 -or
+        $DashboardPath -notmatch '^objects/[0-9a-f]{64}\.json$' -or
+        $DashboardHash -notmatch '^[0-9a-f]{64}$' -or
+        $DashboardPath -ne "objects/$DashboardHash.json" -or
+        [long]$Dashboard.size -le 0 -or
+        [long]$Dashboard.size -gt 5MB
     ) {
         throw 'Local dashboard pointer is not bound to the target quant manifest'
     }
@@ -902,7 +916,14 @@ function Get-LocalObservationPointers {
         -Root $ReportRoot `
         -MaximumBytes 100KB
     $ReportLatest = $ReportLatestInfo.document
+    $ExpectedReportLatestKeys = @(
+        'schema_version', 'kind', 'market', 'report_type',
+        'source_market_date', 'applicable_trading_date', 'published_at',
+        'metadata', 'metadata_sha256', 'product_mode'
+    )
     if (
+        (@($ReportLatest.PSObject.Properties.Name | Sort-Object) -join '|') -ne
+            (@($ExpectedReportLatestKeys | Sort-Object) -join '|') -or
         [int]$ReportLatest.schema_version -ne 2 -or
         [string]$ReportLatest.kind -ne 'absorb-report' -or
         [string]$ReportLatest.market -ne 'TW' -or
@@ -951,6 +972,9 @@ function Get-LocalObservationPointers {
     $MetadataApplicableDate = ConvertTo-CanonicalDate `
         -Value $Metadata.applicable_trading_date `
         -Label 'local TW report metadata applicable date'
+    if ([string]$ReportLatest.published_at -ne [string]$Metadata.published_at) {
+        throw 'Local report latest pointer published_at mismatch'
+    }
     if (
         $ReportLatestSourceDate -ne $MetadataSourceDate -or
         $ReportLatestApplicableDate -ne $MetadataApplicableDate -or
@@ -994,15 +1018,19 @@ function Get-LocalObservationPointers {
                 source_date = $TargetDate
                 source_manifest = [string]$Dashboard.source_manifest
                 source_manifest_sha256 = [string]$Dashboard.source_manifest_sha256
+                generated_at = [string]$Dashboard.generated_at
                 path = [string]$Dashboard.path
                 sha256 = ([string]$Dashboard.sha256).ToLowerInvariant()
+                size = [long]$Dashboard.size
             }
         }
         reports_latest = [ordered]@{
             path = $ReportLatestInfo.path
+            latest_document = $ReportLatest
             identity = [ordered]@{
                 source_date = $TargetDate
                 applicable_trading_date = $ReportLatestApplicableDate.ToString('yyyy-MM-dd', $Invariant)
+                published_at = [string]$ReportLatest.published_at
                 source_manifest = [string]$Metadata.source_manifest
                 source_manifest_sha256 = ([string]$Metadata.source_manifest_sha256).ToLowerInvariant()
                 metadata = $MetadataRelative
@@ -1105,6 +1133,401 @@ function Assert-ObservationReportIndexCatchUpDelta {
         ) {
             throw 'Catch-up report index changed a captured entry'
         }
+    }
+}
+
+function Get-LocalObservationPromotionResume {
+    param(
+        [Parameter(Mandatory)]$Quant,
+        [Parameter(Mandatory)]$Candidate,
+        [Parameter(Mandatory)]$CapturedIndex
+    )
+
+    $PointerSpecs = @(
+        [pscustomobject]@{
+            name = 'dashboard'
+            path = Join-Path $DataRoot 'publish\dashboard\v1\latest-TW.json'
+            root = Join-Path $DataRoot 'publish\dashboard\v1'
+            date_property = 'observation_as_of'
+        },
+        [pscustomobject]@{
+            name = 'reports_latest'
+            path = Join-Path $DataRoot 'publish\reports\v2\latest-TW-post_close.json'
+            root = Join-Path $DataRoot 'publish\reports\v2'
+            date_property = 'source_market_date'
+        }
+    )
+    $ObservedPointer = $false
+    $TargetPointer = $false
+    foreach ($Spec in $PointerSpecs) {
+        if (-not [IO.File]::Exists($Spec.path)) {
+            continue
+        }
+        $ObservedPointer = $true
+        $Info = Read-JsonWithinRoot `
+            -Path $Spec.path `
+            -Root $Spec.root `
+            -MaximumBytes 100KB
+        $Date = ConvertTo-CanonicalDate `
+            -Value $Info.document.($Spec.date_property) `
+            -Label "local TW $($Spec.name) source date"
+        if ($Date -gt $ParsedTargetDate) {
+            throw "Local TW $($Spec.name) pointer is newer than TargetDate"
+        }
+        if ($Date -eq $ParsedTargetDate) {
+            $TargetPointer = $true
+        }
+    }
+    if (-not $ObservedPointer -or -not $TargetPointer) {
+        return $null
+    }
+
+    $LocalPointers = Get-LocalObservationPointers -Quant $Quant
+    Assert-ObservationReportIndexCatchUpDelta `
+        -CapturedIndex $CapturedIndex `
+        -LocalPointers $LocalPointers
+
+    $CandidateDashboardFile = $Candidate.manifest.files.'dashboard-snapshot.json'
+    $CandidateReportFile = $Candidate.manifest.files.'post-close-report-v2.json'
+    if (
+        $null -eq $CandidateDashboardFile -or
+        $null -eq $CandidateReportFile -or
+        [string]$CandidateDashboardFile.sha256 -notmatch '^[0-9a-f]{64}$' -or
+        [string]$CandidateReportFile.sha256 -notmatch '^[0-9a-f]{64}$'
+    ) {
+        throw 'Observation candidate file identities are invalid for resume'
+    }
+
+    $DashboardRoot = Assert-PathWithinRoot `
+        -Path (Join-Path $DataRoot 'publish\dashboard\v1') `
+        -Root $DataRoot
+    $DashboardObjectPath = Assert-PathWithinRoot `
+        -Path (Join-Path $DashboardRoot ([string]$LocalPointers.dashboard.identity.path).Replace('/', '\')) `
+        -Root $DashboardRoot
+    $DashboardObject = Read-JsonWithinRoot `
+        -Path $DashboardObjectPath `
+        -Root $DashboardRoot `
+        -MaximumBytes 5MB
+    if (
+        [string]$LocalPointers.dashboard.identity.sha256 -ne $DashboardObject.sha256 -or
+        [long]$LocalPointers.dashboard.identity.size -ne [long]$DashboardObject.size -or
+        [string]$LocalPointers.dashboard.identity.generated_at -ne
+            [string]$DashboardObject.document.generated_at -or
+        $DashboardObject.sha256 -ne ([string]$CandidateDashboardFile.sha256).ToLowerInvariant() -or
+        [long]$CandidateDashboardFile.size -ne [long]$DashboardObject.size -or
+        [string]$LocalPointers.dashboard.identity.generated_at -ne
+            [string]$Candidate.dashboard.generated_at -or
+        (Get-CanonicalJson -Value $DashboardObject.document) -ne
+            (Get-CanonicalJson -Value $Candidate.dashboard)
+    ) {
+        throw 'Local dashboard object does not match the observation candidate'
+    }
+
+    $ExpectedReportLatest = [ordered]@{
+        schema_version = 2
+        kind = 'absorb-report'
+        market = 'TW'
+        report_type = [string]$Candidate.report.report_type
+        source_market_date = [string]$Candidate.report.source_market_date
+        applicable_trading_date = [string]$Candidate.report.applicable_trading_date
+        published_at = [string]$Candidate.report.published_at
+        metadata = [string]$LocalPointers.reports_latest.identity.metadata
+        metadata_sha256 = [string]$LocalPointers.reports_latest.identity.metadata_sha256
+        product_mode = [string]$Candidate.report.product_mode
+    }
+    if (
+        (Get-CanonicalJson -Value $LocalPointers.reports_latest.latest_document) -ne
+            (Get-CanonicalJson -Value $ExpectedReportLatest)
+    ) {
+        throw 'Local report latest pointer does not match the observation candidate'
+    }
+
+    $ReportRoot = Assert-PathWithinRoot `
+        -Path (Join-Path $DataRoot 'publish\reports\v2') `
+        -Root $DataRoot
+    $MetadataInfo = Read-JsonWithinRoot `
+        -Path (Join-Path $ReportRoot ([string]$LocalPointers.reports_latest.identity.metadata).Replace('/', '\')) `
+        -Root $ReportRoot `
+        -MaximumBytes 5MB
+    $ProfessionalPointer = $MetadataInfo.document.professional_report
+    $ExpectedProfessionalPointerKeys = @(
+        'object', 'sha256', 'content_sha256', 'schema_version',
+        'generator_version', 'code_commit_sha'
+    )
+    if ($null -eq $ProfessionalPointer) {
+        throw 'Local report metadata is missing professional report binding'
+    }
+    $ProfessionalPointerHash = ([string]$ProfessionalPointer.sha256).ToLowerInvariant()
+    $ProfessionalObject = [string]$ProfessionalPointer.object
+    if (
+        (@($ProfessionalPointer.PSObject.Properties.Name | Sort-Object) -join '|') -ne
+            (@($ExpectedProfessionalPointerKeys | Sort-Object) -join '|') -or
+        $ProfessionalObject -notmatch '^objects/canonical/[0-9a-f]{64}\.json$' -or
+        $ProfessionalPointerHash -notmatch '^[0-9a-f]{64}$' -or
+        $ProfessionalObject -ne "objects/canonical/$ProfessionalPointerHash.json" -or
+        [int]$ProfessionalPointer.schema_version -ne 1 -or
+        ([string]$ProfessionalPointer.content_sha256) -notmatch '^[0-9a-f]{64}$' -or
+        ([string]$ProfessionalPointer.generator_version) -notmatch '^.{1,100}$' -or
+        ([string]$ProfessionalPointer.code_commit_sha) -notmatch '^[0-9a-f]{40}$'
+    ) {
+        throw 'Local professional report pointer is invalid'
+    }
+    $CanonicalInfo = Read-JsonWithinRoot `
+        -Path (Join-Path $ReportRoot $ProfessionalObject.Replace('/', '\')) `
+        -Root $ReportRoot `
+        -MaximumBytes 5MB
+    $CanonicalIdentity = $CanonicalInfo.document.identity
+    if (
+        $CanonicalInfo.sha256 -ne $ProfessionalPointerHash -or
+        [int]$CanonicalInfo.document.schema_version -ne 1 -or
+        [string]$CanonicalInfo.document.kind -ne 'absorb-professional-post-close-report' -or
+        $null -eq $CanonicalIdentity -or
+        [string]$CanonicalIdentity.market -ne 'TW' -or
+        [string]$CanonicalIdentity.source_market_date -ne $TargetDate -or
+        [string]$CanonicalIdentity.applicable_trading_date -ne
+            [string]$LocalPointers.reports_latest.identity.applicable_trading_date -or
+        [string]$CanonicalIdentity.source_manifest -ne
+            [string]$MetadataInfo.document.source_manifest -or
+        [string]$CanonicalIdentity.source_manifest_sha256 -ne
+            [string]$MetadataInfo.document.source_manifest_sha256 -or
+        [string]$CanonicalIdentity.content_sha256 -ne
+            [string]$ProfessionalPointer.content_sha256 -or
+        [string]$CanonicalIdentity.generator_version -ne
+            [string]$ProfessionalPointer.generator_version -or
+        [string]$CanonicalIdentity.code_commit_sha -ne
+            [string]$ProfessionalPointer.code_commit_sha
+    ) {
+        throw 'Local professional report object is not bound to report metadata'
+    }
+    $LocalReport = $MetadataInfo.document |
+        ConvertTo-Json -Depth 50 |
+        ConvertFrom-Json
+    $LocalContentHash = ([string]$LocalReport.content_sha256).ToLowerInvariant()
+    if ($LocalContentHash -notmatch '^[0-9a-f]{64}$') {
+        throw 'Local report metadata content hash is invalid'
+    }
+    $LocalReport.PSObject.Properties.Remove('professional_report')
+    if ($null -ne $LocalReport.PSObject.Properties['content_sha256']) {
+        $LocalReport.PSObject.Properties.Remove('content_sha256')
+    }
+    $CandidateReport = $Candidate.report |
+        ConvertTo-Json -Depth 50 |
+        ConvertFrom-Json
+    if ($null -ne $CandidateReport.PSObject.Properties['content_sha256']) {
+        $CandidateReport.PSObject.Properties.Remove('content_sha256')
+    }
+    if (
+        (Get-CanonicalJson -Value $LocalReport) -ne
+            (Get-CanonicalJson -Value $CandidateReport)
+    ) {
+        throw 'Local report metadata does not match the observation candidate'
+    }
+
+    $IndexInfo = Read-JsonWithinRoot `
+        -Path $LocalPointers.reports_index.path `
+        -Root $ReportRoot `
+        -MaximumBytes 1MB
+    $TargetEntries = @($IndexInfo.document.reports | Where-Object {
+        [string]$_.report_type -eq 'post_close' -and
+        [string]$_.product_mode -eq 'observation' -and
+        [string]$_.source_market_date -eq $TargetDate
+    })
+    $ExpectedTargetEntry = [ordered]@{
+        report_type = [string]$Candidate.report.report_type
+        source_market_date = [string]$Candidate.report.source_market_date
+        applicable_trading_date = [string]$Candidate.report.applicable_trading_date
+        published_at = [string]$Candidate.report.published_at
+        data_as_of = [string]$Candidate.report.data_as_of
+        model_versions = $Candidate.report.model_versions
+        title = [string]$Candidate.report.title
+        summary = $Candidate.report.summary
+        content_sha256 = $LocalContentHash
+        metadata = [string]$LocalPointers.reports_latest.identity.metadata
+        metadata_sha256 = [string]$LocalPointers.reports_latest.identity.metadata_sha256
+        product_mode = [string]$Candidate.report.product_mode
+    }
+    if (
+        $TargetEntries.Count -ne 1 -or
+        (Get-CanonicalJson -Value $TargetEntries[0]) -ne
+            (Get-CanonicalJson -Value $ExpectedTargetEntry)
+    ) {
+        throw 'Local report index content is not bound to the observation candidate'
+    }
+    Assert-LocalObservationFormalValidation `
+        -ReportRoot $ReportRoot `
+        -DashboardRoot $DashboardRoot `
+        -TargetDate $TargetDate `
+        -SourceManifest "quant/v1/$($Quant.manifest_relative)" `
+        -SourceManifestHash $Quant.manifest_sha256 `
+        -CandidatePath $Candidate.path
+    return $LocalPointers
+}
+
+function Assert-LocalObservationFormalValidation {
+    param(
+        [Parameter(Mandatory)][string]$ReportRoot,
+        [Parameter(Mandatory)][string]$DashboardRoot,
+        [Parameter(Mandatory)][string]$TargetDate,
+        [Parameter(Mandatory)][string]$SourceManifest,
+        [Parameter(Mandatory)][string]$SourceManifestHash,
+        [Parameter(Mandatory)][string]$CandidatePath
+    )
+
+    $ValidationCode = @'
+import hashlib
+import json
+import re
+import sys
+from pathlib import Path
+
+from reporting.professional_binding import validate_professional_report_binding
+from reporting.professional_schema import ProfessionalPostCloseReport
+from reporting.schemas import ReportMetadataV2
+from reporting.web import validate_report_index, validate_report_metadata
+from stock_papi.batch.observation_products import _read_observation_candidate
+
+report_root = Path(sys.argv[1])
+dashboard_root = Path(sys.argv[2])
+target_date = sys.argv[3]
+source_manifest = sys.argv[4]
+source_manifest_sha256 = sys.argv[5]
+candidate_path = Path(sys.argv[6])
+
+index = validate_report_index(
+    (report_root / "index-TW.json").read_bytes(), expected_version=2
+)
+target_entries = [
+    item
+    for item in index
+    if item.get("report_type") == "post_close"
+    and item.get("product_mode") == "observation"
+    and item.get("source_market_date") == target_date
+]
+if len(target_entries) != 1:
+    raise ValueError("formal local report index target is invalid")
+target_entry = target_entries[0]
+latest = json.loads(
+    (report_root / "latest-TW-post_close.json").read_text(encoding="utf-8")
+)
+expected_latest = {
+    "schema_version": 2,
+    "kind": "absorb-report",
+    "market": "TW",
+    "report_type": target_entry["report_type"],
+    "source_market_date": target_entry["source_market_date"],
+    "applicable_trading_date": target_entry["applicable_trading_date"],
+    "published_at": target_entry["published_at"],
+    "metadata": target_entry["metadata"],
+    "metadata_sha256": target_entry["metadata_sha256"],
+    "product_mode": target_entry["product_mode"],
+}
+if latest != expected_latest:
+    raise ValueError("formal local report latest binding is invalid")
+metadata_path = report_root / target_entry["metadata"]
+metadata = validate_report_metadata(
+    metadata_path.read_bytes(), target_entry, expected_version=2
+)
+if (
+    metadata.get("source_manifest") != source_manifest
+    or metadata.get("source_manifest_sha256") != source_manifest_sha256
+):
+    raise ValueError("formal local report source lineage is invalid")
+metadata_schema = ReportMetadataV2.from_document(metadata)
+pointer = metadata.get("professional_report")
+canonical_path = report_root / pointer["object"]
+canonical = ProfessionalPostCloseReport.from_document(
+    json.loads(canonical_path.read_text(encoding="utf-8"))
+)
+validate_professional_report_binding(
+    metadata=metadata_schema,
+    report=canonical,
+)
+
+latest_path = dashboard_root / "latest-TW.json"
+latest = json.loads(latest_path.read_text(encoding="utf-8"))
+expected_latest_keys = {
+    "schema_version", "kind", "product_mode", "market",
+    "observation_as_of", "generated_at", "source_manifest",
+    "source_manifest_sha256", "path", "sha256", "size",
+}
+if set(latest) != expected_latest_keys:
+    raise ValueError("formal local dashboard pointer keys are invalid")
+if (
+    latest.get("schema_version") != 2
+    or latest.get("kind") != "absorb-observation-dashboard"
+    or latest.get("product_mode") != "observation"
+    or latest.get("market") != "TW"
+    or latest.get("observation_as_of") != target_date
+    or latest.get("source_manifest") != source_manifest
+    or latest.get("source_manifest_sha256") != source_manifest_sha256
+    or re.fullmatch(r"objects/[0-9a-f]{64}\.json", str(latest.get("path"))) is None
+    or re.fullmatch(r"[0-9a-f]{64}", str(latest.get("sha256"))) is None
+    or latest.get("path") != f"objects/{latest['sha256']}.json"
+    or type(latest.get("size")) is not int
+    or not 0 < latest["size"] <= 5_000_000
+):
+    raise ValueError("formal local dashboard pointer is invalid")
+dashboard_bytes = (dashboard_root / latest["path"]).read_bytes()
+if (
+    len(dashboard_bytes) != latest["size"]
+    or hashlib.sha256(dashboard_bytes).hexdigest() != latest["sha256"]
+):
+    raise ValueError("formal local dashboard object hash is invalid")
+dashboard = json.loads(dashboard_bytes.decode("utf-8"))
+from stock_papi.batch.observation_products import validate_observation_dashboard
+
+validate_observation_dashboard(dashboard)
+if (
+    dashboard.get("observation_as_of") != latest["observation_as_of"]
+    or dashboard.get("generated_at") != latest["generated_at"]
+    or dashboard.get("source_manifest") != latest["source_manifest"]
+    or dashboard.get("source_manifest_sha256") != latest["source_manifest_sha256"]
+):
+    raise ValueError("formal local dashboard lineage is invalid")
+
+candidate = _read_observation_candidate(candidate_path)
+candidate_report = dict(candidate["post-close-report-v2.json"])
+candidate_report.pop("content_sha256", None)
+candidate_dashboard = candidate["dashboard-snapshot.json"]
+metadata_base = dict(metadata)
+metadata_base.pop("professional_report", None)
+metadata_base.pop("content_sha256", None)
+if metadata_base != candidate_report or dashboard != candidate_dashboard:
+    raise ValueError("formal local promotion candidate binding is invalid")
+expected_entry = {
+    "report_type": candidate_report["report_type"],
+    "source_market_date": candidate_report["source_market_date"],
+    "applicable_trading_date": candidate_report["applicable_trading_date"],
+    "published_at": candidate_report["published_at"],
+    "data_as_of": candidate_report["data_as_of"],
+    "model_versions": candidate_report["model_versions"],
+    "title": candidate_report["title"],
+    "summary": candidate_report["summary"],
+    "content_sha256": metadata["content_sha256"],
+    "metadata": target_entry["metadata"],
+    "metadata_sha256": target_entry["metadata_sha256"],
+    "product_mode": candidate_report["product_mode"],
+}
+if target_entry != expected_entry:
+    raise ValueError("formal local report index target binding is invalid")
+print(json.dumps({"mode": "validated", "content_sha256": metadata["content_sha256"]}))
+'@
+    $ValidationCodeBase64 = [Convert]::ToBase64String(
+        [Text.Encoding]::UTF8.GetBytes($ValidationCode)
+    )
+    $ValidationBootstrap = 'import base64,sys; code=sys.argv[1]; sys.argv=[sys.argv[0]]+sys.argv[2:]; exec(base64.b64decode(code))'
+    $Validation = Invoke-PythonJson -Arguments @(
+        '-c', $ValidationBootstrap,
+        $ValidationCodeBase64,
+        $ReportRoot,
+        $DashboardRoot,
+        $TargetDate,
+        $SourceManifest,
+        $SourceManifestHash,
+        $CandidatePath
+    )
+    if ([string]$Validation.mode -ne 'validated') {
+        throw 'Formal local observation validation did not pass'
     }
 }
 
@@ -1413,18 +1836,28 @@ try {
     $Candidate = Assert-ObservationCandidate `
         -CandidatePath $CandidatePath `
         -Quant $Quant
-    $PromoteArguments = @(
-        '-m', 'stock_papi.batch.observation_products_cli',
-        'promote',
-        '--root', $DataRoot,
-        '--candidate', $Candidate.path
-    )
-    [void](Invoke-PythonJson -Arguments $PromoteArguments)
-    $LocalPointers = Get-LocalObservationPointers -Quant $Quant
     $CapturedReportIndex = $LiveBefore | Where-Object { $_.name -eq 'reports-index' }
-    Assert-ObservationReportIndexCatchUpDelta `
-        -CapturedIndex $CapturedReportIndex.document `
-        -LocalPointers $LocalPointers
+    $LocalPointers = Get-LocalObservationPromotionResume `
+        -Quant $Quant `
+        -Candidate $Candidate `
+        -CapturedIndex $CapturedReportIndex.document
+    if ($null -ne $LocalPointers) {
+        $PromotionMode = 'resumed-existing-local-promotion'
+    }
+    else {
+        $PromoteArguments = @(
+            '-m', 'stock_papi.batch.observation_products_cli',
+            'promote',
+            '--root', $DataRoot,
+            '--candidate', $Candidate.path
+        )
+        [void](Invoke-PythonJson -Arguments $PromoteArguments)
+        $LocalPointers = Get-LocalObservationPointers -Quant $Quant
+        Assert-ObservationReportIndexCatchUpDelta `
+            -CapturedIndex $CapturedReportIndex.document `
+            -LocalPointers $LocalPointers
+        $PromotionMode = 'new-local-promotion'
+    }
 
     if ([string]$Contract.live.mode -ne 'publish') {
         throw 'Catch-up publish mode was not proven by the live contract'
@@ -1511,6 +1944,7 @@ try {
         normal_pipeline_validated = $true
         terminal_checkpoint_path = $TerminalCheckpoint.path
         candidate_path = $Candidate.path
+        local_promotion = $PromotionMode
         lkg_receipt = $LkgReceiptPath
         lkg_receipt_before_copy = $BeforeReceiptCopy
         pointers = @($LiveBefore | ForEach-Object { Convert-PointerEvidence $_ })
@@ -1592,6 +2026,7 @@ try {
         normal_pipeline_validated = $true
         terminal_checkpoint_path = $TerminalCheckpoint.path
         candidate_path = $Candidate.path
+        local_promotion = $PromotionMode
         lkg_receipt = $LkgReceiptPath
         lkg_receipt_before_copy = $BeforeReceiptCopy
         before = @($LiveBefore | ForEach-Object { Convert-PointerEvidence $_ })
