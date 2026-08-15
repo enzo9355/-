@@ -17,6 +17,20 @@ def _calendars(paths):
     )
 
 
+def _resolve_validation_date(args, today):
+    validation_date = args.source_validation_date
+    if validation_date is None:
+        return today
+    wall_clock_today = today or datetime.date.today()
+    if validation_date != args.source_market_date:
+        raise ValueError(
+            "source validation date must equal source market date"
+        )
+    if validation_date > wall_clock_today:
+        raise ValueError("source validation date cannot be in the future")
+    return validation_date
+
+
 def build(args, *, today=None):
     from reporting.cli import _load_industry_map
     from reporting.config import ReportConfig
@@ -92,11 +106,7 @@ def main(argv=None, *, today=None):
     promote.add_argument("--candidate", type=Path, required=True)
     args = parser.parse_args(argv)
     if args.command == "build":
-        validation_date = (
-            args.source_validation_date
-            if args.source_validation_date is not None
-            else today
-        )
+        validation_date = _resolve_validation_date(args, today)
         result = build(args, today=validation_date)
     else:
         from stock_papi.batch.observation_products import (

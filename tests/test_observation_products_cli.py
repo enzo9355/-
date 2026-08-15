@@ -10,6 +10,54 @@ from tests.test_batch_calendar import calendar_document
 
 
 class ObservationProductsCliTests(unittest.TestCase):
+    def test_build_rejects_validation_date_that_does_not_match_source_date(self):
+        from stock_papi.batch.observation_products_cli import main
+
+        arguments = [
+            "build",
+            "--source-market-date",
+            "2026-08-07",
+            "--source-validation-date",
+            "2026-08-06",
+            "--source-manifest",
+            "quant/v1/manifests/TW-20260807T000000Z-aaaaaaaaaaaa.json",
+            "--source-manifest-sha256",
+            "a" * 64,
+            "--calendar-artifact",
+            "calendar.json",
+        ]
+        with patch(
+            "stock_papi.batch.observation_products_cli.build"
+        ) as build, self.assertRaisesRegex(
+            ValueError, "must equal source market date"
+        ):
+            main(arguments, today=datetime.date(2026, 8, 15))
+        build.assert_not_called()
+
+    def test_build_rejects_validation_date_from_the_future(self):
+        from stock_papi.batch.observation_products_cli import main
+
+        arguments = [
+            "build",
+            "--source-market-date",
+            "2026-08-16",
+            "--source-validation-date",
+            "2026-08-16",
+            "--source-manifest",
+            "quant/v1/manifests/TW-20260816T000000Z-aaaaaaaaaaaa.json",
+            "--source-manifest-sha256",
+            "a" * 64,
+            "--calendar-artifact",
+            "calendar.json",
+        ]
+        with patch(
+            "stock_papi.batch.observation_products_cli.build"
+        ) as build, self.assertRaisesRegex(
+            ValueError, "cannot be in the future"
+        ):
+            main(arguments, today=datetime.date(2026, 8, 15))
+        build.assert_not_called()
+
     def test_build_without_validation_override_keeps_freshness_gate(self):
         from stock_papi.batch.observation_products_cli import main
 

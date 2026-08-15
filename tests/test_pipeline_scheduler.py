@@ -1,8 +1,47 @@
+import os
+import subprocess
+import sys
 import unittest
 from pathlib import Path
 
 
 class PipelineSchedulerTests(unittest.TestCase):
+    def test_historical_target_with_publish_fails_before_data_access(self):
+        script = (
+            Path(__file__).parents[1]
+            / "scripts"
+            / "run_tw_post_close_pipeline.ps1"
+        )
+        environment = os.environ.copy()
+        environment["ABSORB_PYTHON_EXE"] = sys.executable
+        completed = subprocess.run(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(script),
+                "-DataRoot",
+                r"D:\StockPapiData",
+                "-TargetDate",
+                "2026-08-07",
+                "-PublishObservation",
+            ],
+            cwd=str(script.parents[1]),
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        output = f"{completed.stdout}\n{completed.stderr}"
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn(
+            "Historical TargetDate cannot publish observation products",
+            output,
+        )
+
     def test_new_tasks_are_separate_resilient_limited_and_secret_free(self):
         scripts = Path(__file__).parents[1] / "scripts"
         script = (scripts / "install_pipeline_tasks.ps1").read_text(encoding="utf-8")
@@ -83,6 +122,22 @@ class PipelineSchedulerTests(unittest.TestCase):
         self.assertIn("$ExplicitTargetDate = $PSBoundParameters.ContainsKey('TargetDate')", post_close)
         self.assertIn("if ($ExplicitTargetDate)", post_close)
         self.assertIn("'--source-validation-date'", post_close)
+        self.assertIn(
+            "$HistoricalTargetDate = $ParsedTargetDate.Date -lt [DateTime]::Today",
+            post_close,
+        )
+        self.assertIn(
+            "if ($HistoricalTargetDate -and $PublishObservation)",
+            post_close,
+        )
+        self.assertIn(
+            "Historical TargetDate cannot publish observation products",
+            post_close,
+        )
+        self.assertLess(
+            post_close.index("$HistoricalTargetDate"),
+            post_close.index("calendar-check"),
+        )
         self.assertNotIn("AllowDegradedBootstrap", post_close)
         self.assertIn("-RequireDashboard", post_close)
         self.assertIn("$ParsedTargetDate.Year", post_close)
