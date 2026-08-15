@@ -74,6 +74,12 @@ def main(argv=None, *, today=None):
         type=datetime.date.fromisoformat,
         required=True,
     )
+    create.add_argument(
+        "--source-validation-date",
+        type=datetime.date.fromisoformat,
+        default=None,
+        help="Override the freshness validation date for an explicit historical run.",
+    )
     create.add_argument("--source-manifest", required=True)
     create.add_argument("--source-manifest-sha256", required=True)
     create.add_argument(
@@ -86,7 +92,12 @@ def main(argv=None, *, today=None):
     promote.add_argument("--candidate", type=Path, required=True)
     args = parser.parse_args(argv)
     if args.command == "build":
-        result = build(args, today=today)
+        validation_date = (
+            args.source_validation_date
+            if args.source_validation_date is not None
+            else today
+        )
+        result = build(args, today=validation_date)
     else:
         from stock_papi.batch.observation_products import (
             promote_observation_candidate,

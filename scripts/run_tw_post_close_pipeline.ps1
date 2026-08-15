@@ -23,6 +23,7 @@ try {
     )
 }
 catch { throw 'TargetDate must be YYYY-MM-DD' }
+$ExplicitTargetDate = $PSBoundParameters.ContainsKey('TargetDate')
 $Year = $ParsedTargetDate.Year
 $PrimaryCalendarPath = if ($env:TWSE_CALENDAR_ARTIFACT) {
     $env:TWSE_CALENDAR_ARTIFACT
@@ -197,6 +198,9 @@ $CandidateArguments = @(
 )
 foreach ($Path in $CalendarPaths) {
     $CandidateArguments += @('--calendar-artifact', $Path)
+}
+if ($ExplicitTargetDate) {
+    $CandidateArguments += @('--source-validation-date', $TargetDate)
 }
 $CandidateJson = (& $PythonExe @CandidateArguments | Out-String).Trim()
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
