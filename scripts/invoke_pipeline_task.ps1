@@ -31,8 +31,32 @@ $StatusPath = Join-Path $LogDirectory ("current-{0}.json" -f $Job)
 $PowerShellExe = (Get-Command powershell.exe -ErrorAction Stop).Source
 if (-not (Test-Path -LiteralPath $PowerShellExe -PathType Leaf)) { throw 'PowerShell executable was not found' }
 $Arguments = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $ScriptPath, '-DataRoot', $DataRoot) + $Definition.Arguments
+$ObservationWriterJobs = @(
+    'TW-PostClose',
+    'TW-PreMarket',
+    'WeeklyModel',
+    'ReportUploadRecovery'
+)
+$ObservationWriterMutexName = 'Global\ABSORB-TW-Observation-Writer'
+$ObservationWriterMutex = $null
+$ObservationWriterMutexHeld = $false
 
 try {
+    if ($ObservationWriterJobs -contains $Job) {
+        $ObservationWriterMutex = [Threading.Mutex]::new(
+            $false,
+            $ObservationWriterMutexName
+        )
+        try {
+            if (-not $ObservationWriterMutex.WaitOne(0)) {
+                throw 'Another TW observation writer is active'
+            }
+        }
+        catch [Threading.AbandonedMutexException] {
+            throw 'TW observation writer mutex was abandoned; refusing to run'
+        }
+        $ObservationWriterMutexHeld = $true
+    }
     $Result = Invoke-NativeProcessStreaming `
         -FilePath $PowerShellExe `
         -Arguments $Arguments `
@@ -53,4 +77,11 @@ try {
     @{ job = $Job; started_at = $StartedAt.ToString('o'); finished_at = [DateTimeOffset]::Now.ToString('o'); success = $false; exit_code = if ($ExitCode -is [int]) { $ExitCode } else { 1 }; error = $_.Exception.Message; log = $LogPath } |
         ConvertTo-Json -Compress | Set-Content -LiteralPath $StatusPath -Encoding utf8
     throw
+} finally {
+    if ($null -ne $ObservationWriterMutex) {
+        if ($ObservationWriterMutexHeld) {
+            try { $ObservationWriterMutex.ReleaseMutex() } catch { }
+        }
+        $ObservationWriterMutex.Dispose()
+    }
 }

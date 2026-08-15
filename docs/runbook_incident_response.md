@@ -37,6 +37,20 @@
 4. 依錯誤類別處理：schema 差異回到資料來源契約；雜湊不符重建批次；覆蓋率不足保留上一版本。
 5. 重新執行前必須通過 Quality Gate。
 
+## TW 最新已完成交易日追趕發布
+
+只有在正式 TW latest 落後、且需要補上「本地今日以前最新一個已完成交易日」時，才可使用專用入口：
+
+```powershell
+.\scripts\catch_up_latest_completed_session.ps1 `
+  -DataRoot 'D:\AbsorbData' `
+  -TargetDate 'YYYY-MM-DD'
+```
+
+入口會固定台北當地日期，驗證 TargetDate 是 TW 交易日且沒有更晚的已完成交易日；再以正常 post-close pipeline 的 child-process exit code 驗證 terminal checkpoint、以 exact manifest path/SHA 建立並 promote Observation candidate，確認 report index 只新增該 TargetDate 的 observation post-close entry，最後才 capture LKG 並交給既有 generation-precondition uploader。入口與會寫入 TW observation release 的 task wrappers 共用跨進程 writer mutex；若 live 已是相同 TargetDate 且 identity 完整一致，會在任何 local pipeline/promote 前以 no-op idempotent 路徑結束。不得把這個入口擴充成任意歷史回補，也不得在正常 `run_tw_post_close_pipeline.ps1` 上加 `-PublishObservation` 來繞過 historical guard。
+
+若四個 Observation pointer 日期不一致、已有 pending pointer journal、來源 manifest identity 不同、capture 前 generation 改變，或任何驗證／read-back 失敗，入口會停止；保留 LKG receipt、before evidence 與 pending journal 供人工 reconciliation，不得 fresh capture 重試或直接手動覆寫 latest。
+
 ## 自動或讀取端回滾事件
 
 1. 確認現行 manifest 是否可讀、SHA-256 是否相符、Cloud Run 是否已降級。
