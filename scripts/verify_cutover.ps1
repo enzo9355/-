@@ -8,13 +8,24 @@ param(
     [string]$ReleaseEvidencePath = 'release-evidence.json',
     [double]$MinimumCoverage = 0.95,
     [double]$MinimumFreeGB = 100,
+    [int]$MaximumMarketAgeDays = 7,
     [switch]$ObservationOnly,
     [string]$BaseUrl
 )
 
 $ErrorActionPreference = 'Stop'
+if ($Project -ne 'line-stock-bot-498908') { throw 'Project is not allowlisted' }
+if ($Bucket -ne 'line-stock-bot-498908-quant-snapshots') { throw 'Bucket is not allowlisted' }
+if ($Service -ne 'line-stock-bot') { throw 'Service is not allowlisted' }
+if ($Region -ne 'asia-east1') { throw 'Region is not allowlisted' }
+if ($DataRoot -notin @('D:\AbsorbData', 'D:\StockPapiData')) {
+    throw 'Data root is not allowlisted'
+}
+if ($MaximumMarketAgeDays -lt 0) { throw 'MaximumMarketAgeDays must not be negative' }
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $Checks = New-Object System.Collections.Generic.List[object]
+$CloudRunTrafficEvidence = $null
+$CloudRunActiveRevision = $null
 $Gcloud = Get-Command gcloud -ErrorAction SilentlyContinue
 $RequiredSecrets = @(
     'stock-papi-line-channel-access-token',
@@ -109,6 +120,36 @@ function Get-CloudRunService {
     ) | ConvertFrom-Json
 }
 
+function Get-CloudRunTrafficEvidence {
+    param([object]$ServiceInfo)
+
+    $ActiveTraffic = @(
+        $ServiceInfo.status.traffic |
+            Where-Object {
+                [int]$_.percent -eq 100 -and [string]$_.revisionName
+            }
+    )
+    if ($ActiveTraffic.Count -ne 1 -or -not [string]$ServiceInfo.status.url) {
+        throw 'Cloud Run traffic is not bound to one 100 percent revision and URL'
+    }
+    return [ordered]@{
+        revision = $ActiveTraffic[0].revisionName
+        percent = [int]$ActiveTraffic[0].percent
+        url = [string]$ServiceInfo.status.url
+    }
+}
+
+function Get-CloudRunRevision {
+    param([string]$Revision)
+
+    return Invoke-Gcloud @(
+        'run', 'revisions', 'describe', $Revision,
+        '--region', $Region,
+        '--project', $Project,
+        '--format=json'
+    ) | ConvertFrom-Json
+}
+
 function Test-BucketSecurity {
     $BucketInfo = Invoke-Gcloud @('storage', 'buckets', 'describe', "gs://$Bucket", '--format=json') |
         ConvertFrom-Json
@@ -147,10 +188,19 @@ function Test-BucketSecurity {
 
 function Test-CloudRunIdentity {
     $ServiceInfo = Get-CloudRunService
-    $ServiceAccount = [string]$ServiceInfo.spec.template.spec.serviceAccountName
-    if (-not $ServiceAccount) { $ServiceAccount = [string]$ServiceInfo.template.serviceAccount }
-    if (-not $ServiceAccount) { throw 'Cloud Run service account is missing' }
-    if (-not $ServiceInfo.status.latestReadyRevisionName) { throw 'Cloud Run has no ready revision' }
+    $TrafficEvidence = Get-CloudRunTrafficEvidence $ServiceInfo
+    $RevisionInfo = Get-CloudRunRevision ([string]$TrafficEvidence.revision)
+    $ReadyCondition = @(
+        $RevisionInfo.status.conditions |
+            Where-Object { $_.type -eq 'Ready' -and $_.status -eq 'True' }
+    )
+    if ($ReadyCondition.Count -ne 1) {
+        throw 'Cloud Run active traffic revision is not Ready'
+    }
+    $ServiceAccount = [string]$RevisionInfo.spec.serviceAccountName
+    if (-not $ServiceAccount) { throw 'Cloud Run active revision service account is missing' }
+    $script:CloudRunActiveRevision = $RevisionInfo
+    $script:CloudRunTrafficEvidence = $TrafficEvidence
     return $ServiceAccount
 }
 
@@ -202,15 +252,20 @@ function Test-MarketPointer {
     param([string]$Market, [string]$TemporaryRoot)
 
     $LatestUri = "gs://$Bucket/quant/v1/latest-$Market.json"
-    $LatestMetadata = Invoke-Gcloud @('storage', 'objects', 'describe', $LatestUri, '--format=json') |
-        ConvertFrom-Json
-    if ([string]$LatestMetadata.generation -notmatch '^\d+$') { throw 'Latest pointer has no GCS generation' }
-
-    $LatestPath = Join-Path $TemporaryRoot "latest-$Market.json"
-    Invoke-Gcloud @('storage', 'cp', '--quiet', $LatestUri, $LatestPath) | Out-Null
-    $Latest = Get-JsonFile $LatestPath
-    if ($Latest.schema_version -ne 2 -or $Latest.market -ne $Market) {
+    $LatestEvidence = Get-GcsJsonEvidence `
+        -Uri $LatestUri `
+        -TemporaryRoot $TemporaryRoot `
+        -Name "latest-$Market.json"
+    $Latest = $LatestEvidence.document
+    if (
+        -not (Test-ObservationJsonInteger $Latest.schema_version) -or
+        $Latest.schema_version -notin @(2, 3) -or
+        $Latest.market -ne $Market
+    ) {
         throw 'Latest pointer schema or market is invalid'
+    }
+    if ($Latest.schema_version -eq 3 -and $Market -ne 'TW') {
+        throw 'Manifest v3 is TW-only'
     }
     if ([string]$Latest.manifest -notmatch "^manifests/$Market-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}\.json$") {
         throw 'Latest manifest path is invalid'
@@ -218,20 +273,38 @@ function Test-MarketPointer {
     if ([string]$Latest.manifest_sha256 -notmatch '^[0-9a-f]{64}$') {
         throw 'Latest manifest hash is invalid'
     }
-
-    $ManifestPath = Join-Path $TemporaryRoot "manifest-$Market.json"
-    Invoke-Gcloud @('storage', 'cp', '--quiet', "gs://$Bucket/quant/v1/$($Latest.manifest)", $ManifestPath) | Out-Null
-    if ((Get-FileHash -LiteralPath $ManifestPath -Algorithm SHA256).Hash.ToLowerInvariant() -ne $Latest.manifest_sha256) {
-        throw 'Manifest SHA-256 mismatch'
+    if (-not $Latest.manifest.EndsWith(
+        "-$($Latest.manifest_sha256.Substring(0, 12)).json"
+    )) {
+        throw 'Latest manifest path is not hash-bound'
     }
-    $Manifest = Get-JsonFile $ManifestPath
-    if ($Manifest.schema_version -ne 2 -or $Manifest.market -ne $Market) {
+
+    $ManifestEvidence = Get-GcsJsonEvidence `
+        -Uri "gs://$Bucket/quant/v1/$($Latest.manifest)" `
+        -TemporaryRoot $TemporaryRoot `
+        -Name "manifest-$Market.json" `
+        -ExpectedSha256 ([string]$Latest.manifest_sha256)
+    $Manifest = $ManifestEvidence.document
+    if (
+        $Manifest.schema_version -ne $Latest.schema_version -or
+        $Manifest.market -ne $Market -or
+        [string]$Manifest.generated_at -ne [string]$Latest.generated_at
+    ) {
         throw 'Manifest schema or market is invalid'
     }
-    if ([double]$Manifest.coverage -lt $MinimumCoverage) {
-        throw 'Manifest coverage is below cutover threshold'
+    $FailureThreshold = if ($Market -eq 'TW') { 0.05 } else { 0.25 }
+    $ExpectedModelVersion = if ($Latest.schema_version -eq 3) {
+        'observation-source-v1'
+    } else {
+        ''
     }
-    return "$Market latest pointer and manifest are verified"
+    $Coverage = Get-ObservationManifestCoverage `
+        -Manifest $Manifest `
+        -ExpectedMarket $Market `
+        -FailureThreshold $FailureThreshold `
+        -MaximumMarketAgeDays $MaximumMarketAgeDays `
+        -ExpectedModelVersion $ExpectedModelVersion
+    return "$Market latest pointer and manifest are verified with coverage $Coverage"
 }
 
 function Test-LocalOperations {
@@ -312,7 +385,7 @@ function Get-ObservationEnvironment {
     param([object]$ServiceInfo)
 
     $Environment = @{}
-    foreach ($Entry in @($ServiceInfo.spec.template.spec.containers[0].env)) {
+    foreach ($Entry in @($ServiceInfo.spec.containers[0].env)) {
         if ($Entry.name -and $null -ne $Entry.value) {
             $Environment[[string]$Entry.name] = [string]$Entry.value
         }
@@ -321,8 +394,10 @@ function Get-ObservationEnvironment {
 }
 
 function Test-ObservationCloudRunEnvironment {
-    $ServiceInfo = Get-CloudRunService
-    $Environment = Get-ObservationEnvironment $ServiceInfo
+    if ($null -eq $CloudRunActiveRevision) {
+        throw 'Cloud Run active traffic revision was not captured'
+    }
+    $Environment = Get-ObservationEnvironment $CloudRunActiveRevision
     $Expected = [ordered]@{
         ABSORB_PREDICTION_MODE = 'research'
         ABSORB_OBSERVATION_ENABLED = 'true'
@@ -354,7 +429,8 @@ function Get-GcsJsonEvidence {
     param(
         [string]$Uri,
         [string]$TemporaryRoot,
-        [string]$Name
+        [string]$Name,
+        [string]$ExpectedSha256
     )
 
     $Metadata = Invoke-Gcloud @(
@@ -363,15 +439,40 @@ function Get-GcsJsonEvidence {
     if ([string]$Metadata.generation -notmatch '^\d+$') {
         throw "GCS object has no generation: $Uri"
     }
+    if (
+        [string]$Metadata.size -notmatch '^\d+$' -or
+        [long]$Metadata.size -le 0 -or
+        [long]$Metadata.size -gt 5MB
+    ) {
+        throw "GCS JSON object size is outside the allowlist: $Uri"
+    }
     $Path = Join-Path $TemporaryRoot $Name
-    Invoke-Gcloud @('storage', 'cp', '--quiet', $Uri, $Path) | Out-Null
+    $GenerationUri = "$Uri#$($Metadata.generation)"
+    Invoke-Gcloud @('storage', 'cp', '--quiet', $GenerationUri, $Path) | Out-Null
     $File = Get-Item -LiteralPath $Path
-    if ($File.Length -le 0) { throw "GCS object is empty: $Uri" }
+    if ($File.Length -ne [long]$Metadata.size) {
+        throw "GCS object size changed during read: $Uri"
+    }
+    $AfterMetadata = Invoke-Gcloud @(
+        'storage', 'objects', 'describe', $Uri, '--format=json'
+    ) | ConvertFrom-Json
+    if (
+        [string]$AfterMetadata.generation -ne [string]$Metadata.generation -or
+        [long]$AfterMetadata.size -ne [long]$Metadata.size
+    ) {
+        throw "GCS object generation changed during read: $Uri"
+    }
+    $Digest = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($ExpectedSha256 -and $Digest -ne $ExpectedSha256) {
+        throw "GCS object SHA-256 mismatch: $Uri"
+    }
     $Document = Get-JsonFile $Path
     return [pscustomobject]@{
         metadata = $Metadata
         path = $Path
         file = $File
+        sha256 = $Digest
+        generation = [string]$Metadata.generation
         document = $Document
     }
 }
@@ -389,6 +490,398 @@ function Assert-ObservationCapability {
     ) {
         throw 'Observation prediction capability is not fail-closed'
     }
+}
+
+function Test-ObservationJsonInteger {
+    param([object]$Value)
+
+    return $null -ne $Value -and ($Value -is [int] -or $Value -is [long])
+}
+
+function Test-ObservationJsonNumber {
+    param([object]$Value)
+
+    if (
+        $null -eq $Value -or
+        $Value -is [bool] -or
+        (
+            $Value -isnot [int] -and
+            $Value -isnot [long] -and
+            $Value -isnot [float] -and
+            $Value -isnot [double] -and
+            $Value -isnot [decimal]
+        )
+    ) {
+        return $false
+    }
+    $Number = [double]$Value
+    return -not [double]::IsNaN($Number) -and -not [double]::IsInfinity($Number)
+}
+
+function Test-ObservationIsoDate {
+    param([object]$Value)
+
+    return $Value -is [string] -and [string]$Value -match '^\d{4}-\d{2}-\d{2}$'
+}
+
+function Test-ObservationIsoTimestamp {
+    param([object]$Value)
+
+    if ($Value -is [DateTime]) { return $Value.Kind -eq [DateTimeKind]::Utc }
+    if ($Value -is [DateTimeOffset]) { return $true }
+    return $Value -is [string] -and [string]$Value -match
+        '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$'
+}
+
+function Test-ObservationMarketSymbol {
+    param(
+        [object]$Value,
+        [string]$Market
+    )
+
+    if ($Value -isnot [string]) { return $false }
+    $Symbol = [string]$Value
+    if ($Market -eq 'TW') {
+        return $Symbol -match '^\d{4,6}$'
+    }
+    return $Symbol.Length -le 10 -and
+        $Symbol -cmatch '^[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)?$'
+}
+
+function Get-ObservationManifestCoverage {
+    param(
+        [object]$Manifest,
+        [string]$ExpectedObservationAsOf,
+        [string]$ExpectedMarket = 'TW',
+        [double]$FailureThreshold = 0.05,
+        [int]$MaximumMarketAgeDays = 0,
+        [string]$ExpectedModelVersion = 'observation-source-v1'
+    )
+
+    if ($null -eq $Manifest) { throw 'Observation source manifest is empty' }
+    $RawSchemaVersion = $Manifest.schema_version
+    if (-not (Test-ObservationJsonInteger $RawSchemaVersion)) {
+        throw 'Observation source manifest schema is invalid'
+    }
+    $SchemaVersion = [long]$RawSchemaVersion
+    if ($SchemaVersion -notin @(2, 3) -or [string]$Manifest.market -ne $ExpectedMarket) {
+        throw 'Observation source manifest schema or market is invalid'
+    }
+    if ($SchemaVersion -eq 3 -and $ExpectedMarket -ne 'TW') {
+        throw 'Manifest v3 is TW-only'
+    }
+    if (
+        $Manifest.PSObject.Properties['sample_data'] -and
+        $Manifest.sample_data -ne $false
+    ) {
+        throw 'Observation source manifest contains sample data'
+    }
+
+    $SourceDate = if ($SchemaVersion -eq 3) {
+        if ($Manifest.PSObject.Properties['market_as_of']) {
+            throw 'Observation source manifest v3 contains legacy date field'
+        }
+        [string]$Manifest.target_market_date
+    } else {
+        [string]$Manifest.market_as_of
+    }
+    if (
+        -not (Test-ObservationIsoDate $SourceDate) -or
+        ($ExpectedObservationAsOf -and $SourceDate -ne $ExpectedObservationAsOf)
+    ) {
+        throw 'Observation source manifest date does not match the dashboard'
+    }
+    if (-not (Test-ObservationIsoTimestamp $Manifest.generated_at)) {
+        throw 'Observation source manifest generated_at is invalid'
+    }
+    if ($MaximumMarketAgeDays -gt 0) {
+        $SourceDateValue = [DateTime]::ParseExact(
+            $SourceDate,
+            'yyyy-MM-dd',
+            [Globalization.CultureInfo]::InvariantCulture
+        ).Date
+        $Today = [DateTime]::Today
+        if (
+            $SourceDateValue -gt $Today -or
+            ($Today - $SourceDateValue).TotalDays -gt $MaximumMarketAgeDays
+        ) {
+            throw 'Observation source manifest is stale or future-dated'
+        }
+    }
+    if ($SchemaVersion -eq 3 -and [string]$Manifest.observation_as_of -ne $SourceDate) {
+        throw 'Observation source manifest v3 observation date is invalid'
+    }
+
+    $RawCoverage = if ($SchemaVersion -eq 3) {
+        $Manifest.observation_coverage
+    } else {
+        $Manifest.coverage
+    }
+    if (-not (Test-ObservationJsonNumber $RawCoverage)) {
+        throw 'Observation source manifest coverage is invalid'
+    }
+    $Coverage = [double]$RawCoverage
+    if ($Coverage -lt $MinimumCoverage -or $Coverage -gt 1) {
+        throw 'Observation source manifest coverage is below the cutover threshold'
+    }
+
+    $RawUniverse = $Manifest.universe_count
+    $RawObserved = if ($SchemaVersion -eq 3) {
+        $Manifest.observation_count
+    } else {
+        $Manifest.symbol_count
+    }
+    $RawFailures = if ($SchemaVersion -eq 3) {
+        $Manifest.operational_failure_count
+    } else {
+        $Manifest.failure_count
+    }
+    foreach ($Name in @('universe_count', 'observed_count', 'failure_count')) {
+        $Value = switch ($Name) {
+            'universe_count' { $RawUniverse }
+            'observed_count' { $RawObserved }
+            'failure_count' { $RawFailures }
+        }
+        if (-not (Test-ObservationJsonInteger $Value) -or [long]$Value -lt 0) {
+            throw "Observation source manifest count is invalid: $Name"
+        }
+    }
+    $UniverseCount = [long]$RawUniverse
+    $ObservedCount = [long]$RawObserved
+    $FailureCount = [long]$RawFailures
+    if (
+        $UniverseCount -le 0 -or
+        $ObservedCount + $FailureCount -ne $UniverseCount -or
+        [math]::Abs($Coverage - ($ObservedCount / [double]$UniverseCount)) -gt 1e-12
+    ) {
+        throw 'Observation source manifest counts do not match coverage'
+    }
+
+    $SymbolProperties = if ($null -eq $Manifest.symbols) {
+        @()
+    } else {
+        @($Manifest.symbols.PSObject.Properties)
+    }
+    if ($SymbolProperties.Count -ne $ObservedCount) {
+        throw 'Observation source manifest symbol count is invalid'
+    }
+    $SymbolEntries = @{}
+    foreach ($Property in $SymbolProperties) {
+        $Symbol = [string]$Property.Name
+        $Entry = $Property.Value
+        if (
+            -not (Test-ObservationMarketSymbol $Symbol $ExpectedMarket) -or
+            $null -eq $Entry -or
+            $SymbolEntries.ContainsKey($Symbol)
+        ) {
+            throw 'Observation source manifest symbol entry is invalid'
+        }
+        $Sha = [string]$Entry.sha256
+        $ObjectPath = [string]$Entry.path
+        if (
+            $Sha -notmatch '^[0-9a-f]{64}$' -or
+            $ObjectPath -ne "objects/$Sha.json.gz" -or
+            $ObjectPath -notmatch '^objects/[0-9a-f]{64}\.json\.gz$' -or
+            -not [string]$Entry.model_version -or
+            ($ExpectedModelVersion -and
+                [string]$Entry.model_version -ne $ExpectedModelVersion) -or
+            -not (Test-ObservationIsoDate $Entry.as_of) -or
+            ($SchemaVersion -eq 2 -and [string]$Entry.as_of -ne $SourceDate) -or
+            -not (Test-ObservationJsonInteger $Entry.size) -or
+            -not (Test-ObservationJsonInteger $Entry.uncompressed_size) -or
+            [long]$Entry.size -le 0 -or
+            [long]$Entry.size -gt 5MB -or
+            [long]$Entry.uncompressed_size -le 0 -or
+            [long]$Entry.uncompressed_size -gt 20MB
+        ) {
+            throw "Observation source manifest symbol entry is invalid: $Symbol"
+        }
+        $SymbolEntries[$Symbol] = $Entry
+    }
+
+    if ($SchemaVersion -eq 2) {
+        if (
+            $null -eq $Manifest.PSObject.Properties['failed_symbols'] -or
+            -not (Test-ObservationJsonNumber $Manifest.failure_rate) -or
+            [double]$Manifest.failure_rate -lt 0 -or
+            [double]$Manifest.failure_rate -ge $FailureThreshold -or
+            [math]::Abs(
+                [double]$Manifest.failure_rate -
+                ($FailureCount / [double]$UniverseCount)
+            ) -gt 1e-12
+        ) {
+            throw 'Observation source manifest v2 failure rate is invalid'
+        }
+        $FailedSymbols = if ($null -eq $Manifest.failed_symbols) {
+            @()
+        } elseif ($Manifest.failed_symbols -is [string]) {
+            throw 'Observation source manifest v2 failed symbols are invalid'
+        } else {
+            @($Manifest.failed_symbols)
+        }
+        if ($FailedSymbols.Count -ne $FailureCount) {
+            throw 'Observation source manifest v2 failed symbol count is invalid'
+        }
+        $SeenFailed = @{}
+        foreach ($Symbol in $FailedSymbols) {
+            $Symbol = [string]$Symbol
+            if (
+                -not (Test-ObservationMarketSymbol $Symbol $ExpectedMarket) -or
+                $SeenFailed.ContainsKey($Symbol) -or
+                $SymbolEntries.ContainsKey($Symbol)
+            ) {
+                throw 'Observation source manifest v2 failed symbols are invalid'
+            }
+            $SeenFailed[$Symbol] = $true
+        }
+        return $Coverage
+    }
+
+    $ExpectedProperties = if ($null -eq $Manifest.expected_non_price_symbols) {
+        @()
+    } else {
+        @($Manifest.expected_non_price_symbols.PSObject.Properties)
+    }
+    $OperationalFailures = if ($null -eq $Manifest.operational_failed_symbols) {
+        @()
+    } elseif ($Manifest.operational_failed_symbols -is [string]) {
+        throw 'Observation source manifest v3 operational failures are invalid'
+    } else {
+        @($Manifest.operational_failed_symbols)
+    }
+    if (
+        $null -eq $Manifest.PSObject.Properties['expected_non_price_symbols'] -or
+        $null -eq $Manifest.PSObject.Properties['operational_failed_symbols']
+    ) {
+        throw 'Observation source manifest v3 partition fields are missing'
+    }
+    foreach ($Name in @(
+        'regular_price_symbol_count',
+        'expected_non_price_symbol_count',
+        'operational_failure_count',
+        'regular_price_denominator'
+    )) {
+        if (-not (Test-ObservationJsonInteger $Manifest.$Name) -or [long]$Manifest.$Name -lt 0) {
+            throw "Observation source manifest v3 count is invalid: $Name"
+        }
+    }
+    $RegularCount = [long]$Manifest.regular_price_symbol_count
+    $StatusCount = [long]$Manifest.expected_non_price_symbol_count
+    $RegularDenominator = [long]$Manifest.regular_price_denominator
+    if (
+        $StatusCount -ne $ExpectedProperties.Count -or
+        $FailureCount -ne $OperationalFailures.Count -or
+        $RegularCount + $StatusCount -ne $ObservedCount -or
+        $RegularDenominator -le 0 -or
+        $RegularDenominator -ne $UniverseCount - $StatusCount
+    ) {
+        throw 'Observation source manifest v3 partition counts are invalid'
+    }
+    if (
+        -not (Test-ObservationJsonNumber $Manifest.regular_price_coverage) -or
+        [double]$Manifest.regular_price_coverage -lt 0 -or
+        [double]$Manifest.regular_price_coverage -gt 1 -or
+        [math]::Abs(
+            [double]$Manifest.regular_price_coverage -
+            ($RegularCount / [double]$RegularDenominator)
+        ) -gt 1e-12
+    ) {
+        throw 'Observation source manifest v3 regular price coverage is invalid'
+    }
+    if (
+        -not (Test-ObservationJsonNumber $Manifest.operational_failure_rate) -or
+        [double]$Manifest.operational_failure_rate -lt 0 -or
+        [double]$Manifest.operational_failure_rate -ge 0.05 -or
+        [math]::Abs(
+            [double]$Manifest.operational_failure_rate -
+            ($FailureCount / [double]$UniverseCount)
+        ) -gt 1e-12
+    ) {
+        throw 'Observation source manifest v3 failure rate is invalid'
+    }
+
+    $ExpectedBySymbol = @{}
+    foreach ($Property in $ExpectedProperties) {
+        $Symbol = [string]$Property.Name
+        $Status = $Property.Value
+        if (
+            -not (Test-ObservationMarketSymbol $Symbol $ExpectedMarket) -or
+            $null -eq $Status -or
+            $ExpectedBySymbol.ContainsKey($Symbol) -or
+            [string]$Status.status -notin @(
+                'official_no_regular_trade',
+                'officially_suspended'
+            ) -or
+            [string]$Status.evidence_sha256 -notmatch '^[0-9a-f]{64}$' -or
+            [string]$Status.artifact_sha256 -notmatch '^[0-9a-f]{64}$' -or
+            -not (Test-ObservationIsoDate $Status.latest_regular_price_date)
+        ) {
+            throw "Observation source manifest v3 status entry is invalid: $Symbol"
+        }
+        $ExpectedBySymbol[$Symbol] = $Status
+    }
+    $SeenOperational = @{}
+    foreach ($RawSymbol in $OperationalFailures) {
+        $Symbol = [string]$RawSymbol
+        if (
+            -not (Test-ObservationMarketSymbol $Symbol $ExpectedMarket) -or
+            $SeenOperational.ContainsKey($Symbol) -or
+            $ExpectedBySymbol.ContainsKey($Symbol) -or
+            $SymbolEntries.ContainsKey($Symbol)
+        ) {
+            throw 'Observation source manifest v3 operational failures are invalid'
+        }
+        $SeenOperational[$Symbol] = $true
+    }
+
+    $RegularSeen = 0
+    $StatusSeen = 0
+    foreach ($Symbol in $SymbolEntries.Keys) {
+        $Entry = $SymbolEntries[$Symbol]
+        if (
+            [string]$Entry.observation_as_of -ne $SourceDate -or
+            -not (Test-ObservationIsoDate $Entry.latest_regular_price_date)
+        ) {
+            throw "Observation source manifest v3 symbol date is invalid: $Symbol"
+        }
+        $Kind = [string]$Entry.observation_kind
+        if ($Kind -eq 'regular_price') {
+            if (
+                $ExpectedBySymbol.ContainsKey($Symbol) -or
+                [string]$Entry.as_of -ne $SourceDate -or
+                [string]$Entry.latest_regular_price_date -ne $SourceDate -or
+                $Entry.PSObject.Properties['evidence_sha256']
+            ) {
+                throw "Observation source manifest v3 regular symbol is invalid: $Symbol"
+            }
+            $RegularSeen += 1
+            continue
+        }
+        if (
+            $Kind -notin @('official_no_regular_trade', 'officially_suspended') -or
+            -not $ExpectedBySymbol.ContainsKey($Symbol)
+        ) {
+            throw "Observation source manifest v3 status symbol is invalid: $Symbol"
+        }
+        $Expected = $ExpectedBySymbol[$Symbol]
+        if (
+            [string]$Entry.as_of -notmatch '^\d{4}-\d{2}-\d{2}$' -or
+            [string]$Entry.as_of -ge $SourceDate -or
+            [string]$Entry.latest_regular_price_date -ne [string]$Entry.as_of -or
+            [string]$Entry.evidence_sha256 -ne [string]$Expected.evidence_sha256 -or
+            [string]$Entry.sha256 -ne [string]$Expected.artifact_sha256 -or
+            [string]$Entry.latest_regular_price_date -ne
+                [string]$Expected.latest_regular_price_date -or
+            [string]$Expected.status -ne $Kind
+        ) {
+            throw "Observation source manifest v3 status binding is invalid: $Symbol"
+        }
+        $StatusSeen += 1
+    }
+    if ($RegularSeen -ne $RegularCount -or $StatusSeen -ne $StatusCount) {
+        throw 'Observation source manifest v3 symbol partition is invalid'
+    }
+    return $Coverage
 }
 
 function Test-ObservationDashboardPointer {
@@ -415,7 +908,8 @@ function Test-ObservationDashboardPointer {
     $ObjectEvidence = Get-GcsJsonEvidence `
         -Uri "gs://$Bucket/dashboard/v1/$($Latest.path)" `
         -TemporaryRoot $TemporaryRoot `
-        -Name 'observation-dashboard-object.json'
+        -Name 'observation-dashboard-object.json' `
+        -ExpectedSha256 ([string]$Latest.sha256)
     $Digest = (
         Get-FileHash -LiteralPath $ObjectEvidence.path -Algorithm SHA256
     ).Hash.ToLowerInvariant()
@@ -438,30 +932,46 @@ function Test-ObservationDashboardPointer {
     }
     Assert-ObservationCapability $Dashboard.prediction_capability
     Assert-ObservationNoPredictionKeys $Dashboard
+    foreach ($GateName in @(
+        'source_identity',
+        'source_schema',
+        'finite_json',
+        'sample_data',
+        'coverage',
+        'prediction_separation'
+    )) {
+        if ([string]$Dashboard.gates.$GateName -ne 'PASS') {
+            throw "Observation dashboard gate is not PASS: $GateName"
+        }
+    }
 
     $SourceManifest = [string]$Dashboard.source_manifest
+    $SourceManifestHash = [string]$Dashboard.source_manifest_sha256
     if (
         $SourceManifest -notmatch
         '^quant/v1/manifests/TW-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}\.json$' -or
-        [string]$Dashboard.source_manifest_sha256 -notmatch '^[0-9a-f]{64}$'
+        $SourceManifestHash -notmatch '^[0-9a-f]{64}$'
     ) {
         throw 'Observation dashboard source manifest identity is invalid'
+    }
+    if (-not $SourceManifest.EndsWith("-$($SourceManifestHash.Substring(0, 12)).json")) {
+        throw 'Observation dashboard source manifest path is not hash-bound'
     }
     $SourceEvidence = Get-GcsJsonEvidence `
         -Uri "gs://$Bucket/$SourceManifest" `
         -TemporaryRoot $TemporaryRoot `
-        -Name 'observation-source-manifest.json'
-    $SourceHash = (
-        Get-FileHash -LiteralPath $SourceEvidence.path -Algorithm SHA256
-    ).Hash.ToLowerInvariant()
+        -Name 'observation-source-manifest.json' `
+        -ExpectedSha256 $SourceManifestHash
+    $SourceCoverage = Get-ObservationManifestCoverage `
+        -Manifest $SourceEvidence.document `
+        -ExpectedObservationAsOf ([string]$Dashboard.observation_as_of) `
+        -MaximumMarketAgeDays $MaximumMarketAgeDays
     if (
-        $SourceHash -ne [string]$Dashboard.source_manifest_sha256 -or
-        [double]$SourceEvidence.document.coverage -lt $MinimumCoverage -or
-        $SourceEvidence.document.sample_data -eq $true
+        $SourceEvidence.sha256 -ne $SourceManifestHash
     ) {
-        throw 'Observation dashboard source manifest failed coverage, sample, or hash Gate'
+        throw 'Observation dashboard source manifest hash Gate failed'
     }
-    return "dashboard/v1/latest-TW.json generation $($LatestEvidence.metadata.generation) and immutable object are verified"
+    return "dashboard/v1/latest-TW.json generation $($LatestEvidence.metadata.generation), coverage $SourceCoverage and immutable object are verified"
 }
 
 function Test-ObservationReportPointers {
@@ -530,7 +1040,27 @@ function Test-ObservationReportPointers {
 
 function Test-ObservationHttp {
     $ServiceInfo = Get-CloudRunService
-    $Target = if ($BaseUrl) { $BaseUrl } else { [string]$ServiceInfo.status.url }
+    $TrafficEvidence = Get-CloudRunTrafficEvidence $ServiceInfo
+    $ServiceUrl = [string]$TrafficEvidence.url
+    if (
+        $CloudRunTrafficEvidence -and
+        (
+            [string]$CloudRunTrafficEvidence.revision -ne [string]$TrafficEvidence.revision -or
+            [int]$CloudRunTrafficEvidence.percent -ne [int]$TrafficEvidence.percent -or
+            [string]$CloudRunTrafficEvidence.url -ne $ServiceUrl
+        )
+    ) {
+        throw 'Cloud Run traffic revision or URL changed during verification'
+    }
+    if ($BaseUrl -and $BaseUrl.TrimEnd('/') -ne $ServiceUrl.TrimEnd('/')) {
+        throw 'BaseUrl does not match Cloud Run service URL'
+    }
+    $script:CloudRunTrafficEvidence = [ordered]@{
+        revision = $TrafficEvidence.revision
+        percent = $TrafficEvidence.percent
+        url = $TrafficEvidence.url
+    }
+    $Target = $ServiceUrl
     if (-not $Target) { throw 'Observation HTTP base URL is unavailable' }
     foreach ($Path in @(
         '/health',
@@ -564,6 +1094,15 @@ function Test-ObservationHttp {
             }
             Assert-ObservationNoPredictionKeys $Document
         }
+    }
+    $AfterServiceInfo = Get-CloudRunService
+    $AfterTrafficEvidence = Get-CloudRunTrafficEvidence $AfterServiceInfo
+    if (
+        [string]$AfterTrafficEvidence.revision -ne [string]$TrafficEvidence.revision -or
+        [int]$AfterTrafficEvidence.percent -ne [int]$TrafficEvidence.percent -or
+        [string]$AfterTrafficEvidence.url -ne [string]$TrafficEvidence.url
+    ) {
+        throw 'Cloud Run traffic or URL changed during HTTP smoke'
     }
     return "Observation HTTP smoke passed at $Target"
 }
@@ -642,6 +1181,14 @@ $Ready = @($Checks | Where-Object { $_.status -eq 'BLOCKED' }).Count -eq 0
     overall = if ($Ready) { 'READY' } else { 'BLOCKED' }
     mode = if ($ObservationOnly) { 'observation' } else { 'prediction' }
     checked_at = [DateTimeOffset]::UtcNow.ToString('o')
+    target = [ordered]@{
+        project = $Project
+        bucket = $Bucket
+        service = $Service
+        region = $Region
+        data_root = $DataRoot
+        cloud_run = $CloudRunTrafficEvidence
+    }
     checks = $Checks
 } | ConvertTo-Json -Depth 4
 
