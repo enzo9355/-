@@ -359,6 +359,29 @@ $root = {ps_literal(root)}
 $path = Join-Path $root 'new-evidence.json'
 Write-AtomicJson -Path $path -Root $root -Document ([ordered]@{{ kind = 'test'; value = 1 }})
 if (-not [IO.File]::Exists($path)) {{ throw 'new evidence file was not created' }}
+$existingFile = Join-Path $root 'existing-evidence.json'
+[IO.File]::WriteAllText($existingFile, 'original')
+$existingFileRejected = $false
+try {{
+    Write-AtomicJson -Path $existingFile -Root $root -Document ([ordered]@{{ kind = 'collision' }})
+}}
+catch {{
+    $existingFileRejected = $true
+}}
+if (-not $existingFileRejected) {{ throw 'existing evidence file was accepted' }}
+if ((Get-Content -LiteralPath $existingFile -Raw -Encoding utf8) -ne 'original') {{
+    throw 'existing evidence file was changed'
+}}
+$existingDirectory = Join-Path $root 'existing-evidence-directory'
+[IO.Directory]::CreateDirectory($existingDirectory) | Out-Null
+$existingDirectoryRejected = $false
+try {{
+    Write-AtomicJson -Path $existingDirectory -Root $root -Document ([ordered]@{{ kind = 'collision' }})
+}}
+catch {{
+    $existingDirectoryRejected = $true
+}}
+if (-not $existingDirectoryRejected) {{ throw 'existing evidence directory was accepted' }}
 Write-Output 'ATOMIC_NEW_PATH_OK'
 """
             harness_path = root / "harness.ps1"

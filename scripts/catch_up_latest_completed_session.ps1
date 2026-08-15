@@ -198,23 +198,44 @@ function Write-AtomicJson {
         throw 'Evidence path has no file name'
     }
     $Resolved = [IO.Path]::Combine($ResolvedParent, $Leaf)
-    if ([IO.File]::Exists($Resolved) -or [IO.Directory]::Exists($Resolved)) {
-        $Resolved = Assert-PathWithinRoot -Path $Resolved -Root $Root
+    try {
+        $TargetAttributes = [IO.File]::GetAttributes($Resolved)
+    }
+    catch [IO.FileNotFoundException] {
+        $TargetAttributes = $null
+    }
+    catch [IO.DirectoryNotFoundException] {
+        $TargetAttributes = $null
+    }
+    if ($null -ne $TargetAttributes) {
+        throw 'Evidence path already exists'
     }
     $Temporary = "$Resolved.tmp"
-    if ([IO.File]::Exists($Temporary)) {
-        throw 'Catch-up evidence temporary file already exists'
-    }
+    $TemporaryStream = $null
+    $TemporaryCreated = $false
     try {
-        [IO.File]::WriteAllText(
+        $TemporaryStream = [IO.File]::Open(
             $Temporary,
-            ($Document | ConvertTo-Json -Depth 20),
-            [Text.UTF8Encoding]::new($false)
+            [IO.FileMode]::CreateNew,
+            [IO.FileAccess]::Write,
+            [IO.FileShare]::None
         )
-        Move-Item -LiteralPath $Temporary -Destination $Resolved -Force
+        $TemporaryCreated = $true
+        $Bytes = [Text.UTF8Encoding]::new($false).GetBytes(
+            ($Document | ConvertTo-Json -Depth 20)
+        )
+        $TemporaryStream.Write($Bytes, 0, $Bytes.Length)
+        $TemporaryStream.Flush()
+        $TemporaryStream.Dispose()
+        $TemporaryStream = $null
+        [IO.File]::Move($Temporary, $Resolved)
+        $TemporaryCreated = $false
     }
     finally {
-        if ([IO.File]::Exists($Temporary)) {
+        if ($null -ne $TemporaryStream) {
+            $TemporaryStream.Dispose()
+        }
+        if ($TemporaryCreated -and [IO.File]::Exists($Temporary)) {
             [IO.File]::Delete($Temporary)
         }
     }
