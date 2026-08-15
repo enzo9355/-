@@ -178,10 +178,10 @@ class TWHistoryPersistenceTests(unittest.TestCase):
         self.assertIsNone(payload["daily"][0]["MA20"])
 
     def test_short_history_still_fails_closed_when_latest_is_not_calculated(self):
+        pipeline = self._pipeline(self._frame(22))
+        pipeline.calc_all = lambda data: calc_all(data, pd=pd, np=np).iloc[:-1]
         with self.assertRaisesRegex(ValueError, "calculated history is unavailable"):
-            local_quant.build_stock_snapshot(
-                self._pipeline(self._frame(19)), "TW", "2330"
-            )
+            local_quant.build_stock_snapshot(pipeline, "TW", "2330")
 
     def test_calculation_and_inference_mutation_cannot_overwrite_canonical_sources(self):
         frame = self._frame()

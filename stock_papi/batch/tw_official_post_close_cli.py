@@ -354,15 +354,17 @@ def _assert_complete(
         else None
     )
     regular_symbols = (
-        set(target_snapshot.price_by_symbol) if target_snapshot is not None else set()
+        set(target_snapshot.price_by_symbol) & universe
+        if target_snapshot is not None
+        else set()
     )
     status_symbols = (
-        set(target_snapshot.trading_status_by_symbol)
+        set(target_snapshot.trading_status_by_symbol) & universe
         if target_snapshot is not None
         else set()
     )
     terminated_symbols = (
-        set(target_snapshot.terminated_by_symbol)
+        set(target_snapshot.terminated_by_symbol) & universe
         if target_snapshot is not None
         else set()
     )
@@ -848,12 +850,12 @@ def _run_stage(
         applied_reconciliation_artifacts=applied_reconciliation_artifacts,
     )
     pending, excluded = _load_exclusion_state(root)
+    universe = {str(value) for value in symbols}
     target_snapshot = series.snapshots[target_market_date]
-    status_symbols = set(target_snapshot.trading_status_by_symbol)
+    status_symbols = set(target_snapshot.trading_status_by_symbol) & universe
+    terminated_symbols = set(target_snapshot.terminated_by_symbol) & universe
     operational_failures = (
-        pending
-        | excluded
-        | set(target_snapshot.terminated_by_symbol)
+        (set(pending) | set(excluded) | terminated_symbols) & universe
     ) - status_symbols
     if publish:
         local_quant.publish_market_snapshot(

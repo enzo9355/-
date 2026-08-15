@@ -1,3 +1,4 @@
+import hashlib
 import subprocess
 import tempfile
 import unittest
@@ -125,6 +126,77 @@ class ObservationReleaseScriptTests(unittest.TestCase):
             uploader,
         )
         self.assertIn("$Latest.product_mode -ne 'observation'", uploader)
+
+    def test_pointer_snapshot_binds_upload_bytes_to_validation_hash(self):
+        common = SCRIPTS / "observation_release_common.ps1"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "latest.json"
+            staging = root / "staging"
+            staging.mkdir()
+            source.write_bytes(b"validated-bytes")
+            expected = hashlib.sha256(source.read_bytes()).hexdigest()
+            powershell = r"C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe"
+
+            def quoted(path):
+                return str(path).replace("'", "''")
+
+            success = subprocess.run(
+                [
+                    powershell,
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-Command",
+                    (
+                        "$ErrorActionPreference='Stop'; "
+                        f". '{quoted(common)}'; "
+                        "$snapshot=New-VerifiedPointerSnapshot "
+                        f"-Source '{quoted(source)}' "
+                        f"-StagingRunPath '{quoted(staging)}' "
+                        f"-ExpectedSha256 '{expected}'; "
+                        "Write-Output $snapshot"
+                    ),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
+            self.assertEqual(success.returncode, 0, success.stderr)
+            snapshot = Path(success.stdout.strip().splitlines()[-1])
+            self.assertEqual(snapshot.read_bytes(), b"validated-bytes")
+            for path in staging.rglob("*"):
+                if path.is_file():
+                    path.chmod(0o600)
+
+            source.write_bytes(b"replaced-after-validation")
+            failure = subprocess.run(
+                [
+                    powershell,
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-Command",
+                    (
+                        "$ErrorActionPreference='Stop'; "
+                        f". '{quoted(common)}'; "
+                        "New-VerifiedPointerSnapshot "
+                        f"-Source '{quoted(source)}' "
+                        f"-StagingRunPath '{quoted(staging)}' "
+                        f"-ExpectedSha256 '{expected}'"
+                    ),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
+            self.assertNotEqual(failure.returncode, 0)
+            self.assertIn(
+                "changed during snapshot",
+                failure.stdout + failure.stderr,
+            )
 
     def test_lkg_capture_records_absent_or_hash_verified_previous_pointers(self):
         source = (SCRIPTS / "capture_observation_lkg.ps1").read_text(
