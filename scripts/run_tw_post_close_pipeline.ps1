@@ -24,6 +24,10 @@ try {
 }
 catch { throw 'TargetDate must be YYYY-MM-DD' }
 $ExplicitTargetDate = $PSBoundParameters.ContainsKey('TargetDate')
+$HistoricalTargetDate = $ParsedTargetDate.Date -lt [DateTime]::Today
+if ($HistoricalTargetDate -and $PublishObservation) {
+    throw 'Historical TargetDate cannot publish observation products'
+}
 $Year = $ParsedTargetDate.Year
 $PrimaryCalendarPath = if ($env:TWSE_CALENDAR_ARTIFACT) {
     $env:TWSE_CALENDAR_ARTIFACT
