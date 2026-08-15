@@ -1591,6 +1591,22 @@ class OfficialCompatFetcher:
         recovery = self._ensure_history_recovery(symbol)
         self._lineage_kind(symbol)
         status = self.status_for(symbol)
+        latest_regular_price_date = artifact.latest_date
+        if status is not None and persisted_daily is not None:
+            normalized_persisted_daily = self._normalized_persisted_daily(
+                persisted_daily
+            )
+            latest_regular_price_date = _parse_date(
+                normalized_persisted_daily[-1]["Date"]
+            )
+            if not (
+                artifact.latest_date
+                <= latest_regular_price_date
+                < self.target_date
+            ):
+                raise IncrementalHistoryError(
+                    "status lineage latest regular price date is invalid"
+                )
         lineage = {
             "source_mode": self.source_mode,
             "source_schema_version": self.source_schema_version,
@@ -1614,7 +1630,7 @@ class OfficialCompatFetcher:
             "latest_regular_price_date": (
                 self.target_date.isoformat()
                 if status is None
-                else artifact.latest_date.isoformat()
+                else latest_regular_price_date.isoformat()
             ),
             "observation_kind": (
                 status["status"] if status is not None else "regular_price"

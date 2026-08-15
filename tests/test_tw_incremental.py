@@ -437,6 +437,46 @@ class TWOfficialIncrementalTests(unittest.TestCase):
             lineage["trading_status_evidence_sha256"], status["evidence_sha256"]
         )
 
+    def test_status_lineage_uses_final_persisted_daily_latest_regular_date(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            write_artifact(temporary, daily=history())
+            fetcher = OfficialCompatFetcher(
+                Path(temporary), status_snapshot(), pd=pd
+            )
+            persisted_daily = history() + history(
+                date="2026-07-23T00:00:00.000"
+            )
+            lineage = fetcher.lineage_for(
+                "2330", persisted_daily=persisted_daily
+            )
+
+        self.assertEqual(
+            lineage["latest_regular_price_date"], "2026-07-23"
+        )
+
+    def test_status_lineage_rejects_invalid_final_persisted_daily_date(self):
+        cases = (
+            history() + target_history(),
+            history() + [
+                dict(
+                    target_history()[0],
+                    Date="2026-07-25T00:00:00.000",
+                )
+            ],
+            history(date="2026-07-21T00:00:00.000"),
+        )
+        for persisted_daily in cases:
+            with self.subTest(persisted_daily=persisted_daily):
+                with tempfile.TemporaryDirectory() as temporary:
+                    write_artifact(temporary, daily=history())
+                    fetcher = OfficialCompatFetcher(
+                        Path(temporary), status_snapshot(), pd=pd
+                    )
+                    with self.assertRaises(IncrementalHistoryError):
+                        fetcher.lineage_for(
+                            "2330", persisted_daily=persisted_daily
+                        )
+
     def test_snapshot_series_fills_each_missing_trading_session_in_order(self):
         with tempfile.TemporaryDirectory() as temporary:
             write_artifact(temporary, daily=history())
