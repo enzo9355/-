@@ -187,7 +187,20 @@ function Write-AtomicJson {
         [Parameter(Mandatory)]$Document
     )
 
-    $Resolved = Assert-PathWithinRoot -Path $Path -Root $Root
+    $Candidate = [IO.Path]::GetFullPath($Path)
+    $Parent = [IO.Path]::GetDirectoryName($Candidate)
+    if ([string]::IsNullOrWhiteSpace($Parent)) {
+        throw 'Evidence path has no parent directory'
+    }
+    $ResolvedParent = Assert-PathWithinRoot -Path $Parent -Root $Root
+    $Leaf = [IO.Path]::GetFileName($Candidate)
+    if ([string]::IsNullOrWhiteSpace($Leaf)) {
+        throw 'Evidence path has no file name'
+    }
+    $Resolved = [IO.Path]::Combine($ResolvedParent, $Leaf)
+    if ([IO.File]::Exists($Resolved) -or [IO.Directory]::Exists($Resolved)) {
+        $Resolved = Assert-PathWithinRoot -Path $Resolved -Root $Root
+    }
     $Temporary = "$Resolved.tmp"
     if ([IO.File]::Exists($Temporary)) {
         throw 'Catch-up evidence temporary file already exists'

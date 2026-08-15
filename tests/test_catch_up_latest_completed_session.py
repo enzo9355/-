@@ -324,6 +324,68 @@ Write-Output 'DELTA_HARNESS_OK'
         )
         self.assertIn("DELTA_HARNESS_OK", completed.stdout)
 
+    def test_atomic_evidence_writer_accepts_a_new_path(self):
+        powershell = shutil.which("powershell.exe")
+        if powershell is None:
+            self.skipTest("Windows PowerShell is unavailable")
+        source_path = self.SCRIPT.resolve()
+        common_path = (self.SCRIPT.parent / "observation_release_common.ps1").resolve()
+
+        def ps_literal(value):
+            return "'" + str(value).replace("'", "''") + "'"
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            harness = f"""
+$ErrorActionPreference = 'Stop'
+. {ps_literal(common_path)}
+$source = [IO.File]::ReadAllText({ps_literal(source_path)})
+$tokens = $null
+$errors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseInput(
+    $source,
+    [ref]$tokens,
+    [ref]$errors
+)
+$function = $ast.Find({{
+    param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -eq 'Write-AtomicJson'
+}}, $true)
+if ($null -eq $function) {{ throw 'function not found: Write-AtomicJson' }}
+. ([scriptblock]::Create($function.Extent.Text))
+$root = {ps_literal(root)}
+[IO.Directory]::CreateDirectory($root) | Out-Null
+$path = Join-Path $root 'new-evidence.json'
+Write-AtomicJson -Path $path -Root $root -Document ([ordered]@{{ kind = 'test'; value = 1 }})
+if (-not [IO.File]::Exists($path)) {{ throw 'new evidence file was not created' }}
+Write-Output 'ATOMIC_NEW_PATH_OK'
+"""
+            harness_path = root / "harness.ps1"
+            harness_path.write_text(harness, encoding="utf-8")
+            completed = subprocess.run(
+                [
+                    powershell,
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    str(harness_path),
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+            )
+        self.assertEqual(
+            completed.returncode,
+            0,
+            msg=f"PowerShell harness failed: {completed.stdout}\n{completed.stderr}",
+        )
+        self.assertIn("ATOMIC_NEW_PATH_OK", completed.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()
