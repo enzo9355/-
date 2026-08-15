@@ -609,6 +609,7 @@ function Get-RemotePointer {
         $Identity = [ordered]@{
             source_date = $EffectiveDate.ToString('yyyy-MM-dd', $Invariant)
             applicable_trading_date = $PointerApplicableDate.ToString('yyyy-MM-dd', $Invariant)
+            published_at = [string]$Document.published_at
             source_manifest = [string]$Metadata.source_manifest
             source_manifest_sha256 = ([string]$Metadata.source_manifest_sha256).ToLowerInvariant()
             metadata = $MetadataRelative
