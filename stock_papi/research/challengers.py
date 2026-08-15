@@ -313,18 +313,50 @@ def _default_direction_factory():
 
 
 def run_direction_lightgbm(frame, plan, *, model_factory=None):
+    return run_feature_challenger(
+        frame,
+        plan,
+        features=DIRECTION_FEATURES,
+        model_factory=model_factory,
+        name="direction_lightgbm",
+    )
+
+
+def run_feature_challenger(
+    frame,
+    plan,
+    *,
+    features,
+    model_factory=None,
+    name="feature_challenger",
+):
+    """Run the existing purged walk-forward classifier on an explicit schema.
+
+    The production direction model continues to call this with
+    ``DIRECTION_FEATURES``. TEJ callers pass a separate feature tuple, so the
+    baseline schema is not modified implicitly.
+    """
+
+    features = tuple(features or ())
+    if not features or any(feature not in frame.columns for feature in features):
+        return {
+            "name": name,
+            "status": "NOT_RUN",
+            "reason": "explicit challenger feature schema is unavailable",
+            "dependencies": list(features),
+        }
     factory = model_factory or _default_direction_factory
     try:
         return _run_classifier(
             frame,
             plan,
-            name="direction_lightgbm",
-            features=DIRECTION_FEATURES,
+            name=name,
+            features=features,
             model_factory=factory,
         )
     except RuntimeError as exc:
         return {
-            "name": "direction_lightgbm",
+            "name": name,
             "status": "NOT_RUN",
             "reason": str(exc),
             "dependencies": ["lightgbm"],
