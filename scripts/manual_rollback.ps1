@@ -38,14 +38,17 @@ if ($PSCmdlet.ParameterSetName -eq 'Observation') {
         $GcloudPath = (Get-Command gcloud -ErrorAction Stop).Source
         $PreviousPythonPath = $env:PYTHONPATH
         $PreviousWhatIfPreference = $WhatIfPreference
+        $PreviousErrorActionPreference = $ErrorActionPreference
         try {
             $WhatIfPreference = $false
+            $ErrorActionPreference = 'SilentlyContinue'
             $env:PYTHONPATH = $null
             $Output = & $GcloudPath @Arguments 2>&1
             $ExitCode = $LASTEXITCODE
         } finally {
             $env:PYTHONPATH = $PreviousPythonPath
             $WhatIfPreference = $PreviousWhatIfPreference
+            $ErrorActionPreference = $PreviousErrorActionPreference
         }
         if ($ExitCode -ne 0) {
             throw "gcloud command failed with exit code ${ExitCode}: $($Output | Out-String)"
@@ -124,6 +127,80 @@ if ($PSCmdlet.ParameterSetName -eq 'Observation') {
         throw 'Observation previous_traffic specification mismatch'
     }
 
+    function Restore-ObservationCandidateTraffic {
+        param([string]$CandidateRevision)
+
+        $CandidateTrafficSpec = "$CandidateRevision=100"
+        Invoke-ObservationGcloud @(
+            'run', 'services', 'update-traffic', $Service,
+            '--project', $Project,
+            '--region', $Region,
+            "--to-revisions=$CandidateTrafficSpec",
+            '--quiet'
+        ) | Out-Null
+        $After = Invoke-ObservationGcloud @(
+            'run', 'services', 'describe', $Service,
+            '--project', $Project,
+            '--region', $Region,
+            '--format=json'
+        ) | ConvertFrom-Json
+        $CandidateActive = @(
+            $After.status.traffic |
+                Where-Object {
+                    $_.revisionName -eq $CandidateRevision -and
+                    [int]$_.percent -eq 100
+                }
+        )
+        if ($CandidateActive.Count -ne 1) {
+            throw 'Observation candidate traffic compensation failed'
+        }
+    }
+
+    function Write-ObservationRecoveryReceipt {
+        param(
+            [string]$PointerErrorType,
+            [bool]$TrafficCompensated,
+            [string]$TrafficCompensationErrorType
+        )
+
+        $RecoveryPath = Join-Path `
+            $ReceiptRoot `
+            ('manual-rollback-recovery-' + [Guid]::NewGuid().ToString('N') + '.json')
+        $TemporaryRecoveryPath = "$RecoveryPath.tmp"
+        $Recovery = [ordered]@{
+            schema_version = 1
+            kind = 'absorb-observation-manual-rollback-recovery'
+            created_at = [DateTimeOffset]::UtcNow.ToString('o')
+            project = $Project
+            service = $Service
+            region = $Region
+            bucket = $Bucket
+            deployment_receipt = $ResolvedDeploymentReceipt
+            observation_lkg_receipt = $LkgReceipt
+            candidate_revision = [string]$Deployment.candidate_revision
+            previous_traffic = $PreviousTraffic
+            pointer_rollback_attempted = $true
+            pointer_error_type = $PointerErrorType
+            traffic_compensation = if ($TrafficCompensated) { 'restored_candidate' } else { 'blocked' }
+            traffic_compensation_error_type = $TrafficCompensationErrorType
+            next_action = 'Reconcile Cloud Run traffic and Observation pointers from this receipt before retrying rollback'
+        }
+        try {
+            [IO.File]::WriteAllText(
+                $TemporaryRecoveryPath,
+                ($Recovery | ConvertTo-Json -Depth 8),
+                [Text.UTF8Encoding]::new($false)
+            )
+            Move-Item -LiteralPath $TemporaryRecoveryPath -Destination $RecoveryPath -Force
+        } catch {
+            if (Test-Path -LiteralPath $TemporaryRecoveryPath) {
+                Remove-Item -LiteralPath $TemporaryRecoveryPath -Force
+            }
+            throw
+        }
+        return $RecoveryPath
+    }
+
     $Current = Invoke-ObservationGcloud @(
         'run', 'services', 'describe', $Service,
         '--project', $Project,
@@ -149,37 +226,65 @@ if ($PSCmdlet.ParameterSetName -eq 'Observation') {
     }
 
     $StartedAt = [DateTimeOffset]::UtcNow
-    Invoke-ObservationGcloud @(
-        'run', 'services', 'update-traffic', $Service,
-        '--project', $Project,
-        '--region', $Region,
-        "--to-revisions=$PreviousTrafficSpec",
-        '--quiet'
-    ) | Out-Null
-    $AfterTraffic = Invoke-ObservationGcloud @(
-        'run', 'services', 'describe', $Service,
-        '--project', $Project,
-        '--region', $Region,
-        '--format=json'
-    ) | ConvertFrom-Json
-    foreach ($Expected in $PreviousTraffic) {
-        $Match = @(
-            $AfterTraffic.status.traffic |
-                Where-Object {
-                    $_.revisionName -eq [string]$Expected['revision'] -and
-                    [int]$_.percent -eq [int]$Expected['percent']
-                }
-        )
-        if ($Match.Count -ne 1) {
-            throw "Observation Cloud Run traffic rollback verification failed: $($Expected['revision'])"
+    $TrafficChanged = $false
+    $PointerRestored = $false
+    try {
+        $TrafficChanged = $true
+        Invoke-ObservationGcloud @(
+            'run', 'services', 'update-traffic', $Service,
+            '--project', $Project,
+            '--region', $Region,
+            "--to-revisions=$PreviousTrafficSpec",
+            '--quiet'
+        ) | Out-Null
+        $AfterTraffic = Invoke-ObservationGcloud @(
+            'run', 'services', 'describe', $Service,
+            '--project', $Project,
+            '--region', $Region,
+            '--format=json'
+        ) | ConvertFrom-Json
+        foreach ($Expected in $PreviousTraffic) {
+            $Match = @(
+                $AfterTraffic.status.traffic |
+                    Where-Object {
+                        $_.revisionName -eq [string]$Expected['revision'] -and
+                        [int]$_.percent -eq [int]$Expected['percent']
+                    }
+            )
+            if ($Match.Count -ne 1) {
+                throw "Observation Cloud Run traffic rollback verification failed: $($Expected['revision'])"
+            }
         }
-    }
 
-    $PointerResult = & (Join-Path $PSScriptRoot 'rollback_observation.ps1') `
-        -ReceiptPath $LkgReceipt `
-        -DataRoot $DataRoot `
-        -Bucket $Bucket `
-        -Confirm:$false
+        $PointerResult = & (Join-Path $PSScriptRoot 'rollback_observation.ps1') `
+            -ReceiptPath $LkgReceipt `
+            -DataRoot $DataRoot `
+            -Bucket $Bucket `
+            -Confirm:$false
+        $PointerRestored = $true
+    } catch {
+        if ($TrafficChanged -and -not $PointerRestored) {
+            $PointerErrorType = $_.Exception.GetType().Name
+            $TrafficCompensated = $false
+            $TrafficCompensationErrorType = $null
+            try {
+                Restore-ObservationCandidateTraffic `
+                    -CandidateRevision ([string]$Deployment.candidate_revision)
+                $TrafficCompensated = $true
+            } catch {
+                $TrafficCompensationErrorType = $_.Exception.GetType().Name
+            }
+            $RecoveryPath = Write-ObservationRecoveryReceipt `
+                -PointerErrorType $PointerErrorType `
+                -TrafficCompensated $TrafficCompensated `
+                -TrafficCompensationErrorType $TrafficCompensationErrorType
+            if ($TrafficCompensated) {
+                throw "Observation pointer rollback failed; candidate traffic was restored. Recovery receipt: $RecoveryPath"
+            }
+            throw "Observation rollback is blocked; traffic compensation failed. Recovery receipt: $RecoveryPath"
+        }
+        throw
+    }
     $ElapsedSeconds = (
         [DateTimeOffset]::UtcNow - $StartedAt
     ).TotalSeconds
@@ -206,12 +311,15 @@ function Invoke-Gcloud {
     param([string[]]$Arguments)
 
     $PreviousPythonPath = $env:PYTHONPATH
+    $PreviousErrorActionPreference = $ErrorActionPreference
     try {
+        $ErrorActionPreference = 'SilentlyContinue'
         $env:PYTHONPATH = $null
         $Output = & $Gcloud @Arguments 2>&1
         $ExitCode = $LASTEXITCODE
     } finally {
         $env:PYTHONPATH = $PreviousPythonPath
+        $ErrorActionPreference = $PreviousErrorActionPreference
     }
     if ($ExitCode -ne 0) {
         throw "gcloud command failed with exit code ${ExitCode}: $($Output | Out-String)"
@@ -235,6 +343,356 @@ function Download-Object {
     Invoke-Gcloud @('storage', 'cp', '--quiet', $Source, $Destination) | Out-Null
 }
 
+function Test-JsonInteger {
+    param([object]$Value)
+
+    return $null -ne $Value -and ($Value -is [int] -or $Value -is [long])
+}
+
+function Test-JsonNumber {
+    param([object]$Value)
+
+    if (
+        $null -eq $Value -or
+        $Value -is [bool] -or
+        (
+            $Value -isnot [int] -and
+            $Value -isnot [long] -and
+            $Value -isnot [float] -and
+            $Value -isnot [double] -and
+            $Value -isnot [decimal]
+        )
+    ) {
+        return $false
+    }
+    $Number = [double]$Value
+    return -not [double]::IsNaN($Number) -and -not [double]::IsInfinity($Number)
+}
+
+function Test-IsoDate {
+    param([object]$Value)
+
+    return $Value -is [string] -and [string]$Value -match '^\d{4}-\d{2}-\d{2}$'
+}
+
+function Test-IsoTimestamp {
+    param([object]$Value)
+
+    if ($Value -is [DateTime]) { return $Value.Kind -eq [DateTimeKind]::Utc }
+    if ($Value -is [DateTimeOffset]) { return $true }
+    return $Value -is [string] -and [string]$Value -match
+        '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$'
+}
+
+function Test-MarketSymbol {
+    param(
+        [object]$Value,
+        [string]$Market
+    )
+
+    if ($Value -isnot [string]) { return $false }
+    $Symbol = [string]$Value
+    if ($Market -eq 'TW') {
+        return $Symbol -match '^\d{4,6}$'
+    }
+    return $Symbol.Length -le 10 -and
+        $Symbol -cmatch '^[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)?$'
+}
+
+function Assert-QuantManifest {
+    param(
+        [object]$Manifest,
+        [string]$Market
+    )
+
+    if (
+        $null -eq $Manifest -or
+        -not (Test-JsonInteger $Manifest.schema_version) -or
+        $Manifest.schema_version -notin @(2, 3) -or
+        $Manifest.market -ne $Market
+    ) {
+        throw 'LKG manifest schema or market is invalid'
+    }
+    if ($Manifest.schema_version -eq 3 -and $Market -ne 'TW') {
+        throw 'Manifest v3 is TW-only'
+    }
+    if (
+        -not (Test-IsoTimestamp $Manifest.generated_at) -or
+        $Manifest.PSObject.Properties['sample_data'] -and
+        $Manifest.sample_data -ne $false
+    ) {
+        throw 'LKG manifest lacks point-in-time metadata'
+    }
+    if (
+        $null -eq $Manifest.PSObject.Properties['symbols'] -or
+        $Manifest.schema_version -eq 2 -and
+        -not (Test-IsoDate $Manifest.market_as_of)
+    ) {
+        throw 'LKG manifest point-in-time or symbols metadata is invalid'
+    }
+
+    $SymbolProperties = if ($null -eq $Manifest.symbols) {
+        @()
+    } else {
+        @($Manifest.symbols.PSObject.Properties)
+    }
+    if ($Manifest.schema_version -eq 2) {
+        $FailureThreshold = if ($Market -eq 'TW') { 0.05 } else { 0.25 }
+        if (
+            -not (Test-JsonInteger $Manifest.universe_count) -or
+            -not (Test-JsonInteger $Manifest.symbol_count) -or
+            -not (Test-JsonInteger $Manifest.failure_count) -or
+            [long]$Manifest.universe_count -lt 1 -or
+            [long]$Manifest.symbol_count -lt 1 -or
+            [long]$Manifest.symbol_count -ne $SymbolProperties.Count -or
+            [long]$Manifest.failure_count -ne
+                ([long]$Manifest.universe_count - [long]$Manifest.symbol_count) -or
+            [long]$Manifest.failure_count -lt 0 -or
+            -not (Test-JsonNumber $Manifest.coverage) -or
+            [double]$Manifest.coverage -lt 0.95 -or
+            [double]$Manifest.coverage -gt 1 -or
+            [math]::Abs(
+                [double]$Manifest.coverage -
+                ([long]$Manifest.symbol_count / [double]$Manifest.universe_count)
+            ) -gt 1e-12 -or
+            -not (Test-JsonNumber $Manifest.failure_rate) -or
+            [double]$Manifest.failure_rate -lt 0 -or
+            [double]$Manifest.failure_rate -ge $FailureThreshold -or
+            [math]::Abs(
+                [double]$Manifest.failure_rate -
+                ([long]$Manifest.failure_count / [double]$Manifest.universe_count)
+            ) -gt 1e-12
+        ) {
+            throw 'LKG manifest v2 arithmetic or coverage is invalid'
+        }
+        if ($null -eq $Manifest.PSObject.Properties['failed_symbols']) {
+            throw 'LKG manifest failed symbols are missing'
+        }
+        $FailedSymbols = if ($null -eq $Manifest.failed_symbols) {
+            @()
+        } elseif ($Manifest.failed_symbols -is [string]) {
+            throw 'LKG manifest failed symbols are invalid'
+        } else {
+            @($Manifest.failed_symbols)
+        }
+        if ($FailedSymbols.Count -ne [long]$Manifest.failure_count) {
+            throw 'LKG manifest failed symbol count is invalid'
+        }
+        $SeenFailed = @{}
+        foreach ($RawSymbol in $FailedSymbols) {
+            $Symbol = [string]$RawSymbol
+            if (
+                -not (Test-MarketSymbol $Symbol $Market) -or
+                $SeenFailed.ContainsKey($Symbol) -or
+                @($SymbolProperties | Where-Object { $_.Name -eq $Symbol }).Count -ne 0
+            ) {
+                throw 'LKG manifest failed symbols are invalid'
+            }
+            $SeenFailed[$Symbol] = $true
+        }
+        $SeenSymbols = @{}
+        foreach ($Property in $SymbolProperties) {
+            $Symbol = [string]$Property.Name
+            $Entry = $Property.Value
+            $Sha = [string]$Entry.sha256
+            if (
+                -not (Test-MarketSymbol $Symbol $Market) -or
+                $null -eq $Entry -or
+                $Sha -notmatch '^[0-9a-f]{64}$' -or
+                [string]$Entry.path -ne "objects/$Sha.json.gz" -or
+                -not (Test-JsonInteger $Entry.size) -or
+                -not (Test-JsonInteger $Entry.uncompressed_size) -or
+                [long]$Entry.size -le 0 -or
+                [long]$Entry.uncompressed_size -le 0 -or
+                [long]$Entry.size -gt 5MB -or
+                [long]$Entry.uncompressed_size -gt 20MB -or
+                -not (Test-IsoDate $Entry.as_of) -or
+                [string]$Entry.as_of -ne [string]$Manifest.market_as_of -or
+                -not [string]$Entry.model_version
+            ) {
+                throw "LKG manifest v2 symbol entry is invalid: $Symbol"
+            }
+            if ($SeenSymbols.ContainsKey($Symbol)) {
+                throw "LKG manifest v2 symbol is duplicated: $Symbol"
+            }
+            $SeenSymbols[$Symbol] = $true
+        }
+        return
+    }
+
+    if (
+        $null -eq $Manifest.PSObject.Properties['expected_non_price_symbols'] -or
+        $null -eq $Manifest.PSObject.Properties['operational_failed_symbols'] -or
+        $Manifest.PSObject.Properties['market_as_of'] -or
+        -not (Test-IsoDate $Manifest.target_market_date) -or
+        [string]$Manifest.observation_as_of -ne [string]$Manifest.target_market_date
+    ) {
+        throw 'LKG manifest v3 date metadata is invalid'
+    }
+    $CountNames = @(
+        'universe_count',
+        'observation_count',
+        'regular_price_symbol_count',
+        'expected_non_price_symbol_count',
+        'operational_failure_count',
+        'regular_price_denominator'
+    )
+    foreach ($Name in $CountNames) {
+        if (-not (Test-JsonInteger $Manifest.$Name) -or [long]$Manifest.$Name -lt 0) {
+            throw "LKG manifest v3 count is invalid: $Name"
+        }
+    }
+    $ExpectedProperties = if ($null -eq $Manifest.expected_non_price_symbols) {
+        @()
+    } else {
+        @($Manifest.expected_non_price_symbols.PSObject.Properties)
+    }
+    $OperationalFailures = if ($null -eq $Manifest.operational_failed_symbols) {
+        @()
+    } elseif ($Manifest.operational_failed_symbols -is [string]) {
+        throw 'LKG manifest v3 operational failures are invalid'
+    } else {
+        @($Manifest.operational_failed_symbols)
+    }
+    if (
+        [long]$Manifest.universe_count -lt 1 -or
+        [long]$Manifest.regular_price_denominator -lt 1 -or
+        [long]$Manifest.observation_count -ne $SymbolProperties.Count -or
+        [long]$Manifest.expected_non_price_symbol_count -ne $ExpectedProperties.Count -or
+        [long]$Manifest.operational_failure_count -ne $OperationalFailures.Count -or
+        [long]$Manifest.regular_price_symbol_count +
+            [long]$Manifest.expected_non_price_symbol_count -ne
+            [long]$Manifest.observation_count -or
+        [long]$Manifest.observation_count +
+            [long]$Manifest.operational_failure_count -ne
+            [long]$Manifest.universe_count -or
+        [long]$Manifest.regular_price_denominator -ne
+            ([long]$Manifest.universe_count -
+            [long]$Manifest.expected_non_price_symbol_count) -or
+        -not (Test-JsonNumber $Manifest.regular_price_coverage) -or
+        [double]$Manifest.regular_price_coverage -lt 0 -or
+        [double]$Manifest.regular_price_coverage -gt 1 -or
+        [math]::Abs(
+            [double]$Manifest.regular_price_coverage -
+            ([long]$Manifest.regular_price_symbol_count /
+            [double]$Manifest.regular_price_denominator)
+        ) -gt 1e-12 -or
+        -not (Test-JsonNumber $Manifest.observation_coverage) -or
+        [double]$Manifest.observation_coverage -lt 0.95 -or
+        [double]$Manifest.observation_coverage -gt 1 -or
+        [math]::Abs(
+            [double]$Manifest.observation_coverage -
+            ([long]$Manifest.observation_count / [double]$Manifest.universe_count)
+        ) -gt 1e-12 -or
+        -not (Test-JsonNumber $Manifest.operational_failure_rate) -or
+        [double]$Manifest.operational_failure_rate -lt 0 -or
+        [double]$Manifest.operational_failure_rate -ge 0.05 -or
+        [math]::Abs(
+            [double]$Manifest.operational_failure_rate -
+            ([long]$Manifest.operational_failure_count / [double]$Manifest.universe_count)
+        ) -gt 1e-12
+    ) {
+        throw 'LKG manifest v3 arithmetic or coverage is invalid'
+    }
+
+    $ExpectedBySymbol = @{}
+    foreach ($Property in $ExpectedProperties) {
+        $Symbol = [string]$Property.Name
+        $Status = $Property.Value
+        if (
+            -not (Test-MarketSymbol $Symbol $Market) -or
+            $null -eq $Status -or
+            $ExpectedBySymbol.ContainsKey($Symbol) -or
+            [string]$Status.status -notin @(
+                'official_no_regular_trade',
+                'officially_suspended'
+            ) -or
+            [string]$Status.evidence_sha256 -notmatch '^[0-9a-f]{64}$' -or
+            [string]$Status.artifact_sha256 -notmatch '^[0-9a-f]{64}$' -or
+            -not (Test-IsoDate $Status.latest_regular_price_date)
+        ) {
+            throw "LKG manifest v3 status entry is invalid: $Symbol"
+        }
+        $ExpectedBySymbol[$Symbol] = $Status
+    }
+    $SeenOperational = @{}
+    foreach ($RawSymbol in $OperationalFailures) {
+        $Symbol = [string]$RawSymbol
+        if (
+            -not (Test-MarketSymbol $Symbol $Market) -or
+            $SeenOperational.ContainsKey($Symbol) -or
+            $ExpectedBySymbol.ContainsKey($Symbol) -or
+            @($SymbolProperties | Where-Object { $_.Name -eq $Symbol }).Count -ne 0
+        ) {
+            throw 'LKG manifest v3 operational failures are invalid'
+        }
+        $SeenOperational[$Symbol] = $true
+    }
+    $RegularSeen = 0
+    $StatusSeen = 0
+    foreach ($Property in $SymbolProperties) {
+        $Symbol = [string]$Property.Name
+        $Entry = $Property.Value
+        $Sha = [string]$Entry.sha256
+        if (
+            -not (Test-MarketSymbol $Symbol $Market) -or
+            $null -eq $Entry -or
+            $Sha -notmatch '^[0-9a-f]{64}$' -or
+            [string]$Entry.path -ne "objects/$Sha.json.gz" -or
+            [string]$Entry.model_version -ne 'observation-source-v1' -or
+            -not (Test-JsonInteger $Entry.size) -or
+            -not (Test-JsonInteger $Entry.uncompressed_size) -or
+            [long]$Entry.size -le 0 -or
+            [long]$Entry.uncompressed_size -le 0 -or
+            [long]$Entry.size -gt 5MB -or
+            [long]$Entry.uncompressed_size -gt 20MB -or
+            [string]$Entry.observation_as_of -ne [string]$Manifest.target_market_date -or
+            -not (Test-IsoDate $Entry.latest_regular_price_date)
+        ) {
+            throw "LKG manifest v3 symbol entry is invalid: $Symbol"
+        }
+        $Kind = [string]$Entry.observation_kind
+        if ($Kind -eq 'regular_price') {
+            if (
+                $ExpectedBySymbol.ContainsKey($Symbol) -or
+                [string]$Entry.as_of -ne [string]$Manifest.target_market_date -or
+                [string]$Entry.latest_regular_price_date -ne
+                    [string]$Manifest.target_market_date
+            ) {
+                throw "LKG manifest v3 regular symbol is invalid: $Symbol"
+            }
+            $RegularSeen += 1
+            continue
+        }
+        if (
+            $Kind -notin @('official_no_regular_trade', 'officially_suspended') -or
+            -not $ExpectedBySymbol.ContainsKey($Symbol)
+        ) {
+            throw "LKG manifest v3 status symbol is invalid: $Symbol"
+        }
+        $Expected = $ExpectedBySymbol[$Symbol]
+        if (
+            [string]$Entry.as_of -notmatch '^\d{4}-\d{2}-\d{2}$' -or
+            [string]$Entry.as_of -ge [string]$Manifest.target_market_date -or
+            [string]$Entry.latest_regular_price_date -ne [string]$Entry.as_of -or
+            [string]$Entry.evidence_sha256 -ne [string]$Expected.evidence_sha256 -or
+            [string]$Entry.sha256 -ne [string]$Expected.artifact_sha256 -or
+            [string]$Entry.latest_regular_price_date -ne
+                [string]$Expected.latest_regular_price_date -or
+            [string]$Expected.status -ne $Kind
+        ) {
+            throw "LKG manifest v3 status binding is invalid: $Symbol"
+        }
+        $StatusSeen += 1
+    }
+    if (
+        $RegularSeen -ne [long]$Manifest.regular_price_symbol_count -or
+        $StatusSeen -ne [long]$Manifest.expected_non_price_symbol_count
+    ) {
+        throw 'LKG manifest v3 symbol partition is invalid'
+    }
+}
+
 try {
     New-Item -ItemType Directory -Path $TempRoot -Force | Out-Null
     $CurrentMetadata = Invoke-Gcloud @('storage', 'objects', 'describe', $LatestUri, '--format=json') |
@@ -250,25 +708,38 @@ try {
 
     $Current = Get-JsonFile $CurrentPath
     $Manifest = Get-JsonFile $ManifestPath
-    if ($Current.schema_version -ne 2 -or $Current.market -ne $Market) {
+    if (
+        -not (Test-JsonInteger $Current.schema_version) -or
+        $Current.schema_version -notin @(2, 3) -or
+        $Current.market -ne $Market -or
+        -not (Test-IsoTimestamp $Current.generated_at)
+    ) {
         throw 'Active latest pointer schema or market is invalid'
+    }
+    if ($Current.schema_version -eq 3 -and $Market -ne 'TW') {
+        throw 'Manifest v3 is TW-only'
+    }
+    if (
+        [string]$Current.manifest -notmatch
+            "^manifests/$Market-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}\.json$" -or
+        [string]$Current.manifest_sha256 -notmatch '^[0-9a-f]{64}$' -or
+        -not $Current.manifest.EndsWith(
+            "-$($Current.manifest_sha256.Substring(0, 12)).json"
+        )
+    ) {
+        throw 'Active latest pointer manifest identity is invalid'
     }
     if ($Current.manifest -eq $LkgManifest) {
         throw 'Requested LKG manifest is already active'
     }
-    if ($Manifest.schema_version -ne 2 -or $Manifest.market -ne $Market) {
-        throw 'LKG manifest schema or market is invalid'
-    }
-    if ([double]$Manifest.coverage -lt 0.95 -or [int]$Manifest.symbol_count -lt 1) {
-        throw 'LKG manifest does not meet the 95 percent coverage requirement'
-    }
-    if (-not $Manifest.generated_at -or -not $Manifest.market_as_of) {
-        throw 'LKG manifest lacks point-in-time metadata'
-    }
+    Assert-QuantManifest -Manifest $Manifest -Market $Market
 
     $ManifestHash = (Get-FileHash -LiteralPath $ManifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    if (-not $LkgManifest.EndsWith("-$($ManifestHash.Substring(0, 12)).json")) {
+        throw 'LKG manifest path is not bound to its SHA-256'
+    }
     $RollbackPointer = [ordered]@{
-        schema_version = 2
+        schema_version = [int]$Manifest.schema_version
         market = $Market
         generated_at = [string]$Manifest.generated_at
         manifest = $LkgManifest
@@ -296,6 +767,7 @@ try {
     Download-Object $LatestUri $VerifiedPath
     $Verified = Get-JsonFile $VerifiedPath
     if (
+        $Verified.schema_version -ne [int]$Manifest.schema_version -or
         $Verified.manifest -ne $LkgManifest -or
         $Verified.manifest_sha256 -ne $ManifestHash -or
         $Verified.market -ne $Market
