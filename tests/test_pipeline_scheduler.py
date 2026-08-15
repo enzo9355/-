@@ -1,6 +1,5 @@
 import os
 import subprocess
-import sys
 import unittest
 from pathlib import Path
 
@@ -13,7 +12,9 @@ class PipelineSchedulerTests(unittest.TestCase):
             / "run_tw_post_close_pipeline.ps1"
         )
         environment = os.environ.copy()
-        environment["ABSORB_PYTHON_EXE"] = sys.executable
+        environment["ABSORB_PYTHON_EXE"] = (
+            r"C:\absorb-missing-python-for-guard-test.exe"
+        )
         completed = subprocess.run(
             [
                 "powershell.exe",
@@ -40,6 +41,11 @@ class PipelineSchedulerTests(unittest.TestCase):
         self.assertIn(
             "Historical TargetDate cannot publish observation products",
             output,
+        )
+        post_close = script.read_text(encoding="utf-8")
+        self.assertLess(
+            post_close.index("$HistoricalTargetDate"),
+            post_close.index("$RepoRoot"),
         )
 
     def test_new_tasks_are_separate_resilient_limited_and_secret_free(self):
