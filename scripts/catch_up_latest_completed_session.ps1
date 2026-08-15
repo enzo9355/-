@@ -187,21 +187,55 @@ function Write-AtomicJson {
         [Parameter(Mandatory)]$Document
     )
 
-    $Resolved = Assert-PathWithinRoot -Path $Path -Root $Root
-    $Temporary = "$Resolved.tmp"
-    if ([IO.File]::Exists($Temporary)) {
-        throw 'Catch-up evidence temporary file already exists'
+    $Candidate = [IO.Path]::GetFullPath($Path)
+    $Parent = [IO.Path]::GetDirectoryName($Candidate)
+    if ([string]::IsNullOrWhiteSpace($Parent)) {
+        throw 'Evidence path has no parent directory'
     }
+    $ResolvedParent = Assert-PathWithinRoot -Path $Parent -Root $Root
+    $Leaf = [IO.Path]::GetFileName($Candidate)
+    if ([string]::IsNullOrWhiteSpace($Leaf)) {
+        throw 'Evidence path has no file name'
+    }
+    $Resolved = [IO.Path]::Combine($ResolvedParent, $Leaf)
     try {
-        [IO.File]::WriteAllText(
+        $TargetAttributes = [IO.File]::GetAttributes($Resolved)
+    }
+    catch [IO.FileNotFoundException] {
+        $TargetAttributes = $null
+    }
+    catch [IO.DirectoryNotFoundException] {
+        $TargetAttributes = $null
+    }
+    if ($null -ne $TargetAttributes) {
+        throw 'Evidence path already exists'
+    }
+    $Temporary = "$Resolved.tmp"
+    $TemporaryStream = $null
+    $TemporaryCreated = $false
+    try {
+        $TemporaryStream = [IO.File]::Open(
             $Temporary,
-            ($Document | ConvertTo-Json -Depth 20),
-            [Text.UTF8Encoding]::new($false)
+            [IO.FileMode]::CreateNew,
+            [IO.FileAccess]::Write,
+            [IO.FileShare]::None
         )
-        Move-Item -LiteralPath $Temporary -Destination $Resolved -Force
+        $TemporaryCreated = $true
+        $Bytes = [Text.UTF8Encoding]::new($false).GetBytes(
+            ($Document | ConvertTo-Json -Depth 20)
+        )
+        $TemporaryStream.Write($Bytes, 0, $Bytes.Length)
+        $TemporaryStream.Flush()
+        $TemporaryStream.Dispose()
+        $TemporaryStream = $null
+        [IO.File]::Move($Temporary, $Resolved)
+        $TemporaryCreated = $false
     }
     finally {
-        if ([IO.File]::Exists($Temporary)) {
+        if ($null -ne $TemporaryStream) {
+            $TemporaryStream.Dispose()
+        }
+        if ($TemporaryCreated -and [IO.File]::Exists($Temporary)) {
             [IO.File]::Delete($Temporary)
         }
     }
