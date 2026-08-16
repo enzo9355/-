@@ -32,6 +32,9 @@ from stock_papi.research.tej_challenger import (
     build_tej_challenger_spec,
     run_tej_challenger,
 )
+from stock_papi.research.tej_backfill import TejBackfillEngine
+from stock_papi.research.tej_quota import TejQuotaManager
+from stock_papi.research.tej_schema_discovery import generate_schema_evidence_report
 from stock_papi.research.evaluation import build_split_plan
 
 
@@ -490,6 +493,93 @@ class TejResearchTests(unittest.TestCase):
         self.assertEqual(result["status"], "RUN")
         self.assertEqual(result["eligible_row_count"], len(price_frame))
         self.assertFalse(result["promotion"]["production_eligible"])
+
+    def test_quota_manager_tracks_budget_and_prevents_exhaustion(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            mgr = TejQuotaManager(
+                temp_dir,
+                safety_ratio=0.8,
+                hard_max_requests=10,
+                hard_max_rows=1000,
+            )
+            state = mgr.load_or_sync_state()
+            self.assertEqual(state["budget_requests"], 8)
+            self.assertEqual(state["budget_rows"], 800)
+            self.assertTrue(mgr.can_consume(1, 100))
+
+            mgr.record_consumption(5, 500, table="TRAIL/TASALE")
+            self.assertEqual(mgr.state["requests_used"], 5)
+            self.assertEqual(mgr.state["rows_used"], 500)
+            self.assertEqual(mgr.state["requests_remaining_budget"], 3)
+            self.assertEqual(mgr.state["rows_remaining_budget"], 300)
+            self.assertTrue(mgr.can_consume(1, 100))
+
+            # Exceed row budget
+            self.assertFalse(mgr.can_consume(1, 400))
+            mgr.record_consumption(3, 350)
+            self.assertTrue(mgr.state["is_exhausted"])
+            self.assertFalse(mgr.can_consume(1, 10))
+
+    def test_schema_evidence_report_contains_all_22_features(self):
+        report = generate_schema_evidence_report()
+        self.assertEqual(report["feature_count"], 22)
+        self.assertIn("revenue", report["pit_safe_features"])
+        self.assertIn("eps", report["pit_safe_features"])
+        self.assertIn("roe", report["pit_safe_features"])
+        self.assertIn("foreign_net_buy", report["pit_safe_features"])
+        self.assertIn("director_holdings", report["unsupported_features"])
+
+    def test_backfill_engine_accumulates_dataset(self):
+        class BackfillApiConfig:
+            @classmethod
+            def info(cls):
+                return {
+                    "startDate": "2026-08-16",
+                    "endDate": "2026-11-16",
+                    "reqDayLimit": 500,
+                    "rowsDayLimit": 50000,
+                    "tables": {},
+                    "user": {
+                        "tables": {
+                            "TRAIL/TASALE": {"tableId": "TRAIL/TASALE"},
+                        }
+                    },
+                }
+
+        class BackfillApi:
+            ApiConfig = BackfillApiConfig
+
+            @classmethod
+            def get(cls, table, **kwargs):
+                return [
+                    {
+                        "coid": kwargs.get("coid", "2330"),
+                        "mdate": "2025-01-01",
+                        "annd_s": "2025-02-10",
+                        "d0001": 100000.0,
+                        "d0004": 5.0,
+                        "d0005": 10.0,
+                    }
+                ]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            client = TejClient(
+                enabled=True,
+                api_key="secret",
+                api=BackfillApi,
+            )
+            mgr = TejQuotaManager(temp_dir, safety_ratio=0.8)
+            engine = TejBackfillEngine(
+                temp_dir,
+                quota_manager=mgr,
+                client=client,
+                universe=["2330", "2317"],
+            )
+            result = engine.run_slice(max_symbols_per_table=2)
+            self.assertEqual(result["status"], "slice_completed")
+            self.assertEqual(result["rows_fetched_this_slice"], 2)
+            self.assertEqual(result["total_accumulated_rows"], 2)
+            self.assertTrue(Path(temp_dir, "research", "tej", "v1", "coverage_dashboard.json").exists())
 
     def test_tej_scripts_are_separate_from_tw_writer(self):
         script = Path("scripts/run_tej_research.ps1").read_text(encoding="utf-8")
