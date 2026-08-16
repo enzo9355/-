@@ -206,6 +206,42 @@ class TejResearchTests(unittest.TestCase):
         self.assertEqual(client.check_dataset("TWN/DEMO")["status"], "dataset_entitled")
         self.assertEqual(client.check_dataset("TWN/NOT_ENTITLED")["status"], "dataset_not_entitled")
 
+    def test_entitlement_discovery_supports_user_tables_mapping(self):
+        class NestedApiConfig:
+            @classmethod
+            def info(cls):
+                return {
+                    "startDate": "2026-08-16",
+                    "endDate": "2026-11-16",
+                    "reqDayLimit": 500,
+                    "rowsDayLimit": 50000,
+                    "tables": {},
+                    "user": {
+                        "tables": {
+                            "TRAIL/TAPRCD": {"tableId": "TRAIL/TAPRCD"},
+                            "TRAIL/TASALE": {"tableId": "TRAIL/TASALE"},
+                        }
+                    },
+                }
+
+        class NestedTejApi:
+            ApiConfig = NestedApiConfig
+
+        client = TejClient(
+            enabled=True,
+            api_key="secret",
+            api=NestedTejApi,
+        )
+        discovery = client.discover()
+        self.assertEqual(discovery["status"], "authentication_valid")
+        self.assertEqual(discovery["dataset_count"], 2)
+        self.assertEqual(discovery["entitled_datasets"], ["TRAIL/TAPRCD", "TRAIL/TASALE"])
+        self.assertEqual(discovery["limits"]["startDate"], "2026-08-16")
+        self.assertEqual(discovery["limits"]["endDate"], "2026-11-16")
+        self.assertEqual(discovery["limits"]["reqDayLimit"], 500)
+        self.assertEqual(client.check_dataset("TRAIL/TAPRCD")["status"], "dataset_entitled")
+        self.assertEqual(client.check_dataset("TRAIL/UNKNOWN")["status"], "dataset_not_entitled")
+
     def test_rate_limit_retries_are_bounded(self):
         FakeTejApi.get_error_count = 2
         sleeps = []
