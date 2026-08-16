@@ -293,6 +293,8 @@ def _table_codes(info) -> list[str] | None:
     if not isinstance(info, Mapping):
         return None
     tables = info.get("tables")
+    if not tables and isinstance(info.get("user"), Mapping):
+        tables = info["user"].get("tables")
     if isinstance(tables, Mapping):
         tables = list(tables)
     if not isinstance(tables, list):
@@ -302,7 +304,12 @@ def _table_codes(info) -> list[str] | None:
         if isinstance(table, str):
             code = table
         elif isinstance(table, Mapping):
-            code = table.get("code") or table.get("table") or table.get("id")
+            code = (
+                table.get("code")
+                or table.get("table")
+                or table.get("id")
+                or table.get("tableId")
+            )
         else:
             code = None
         if isinstance(code, str) and _SAFE_TABLE.fullmatch(code):
@@ -384,6 +391,8 @@ class TejClient:
             self._entitled_datasets = set(tables)
             safe_limits = {}
             for key in (
+                "startDate",
+                "endDate",
                 "reqDayLimit",
                 "rowsDayLimit",
                 "rowsMonthLimit",
