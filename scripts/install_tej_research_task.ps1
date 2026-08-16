@@ -35,14 +35,14 @@ if (
 $ScriptPath = (Resolve-Path (Join-Path $PSScriptRoot 'run_tej_research.ps1')).Path
 $Action = New-ScheduledTaskAction `
     -Execute 'powershell.exe' `
-    -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$ScriptPath`" -Command status -DataRoot D:\AbsorbData" `
+    -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$ScriptPath`" -Command backfill -DataRoot D:\AbsorbData" `
     -WorkingDirectory $RepoRoot
 $Trigger = New-ScheduledTaskTrigger -Daily -At ([datetime]::ParseExact($At, 'HH:mm', $null))
 $Settings = New-ScheduledTaskSettingsSet `
     -MultipleInstances IgnoreNew `
     -StartWhenAvailable `
     -ExecutionTimeLimit (New-TimeSpan -Hours 2)
-$Principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType InteractiveToken -RunLevel Limited
+$Principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Limited
 
 if ($PSCmdlet.ShouldProcess($TaskName, 'register separate TEJ research task')) {
     Register-ScheduledTask `

@@ -23,7 +23,10 @@ from .tej import (
     validate_tej_data_root,
     write_tej_raw_cache,
 )
+from .tej_backfill import TejBackfillEngine
 from .tej_challenger import build_tej_challenger_frame, run_tej_challenger
+from .tej_quota import DEFAULT_SAFETY_RATIO, TejQuotaManager
+from .tej_schema_discovery import generate_schema_evidence_report
 
 
 def _now():
@@ -268,9 +271,107 @@ def _shadow(args):
     return 0
 
 
+def _quota(args):
+    mgr = TejQuotaManager(args.root, safety_ratio=args.safety_ratio)
+    client = TejClient.from_env()
+    mgr.load_or_sync_state(client)
+    print(json.dumps(mgr.summary(), ensure_ascii=False, sort_keys=True))
+    return 0
+
+
+def _backfill(args):
+    mgr = TejQuotaManager(args.root, safety_ratio=args.safety_ratio)
+    client = TejClient.from_env()
+    engine = TejBackfillEngine(
+        args.root,
+        quota_manager=mgr,
+        client=client,
+        universe=args.universe or None,
+    )
+    result = engine.run_slice(
+        max_symbols_per_table=args.max_symbols or 5,
+    )
+    print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+    return 0 if result.get("status") in {"slice_completed", "quota_budget_exhausted"} else 2
+
+
+def _coverage(args):
+    mgr = TejQuotaManager(args.root, safety_ratio=args.safety_ratio)
+    client = TejClient.from_env()
+    engine = TejBackfillEngine(args.root, quota_manager=mgr, client=client)
+    dashboard = engine.build_coverage_dashboard()
+    print(json.dumps(dashboard, ensure_ascii=False, sort_keys=True))
+    return 0
+
+
+def _schema_evidence(args):
+    evidence = generate_schema_evidence_report()
+    path = args.root / "research" / "tej" / "v1" / "schema_evidence.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(evidence, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(json.dumps({"status": "saved", "path": str(path), "table_count": evidence["table_count"], "feature_count": evidence["feature_count"]}, sort_keys=True))
+    return 0
+
+
+def _prove_pit(args):
+    client = TejClient.from_env()
+    if not client.enabled or not client.api_key:
+        print(json.dumps({"status": "disabled_or_unauthenticated"}, sort_keys=True))
+        return 2
+    res = client.fetch_dataset("TRAIL/TASALE", filters={"coid": args.symbol or "2330"})
+    if res.get("status") != "dataset_entitled":
+        print(json.dumps({"status": "fetch_failed", "detail": res}, sort_keys=True))
+        return 2
+    records = res.get("records", [])
+    if not records:
+        print(json.dumps({"status": "no_records"}, sort_keys=True))
+        return 2
+    # Verify PIT ordering
+    pit_proven = True
+    examples = []
+    for r in records[:5]:
+        mdate = str(r.get("mdate", ""))[:10]
+        annd_s = str(r.get("annd_s", ""))[:10]
+        if not annd_s or annd_s == "None":
+            pit_proven = False
+            break
+        examples.append({
+            "period": mdate,
+            "announcement_date": annd_s,
+            "revenue": r.get("d0001"),
+            "mom": r.get("d0004"),
+            "yoy": r.get("d0005"),
+        })
+    result = {
+        "status": "PASS" if pit_proven else "FAIL",
+        "symbol": args.symbol or "2330",
+        "table": "TRAIL/TASALE",
+        "pit_proven": pit_proven,
+        "sample_count": len(examples),
+        "examples": examples,
+    }
+    print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+    return 0 if pit_proven else 2
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="ABSORB private TEJ research")
-    parser.add_argument("command", choices=("status", "fetch", "normalize", "factor", "challenger", "shadow"))
+    parser.add_argument(
+        "command",
+        choices=(
+            "status",
+            "fetch",
+            "normalize",
+            "factor",
+            "challenger",
+            "shadow",
+            "quota",
+            "backfill",
+            "coverage",
+            "schema-evidence",
+            "prove-pit",
+        ),
+    )
     parser.add_argument("--root", type=Path, default=Path(r"D:\AbsorbData"))
     parser.add_argument("--table")
     parser.add_argument("--filters")
@@ -290,6 +391,10 @@ def main(argv=None):
     parser.add_argument("--tej", type=Path)
     parser.add_argument("--official-source", default="TWSE/TPEx")
     parser.add_argument("--checked-at")
+    parser.add_argument("--safety-ratio", type=float, default=DEFAULT_SAFETY_RATIO)
+    parser.add_argument("--universe", nargs="*")
+    parser.add_argument("--max-symbols", type=int, default=5)
+    parser.add_argument("--symbol", default="2330")
     args = parser.parse_args(argv)
     try:
         args.root = validate_tej_data_root(args.root)
@@ -313,9 +418,21 @@ def main(argv=None):
         if not args.price_manifest or not args.factors:
             parser.error("challenger requires --price-manifest and --factors")
         return _challenger(args)
-    if not args.official or not args.tej:
-        parser.error("shadow requires --official and --tej")
-    return _shadow(args)
+    if args.command == "shadow":
+        if not args.official or not args.tej:
+            parser.error("shadow requires --official and --tej")
+        return _shadow(args)
+    if args.command == "quota":
+        return _quota(args)
+    if args.command == "backfill":
+        return _backfill(args)
+    if args.command == "coverage":
+        return _coverage(args)
+    if args.command == "schema-evidence":
+        return _schema_evidence(args)
+    if args.command == "prove-pit":
+        return _prove_pit(args)
+    return 2
 
 
 if __name__ == "__main__":

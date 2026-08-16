@@ -228,17 +228,41 @@ def _credential_metadata_rejected(metadata: Mapping[str, Any]) -> bool:
 def _json_safe(value):
     if value is None or isinstance(value, (str, bool, int)):
         return value
+    # Handle pandas NaT or NaN
+    try:
+        if str(type(value)).find("NaT") != -1 or (
+            isinstance(value, float) and not math.isfinite(value)
+        ):
+            return None
+    except Exception:
+        pass
     if isinstance(value, float):
         return value if math.isfinite(value) else None
-    if isinstance(value, (datetime.datetime, datetime.date)):
-        return _timestamp(value) if isinstance(value, datetime.datetime) else value.isoformat()
+    if isinstance(value, datetime.datetime):
+        if getattr(value, "tzinfo", None) is None:
+            return value.strftime("%Y-%m-%dT%H:%M:%SZ")
+        return (
+            value.astimezone(datetime.timezone.utc)
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
+    if isinstance(value, datetime.date):
+        return value.isoformat()
     if isinstance(value, Mapping):
         return {str(key): _json_safe(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
         return [_json_safe(item) for item in value]
     item = getattr(value, "item", None)
     if callable(item):
-        return _json_safe(item())
+        try:
+            return _json_safe(item())
+        except Exception:
+            pass
+    if hasattr(value, "isoformat") and callable(getattr(value, "isoformat")):
+        try:
+            return value.isoformat()
+        except Exception:
+            pass
     return str(value)
 
 
