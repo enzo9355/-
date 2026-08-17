@@ -16,6 +16,7 @@
           <p class="eyebrow">{{ {'post_close': '盤後觀察', 'pre_market': '盤前風險更新'}[report.report_type] }}</p>
           <h2>{{ report.title }}</h2>
           <p>{{ report.summary|join('；') }}</p>
+          <p class="muted small">資料基準日 {{ report.source_market_date }}｜適用交易日 {{ report.applicable_trading_date }}（下一交易日）</p>
         </div>
         <div class="report-actions">
           {% if report.report_type == 'post_close' %}

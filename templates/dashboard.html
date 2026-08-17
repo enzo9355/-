@@ -13,8 +13,8 @@
         <article class="report-insight-card">
           <p class="eyebrow">{{ label }}</p>
           {% if item %}
-            <h2>{{ item.title }}</h2><p>{{ item.summary|join('；') }}</p><p class="muted small">適用交易日 {{ item.applicable_trading_date }}｜資料日 {{ item.source_market_date }}</p>
-            {% if report_type == 'post_close' %}<a class="button button-secondary" href="{{ url_for('post_close_report_page', trading_date=item.applicable_trading_date) }}">查看盤後觀察</a>{% else %}<a class="button button-secondary" href="{{ url_for('pre_market_report_page', trading_date=item.applicable_trading_date) }}">查看盤前更新</a>{% endif %}
+            <h2>{{ item.title }}</h2><p>{{ item.summary|join('；') }}</p><p class="muted small">資料基準日 {{ item.source_market_date }}｜適用交易日 {{ item.applicable_trading_date }}（下一交易日）</p>
+            {% if report_type == 'post_close' %}<a class="button button-secondary" href="{{ url_for('post_close_report_page', trading_date=item.source_market_date) }}">查看盤後觀察</a>{% else %}<a class="button button-secondary" href="{{ url_for('pre_market_report_page', trading_date=item.applicable_trading_date) }}">查看盤前更新</a>{% endif %}
           {% else %}<h2>尚未發布</h2><p class="muted">通過資料與發布驗證後才會顯示，不以假資料補位。</p>{% endif %}
         </article>
       {% endfor %}

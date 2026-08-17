@@ -87,6 +87,19 @@ def build_professional_report_view(
             "limitations": presentation.limitations,
             "disclosure": presentation.disclosure,
         }
+    capital_flows_view = _section_view(report.capital_flows)
+    if capital_flows_view.get("status") == "available" and isinstance(
+        capital_flows_view.get("data"), dict
+    ):
+        flows = capital_flows_view["data"]
+        valid_items = [
+            flows[k]
+            for k in ("foreign_net", "investment_trust_net", "dealer_net")
+            if isinstance(flows.get(k), (int, float))
+        ]
+        if valid_items:
+            flows["total_institutional_net"] = sum(valid_items)
+
     return {
         "title": "ABSORB 台股市場、產業與量化研究日報",
         "identity": {
@@ -105,7 +118,7 @@ def build_professional_report_view(
         "executive_summary": report.executive_summary.to_document(),
         "key_events": copy.deepcopy(list(report.key_events)),
         "market": _section_view(report.market),
-        "capital_flows": _section_view(report.capital_flows),
+        "capital_flows": capital_flows_view,
         "industries": _section_view(report.industries),
         "securities": _section_view(report.securities),
         "quantitative_research": quantitative_research,
