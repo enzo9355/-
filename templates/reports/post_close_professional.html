@@ -403,12 +403,12 @@
             {% set trend_val = item.trend or item.trend_observation %}
             <div class="kpi-card etf-card">
               <span class="kpi-label">{{ item.name }} ({{ item.symbol }})</span>
-              <strong class="kpi-value">{{ '{:,.2f}'.format(item.price) if item.price is not none else '—' }}</strong>
+              <strong class="kpi-value">{% if item.price is defined and item.price is number %}{{ '{:,.2f}'.format(item.price) }}{% else %}—{% endif %}</strong>
               <div class="etf-metrics">
-                <span>單日：<strong class="{{ 'positive' if item.return_1d_pct and item.return_1d_pct >= 0 else ('negative' if item.return_1d_pct and item.return_1d_pct < 0 else '') }}">{{ '%+.2f%%'|format(item.return_1d_pct) if item.return_1d_pct is not none else '—' }}</strong></span>
-                <span>5日：<strong class="{{ 'positive' if item.return_5d_pct and item.return_5d_pct >= 0 else ('negative' if item.return_5d_pct and item.return_5d_pct < 0 else '') }}">{{ '%+.2f%%'|format(item.return_5d_pct) if item.return_5d_pct is not none else '—' }}</strong></span>
+                <span>單日：<strong class="{% if item.return_1d_pct is defined and item.return_1d_pct is number %}{{ 'positive' if item.return_1d_pct > 0 else ('negative' if item.return_1d_pct < 0 else '') }}{% endif %}">{% if item.return_1d_pct is defined and item.return_1d_pct is number %}{{ '%+.2f%%'|format(item.return_1d_pct) }}{% else %}—{% endif %}</strong></span>
+                <span>5日：<strong class="{% if item.return_5d_pct is defined and item.return_5d_pct is number %}{{ 'positive' if item.return_5d_pct > 0 else ('negative' if item.return_5d_pct < 0 else '') }}{% endif %}">{% if item.return_5d_pct is defined and item.return_5d_pct is number %}{{ '%+.2f%%'|format(item.return_5d_pct) }}{% else %}—{% endif %}</strong></span>
                 <span>趨勢：<strong class="etf-trend">{{ {'above_ma20_ma60': '站上 MA20 與 MA60', 'above_ma20': '站上 MA20', 'below_ma60': '低於 MA60', 'mixed': '均線交錯', 'insufficient': '資料不足'}.get(trend_val, trend_val or '—') }}</strong></span>
-                <span>量比：<strong>{{ '%.2f'|format(item.volume_ratio) if item.volume_ratio is not none else '—' }}</strong></span>
+                <span>量比：<strong>{% if item.volume_ratio is defined and item.volume_ratio is number %}{{ '%.2f'|format(item.volume_ratio) }}{% else %}—{% endif %}</strong></span>
               </div>
             </div>
           {% else %}

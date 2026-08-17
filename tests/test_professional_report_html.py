@@ -163,6 +163,62 @@ class ProfessionalReportHtmlTests(unittest.TestCase):
         self.assertIn("元大高股息", output)
         self.assertIn("0056", output)
 
+    def test_etf_observations_survive_zero_missing_and_malformed_fields(self):
+        template_text = pathlib.Path(
+            "templates/reports/post_close_professional.html"
+        ).read_text(encoding="utf-8")
+        env = Environment(
+            loader=DictLoader(
+                {
+                    "reports/post_close_professional.html": template_text,
+                    "base.html": "{% block title %}{% endblock %}{% block nav_reports %}{% endblock %}{% block content %}{% endblock %}",
+                }
+            )
+        )
+        metadata = self._metadata()
+        report = build_professional_post_close_artifact(
+            metadata, code_commit_sha="b" * 40
+        )
+        view = build_professional_report_view(report)
+        view["securities"]["data"]["etf_observations"] = [
+            {
+                "symbol": "0050",
+                "name": "零值標的",
+                "price": 0.0,
+                "return_1d_pct": 0.0,
+                "return_5d_pct": 0.0,
+                "volume_ratio": 0.0,
+                "trend_observation": "insufficient",
+                "as_of": "2026-07-17",
+            },
+            {
+                "symbol": "0056",
+                "name": "缺鍵標的",
+                "as_of": "2026-07-17",
+            },
+            {
+                "symbol": "0057",
+                "name": "型別異常標的",
+                "price": "abc",
+                "return_1d_pct": "x",
+                "return_5d_pct": None,
+                "volume_ratio": None,
+                "trend_observation": None,
+                "as_of": "2026-07-17",
+            },
+        ]
+        output = env.get_template("reports/post_close_professional.html").render(
+            report=view
+        )
+        self.assertIn("零值標的", output)
+        self.assertIn("0.00", output)
+        self.assertIn("+0.00%", output)
+        self.assertIn("資料不足", output)
+        self.assertIn("缺鍵標的", output)
+        self.assertIn("型別異常標的", output)
+        self.assertNotIn("Traceback", output)
+        self.assertNotIn("Undefined", output)
+
     def test_scenario_empty_and_non_empty_states(self):
         template_text = pathlib.Path(
             "templates/reports/post_close_professional.html"
