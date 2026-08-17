@@ -1,7 +1,10 @@
+import datetime
 import os
 import subprocess
 import unittest
 from pathlib import Path
+
+UTC = datetime.timezone.utc
 
 
 class PipelineSchedulerTests(unittest.TestCase):
@@ -269,5 +272,99 @@ class PipelineSchedulerTests(unittest.TestCase):
         self.assertNotIn("$Output = & $Gcloud @Arguments 2>&1", release_common)
         self.assertNotIn("& $Gcloud @Arguments", upload)
 
+    def test_post_close_scheduler_bounded_repetition_and_idempotency(self):
+        scripts = Path(__file__).parents[1] / "scripts"
+        install_source = (scripts / "install_pipeline_tasks.ps1").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("RepetitionInterval='PT20M'", install_source)
+        self.assertIn("RepetitionDuration='PT4H50M'", install_source)
+        self.assertIn("RepetitionNode", install_source)
+        self.assertIn("StopAtDurationEnd", install_source)
 
-if __name__ == "__main__": unittest.main()
+        post_close_source = (scripts / "run_tw_post_close_pipeline.ps1").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("latest-TW-post_close.json", post_close_source)
+        self.assertIn("$ExistingLatest.source_market_date -eq $TargetDate", post_close_source)
+        self.assertIn("skipping duplicate execution", post_close_source)
+
+    def test_availability_aware_retry_contract_and_date_preservation(self):
+        import json
+        import tempfile
+        from stock_papi.batch.post_close import PostClosePipeline, PostClosePipelineError
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            target_date = datetime.date(2026, 7, 14)
+            publish_dir = root / "publish" / "reports" / "v2"
+            publish_dir.mkdir(parents=True, exist_ok=True)
+            latest_file = publish_dir / "latest-TW-post_close.json"
+
+            # 1. Unavailable official dataset -> fail-closed (no latest created)
+            calls = []
+            def failing_source():
+                raise RuntimeError("official margin data unavailable")
+
+            wired = {
+                "load_source": failing_source,
+                "infer": lambda v: calls.append("infer"),
+                "settle": lambda v: calls.append("settle"),
+                "aggregate": lambda v, i, s: calls.append("aggregate"),
+                "render": lambda r: calls.append("render"),
+                "publish": lambda r, ren: calls.append("publish"),
+                "upload": lambda rec: calls.append("upload"),
+                "remote_verify": lambda rec: calls.append("verify"),
+                "notify": lambda rec: calls.append("notify"),
+            }
+            pipeline = PostClosePipeline(
+                root,
+                target_market_date=target_date,
+                source_manifest="quant/v1/manifests/TW-20260714T090000Z-aaaaaaaaaaaa.json",
+                source_manifest_sha256="a" * 64,
+                model_version="lgbm-5d-v1",
+                callbacks=wired,
+            )
+            with self.assertRaises(RuntimeError):
+                pipeline.run(now=datetime.datetime(2026, 7, 14, 17, 10, tzinfo=UTC))
+            self.assertEqual(calls, [])
+            self.assertFalse(latest_file.exists())
+
+            # 2. Retry succeeds later (e.g. 21:20) without date drift
+            def success_source():
+                return {
+                    "market": "TW",
+                    "market_as_of": "2026-07-14",
+                    "manifest_path": "quant/v1/manifests/TW-20260714T090000Z-aaaaaaaaaaaa.json",
+                    "manifest_sha256": "a" * 64,
+                    "model_version": "lgbm-5d-v1",
+                    "failure_rate": 0.0,
+                    "sample_data": False,
+                }
+
+            def publish_cb(report, rendered):
+                calls.append("publish")
+                latest_file.write_text(
+                    json.dumps({
+                        "source_market_date": "2026-07-14",
+                        "applicable_trading_date": "2026-07-15",
+                        "report_type": "post_close",
+                    }),
+                    encoding="utf-8",
+                )
+                return {"content_sha256": "b" * 64}
+
+            wired["load_source"] = success_source
+            wired["publish"] = publish_cb
+            res = pipeline.run(now=datetime.datetime(2026, 7, 14, 21, 20, tzinfo=UTC))
+            self.assertEqual(res["status"], "completed")
+            self.assertIn("publish", calls)
+            self.assertTrue(latest_file.exists())
+
+            latest_data = json.loads(latest_file.read_text(encoding="utf-8"))
+            self.assertEqual(latest_data["source_market_date"], "2026-07-14")
+            self.assertEqual(latest_data["applicable_trading_date"], "2026-07-15")
+
+
+if __name__ == "__main__":
+    unittest.main()

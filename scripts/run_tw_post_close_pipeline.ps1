@@ -20,6 +20,20 @@ $HistoricalTargetDate = $ParsedTargetDate.Date -lt [DateTime]::Today
 if ($HistoricalTargetDate -and $PublishObservation) {
     throw 'Historical TargetDate cannot publish observation products'
 }
+if ($PublishObservation) {
+    $ReportV2Root = Join-Path $DataRoot 'publish\reports\v2'
+    $LatestPostClosePath = Join-Path $ReportV2Root 'latest-TW-post_close.json'
+    if (Test-Path -LiteralPath $LatestPostClosePath -PathType Leaf) {
+        try {
+            $ExistingLatest = Get-Content -LiteralPath $LatestPostClosePath -Raw -Encoding utf8 | ConvertFrom-Json
+            if ($ExistingLatest.source_market_date -eq $TargetDate) {
+                Write-Output "TW post-close observation report for $TargetDate is already verified and published; skipping duplicate execution."
+                exit 0
+            }
+        }
+        catch { }
+    }
+}
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 . (Join-Path $PSScriptRoot 'python_runtime.ps1')
 $PythonExe = Resolve-AbsorbPythonExecutable -RepoRoot $RepoRoot
