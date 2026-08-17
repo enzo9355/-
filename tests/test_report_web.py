@@ -338,6 +338,77 @@ class ReportWebTests(unittest.TestCase):
         self.assertNotIn("corrupted", response.get_data(as_text=True))
         self.assertNotIn("objects/canonical", response.get_data(as_text=True))
 
+    def test_post_close_redirect_and_routing_semantics(self):
+        temporary, objects = self._production_shaped_objects()
+        self.addCleanup(temporary.cleanup)
+
+        with patch.object(
+            stock_app,
+            "_gcs_get_report_v2_object",
+            side_effect=lambda path, _size: objects.get(path) if path.startswith("reports/v2/") else objects.get(f"reports/v2/{path}"),
+            create=True,
+        ):
+            client = stock_app.app.test_client()
+            # 1. Canonical source date -> 200
+            post_close_canonical = client.get("/reports/2026-07-15/post-close")
+            self.assertEqual(post_close_canonical.status_code, 200)
+
+            # 2. Applicable date -> 302 canonical source date
+            post_close_applicable = client.get("/reports/2026-07-16/post-close")
+            self.assertEqual(post_close_applicable.status_code, 302)
+            self.assertEqual(
+                post_close_applicable.headers["Location"],
+                "/reports/2026-07-15/post-close",
+            )
+
+            # Follow redirect gives 200 (no redirect loop)
+            followed = client.get(post_close_applicable.headers["Location"])
+            self.assertEqual(followed.status_code, 200)
+
+            # 3. Missing report properly returns 404
+            missing_report = client.get("/reports/2026-07-25/post-close")
+            self.assertEqual(missing_report.status_code, 404)
+
+            # 4. Homepage CTA uses canonical source date for post-close
+            home = client.get("/")
+            if home.status_code == 200:
+                home_html = home.get_data(as_text=True)
+                self.assertIn("/reports/2026-07-15/post-close", home_html)
+                self.assertNotIn("/reports/2026-07-16/post-close", home_html)
+
+    def test_post_close_same_date_source_and_applicable(self):
+        class SameDateCalendar:
+            def next_session(self, value):
+                return value
+
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        metadata = build_post_close_observation_metadata(
+            observation_dashboard(), SameDateCalendar()
+        )
+        from reporting.professional_builder import build_professional_post_close_artifact
+        prof_report = build_professional_post_close_artifact(
+            metadata, code_commit_sha="b" * 40
+        )
+        publish_report_v2(root, metadata, professional_report=prof_report)
+        publish = root / "publish" / "reports" / "v2"
+        objects = {
+            f"reports/v2/{path.relative_to(publish).as_posix()}": path.read_bytes()
+            for path in publish.rglob("*")
+            if path.is_file()
+        }
+
+        with patch.object(
+            stock_app,
+            "_gcs_get_report_v2_object",
+            side_effect=lambda path, _size: objects.get(path) if path.startswith("reports/v2/") else objects.get(f"reports/v2/{path}"),
+            create=True,
+        ):
+            client = stock_app.app.test_client()
+            res = client.get(f"/reports/{metadata['source_market_date']}/post-close")
+            self.assertEqual(res.status_code, 200)
+
 
 if __name__ == "__main__":
     unittest.main()

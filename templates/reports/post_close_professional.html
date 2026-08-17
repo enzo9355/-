@@ -400,12 +400,15 @@
         <h3 class="subsection-title">重點 ETF 追蹤</h3>
         <div class="report-kpi-grid">
           {% for item in sec_sec.data.etf_observations[:8] %}
+            {% set trend_val = item.trend or item.trend_observation %}
             <div class="kpi-card etf-card">
               <span class="kpi-label">{{ item.name }} ({{ item.symbol }})</span>
               <strong class="kpi-value">{{ '{:,.2f}'.format(item.price) if item.price is not none else '—' }}</strong>
               <div class="etf-metrics">
-                <span>單日：<strong class="{{ 'positive' if item.return_1d_pct and item.return_1d_pct >= 0 else 'negative' }}">{{ '%+.2f%%'|format(item.return_1d_pct) if item.return_1d_pct is not none else '—' }}</strong></span>
-                <span>5日：<strong class="{{ 'positive' if item.return_5d_pct and item.return_5d_pct >= 0 else 'negative' }}">{{ '%+.2f%%'|format(item.return_5d_pct) if item.return_5d_pct is not none else '—' }}</strong></span>
+                <span>單日：<strong class="{{ 'positive' if item.return_1d_pct and item.return_1d_pct >= 0 else ('negative' if item.return_1d_pct and item.return_1d_pct < 0 else '') }}">{{ '%+.2f%%'|format(item.return_1d_pct) if item.return_1d_pct is not none else '—' }}</strong></span>
+                <span>5日：<strong class="{{ 'positive' if item.return_5d_pct and item.return_5d_pct >= 0 else ('negative' if item.return_5d_pct and item.return_5d_pct < 0 else '') }}">{{ '%+.2f%%'|format(item.return_5d_pct) if item.return_5d_pct is not none else '—' }}</strong></span>
+                <span>趨勢：<strong class="etf-trend">{{ {'above_ma20_ma60': '站上 MA20 與 MA60', 'above_ma20': '站上 MA20', 'below_ma60': '低於 MA60', 'mixed': '均線交錯', 'insufficient': '資料不足'}.get(trend_val, trend_val or '—') }}</strong></span>
+                <span>量比：<strong>{{ '%.2f'|format(item.volume_ratio) if item.volume_ratio is not none else '—' }}</strong></span>
               </div>
             </div>
           {% else %}
@@ -577,10 +580,10 @@
             <span class="scenario-badge positive">正向偏多情境</span>
           </div>
           <ul class="scenario-list">
-            {% for item in next_sec.data.positive %}
+            {% for item in (next_sec.data.positive or []) %}
               <li>{{ item }}</li>
             {% else %}
-              <li class="muted">無特定正向情境。</li>
+              <li class="muted">目前沒有符合此情境的已驗證條件</li>
             {% endfor %}
           </ul>
         </div>
@@ -590,10 +593,10 @@
             <span class="scenario-badge neutral">中性盤整情境</span>
           </div>
           <ul class="scenario-list">
-            {% for item in next_sec.data.neutral %}
+            {% for item in (next_sec.data.neutral or []) %}
               <li>{{ item }}</li>
             {% else %}
-              <li class="muted">無特定中性情境。</li>
+              <li class="muted">目前沒有符合此情境的已驗證條件</li>
             {% endfor %}
           </ul>
         </div>
@@ -603,10 +606,10 @@
             <span class="scenario-badge negative">防守警戒情境</span>
           </div>
           <ul class="scenario-list">
-            {% for item in next_sec.data.negative %}
+            {% for item in (next_sec.data.negative or []) %}
               <li>{{ item }}</li>
             {% else %}
-              <li class="muted">無特定警戒情境。</li>
+              <li class="muted">目前沒有符合此情境的已驗證條件</li>
             {% endfor %}
           </ul>
         </div>
