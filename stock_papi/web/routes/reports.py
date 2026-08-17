@@ -149,13 +149,25 @@ def register_report_routes(
         try:
             reports = _v2_reports(required=True)
             if report_type == "post_close":
-                # For post_close, date_param is source_market_date
+                # For post_close, canonical date_param is source_market_date
                 item = next(
                     (value for value in reports
                      if value.get("report_type") == report_type
                      and value.get("source_market_date") == date_param),
                     None,
                 )
+                if item is None:
+                    # Fallback: if navigated with applicable_trading_date, redirect to canonical source_market_date URL
+                    fallback = next(
+                        (value for value in reports
+                         if value.get("report_type") == report_type
+                         and value.get("applicable_trading_date") == date_param),
+                        None,
+                    )
+                    if fallback is not None:
+                        canonical_date = fallback.get("source_market_date")
+                        if canonical_date:
+                            return redirect(url_for("post_close_report_page", trading_date=canonical_date), code=302)
             else:
                 # For pre_market, date_param is applicable_trading_date
                 item = next(

@@ -7,7 +7,7 @@
     <a class="back-link" href="{{ url_for('trading_day_report_page', trading_date=report.applicable_trading_date) }}">返回當日報告</a>
     <p class="eyebrow">{{ report.label }}</p>
     <h1>{{ report.title }}</h1>
-    <p class="muted">資料日 {{ report.source_market_date }}｜適用交易日 {{ report.applicable_trading_date }}｜發布 {{ report.published_at }}</p>
+    <p class="muted">資料基準日 {{ report.source_market_date }}｜今日適用交易日 {{ report.applicable_trading_date }}｜發布 {{ report.published_at }}</p>
     <p class="muted small">AI 預測研究中；本頁只呈現已發生且通過發布驗證的市場資料。</p>
   </header>
 

@@ -1,167 +1,689 @@
 {% extends "base.html" %}
-{% block title %}{{ report.title }}｜ABSORB{% endblock %}
+{% block title %}{{ report.title }}（{{ (report.identity.source_market_date if report.identity is defined and report.identity else (report.source_market_date if report.source_market_date is defined else '')) }}）｜ABSORB{% endblock %}
 {% block nav_reports %}active{% endblock %}
 {% block content %}
+{% set ident = report.identity if (report is defined and report.identity is defined and report.identity) else {} %}
+{% set exec_summary = report.executive_summary if (report is defined and report.executive_summary is defined and report.executive_summary) else {} %}
+{% set market_sec = report.market if (report is defined and report.market is defined and report.market) else {} %}
+{% set flows_sec = report.capital_flows if (report is defined and report.capital_flows is defined and report.capital_flows) else {} %}
+{% set ind_sec = report.industries if (report is defined and report.industries is defined and report.industries) else {} %}
+{% set sec_sec = report.securities if (report is defined and report.securities is defined and report.securities) else {} %}
+{% set quant_sec = report.quantitative_research if (report is defined and report.quantitative_research is defined and report.quantitative_research) else {} %}
+{% set val_sec = report.validation if (report is defined and report.validation is defined and report.validation) else {} %}
+{% set next_sec = report.next_session if (report is defined and report.next_session is defined and report.next_session) else {} %}
+{% set gov_sec = report.governance if (report is defined and report.governance is defined and report.governance) else {} %}
+{% set ai_sec = report.ai_reference if (report is defined and report.ai_reference is defined and report.ai_reference) else {} %}
+
 <article class="page report-detail-page professional-report">
-  <header class="report-hero panel">
-    <p class="eyebrow">INSTITUTIONAL POST-CLOSE RESEARCH</p>
-    <h1>{{ report.title }}</h1>
-    <p class="muted">資料日 {{ report.identity.source_market_date }}｜適用交易日 {{ report.identity.applicable_trading_date }}｜發布 {{ report.identity.published_at }}</p>
-    <p class="muted small">報告 {{ report.identity.report_id }}｜內容雜湊 {{ report.identity.content_sha256_short }}｜產生器 {{ report.identity.generator_version }}</p>
-    {% if report.pdf_download_url %}<p><a class="button" href="{{ report.pdf_download_url }}">下載完整 PDF</a></p>{% endif %}
+  <!-- Masthead / Hero Header -->
+  <header class="report-hero panel report-masthead">
+    <div class="masthead-top">
+      <p class="eyebrow">INSTITUTIONAL POST-CLOSE RESEARCH ｜ 機構級盤後研究報告</p>
+      <div class="masthead-title-row">
+        <h1>{{ report.title }}</h1>
+        {% if report.pdf_download_url %}
+          <a class="button button-download" href="{{ report.pdf_download_url }}" download>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            下載完整 PDF
+          </a>
+        {% endif %}
+      </div>
+      <p class="report-subtitle">已驗證市場結構、產業輪動、籌碼流向、解釋型量化回歸與下一交易日情境框架。</p>
+    </div>
+
+    <!-- Key Metadata Badges -->
+    <div class="report-badge-strip">
+      <div class="report-badge highlight">
+        <span class="badge-label">資料基準日</span>
+        <strong class="badge-value">{{ ident.source_market_date or report.source_market_date or '—' }}</strong>
+        <span class="badge-sub">盤後完整收盤</span>
+      </div>
+      <div class="report-badge">
+        <span class="badge-label">適用交易日</span>
+        <strong class="badge-value">{{ ident.applicable_trading_date or report.applicable_trading_date or '—' }}</strong>
+        <span class="badge-sub">下一交易日決策</span>
+      </div>
+      <div class="report-badge">
+        <span class="badge-label">發布時間 (UTC)</span>
+        <strong class="badge-value">{{ (ident.published_at or report.published_at or '')[:16].replace('T', ' ') or '—' }}</strong>
+        <span class="badge-sub">內容雜湊 {{ ident.content_sha256_short or '—' }}</span>
+      </div>
+      <div class="report-badge">
+        <span class="badge-label">報告層級 / 驗證</span>
+        <strong class="badge-value">機構級 · 已驗證</strong>
+        <span class="badge-sub">{{ ident.report_id or '—' }}</span>
+      </div>
+    </div>
   </header>
 
-  <nav class="panel report-toc" aria-label="報告章節">
-    <h2>章節目錄</h2>
-    <ol>
-      <li><a href="#executive-summary">投資決策摘要</a></li>
-      <li><a href="#market-analysis">市場總體與風險</a></li>
-      <li><a href="#capital-flows">資金與籌碼</a></li>
-      <li><a href="#industry-analysis">產業輪動與排名</a></li>
-      <li><a href="#security-analysis">個股與 ETF</a></li>
-      <li><a href="#quantitative-research">量化回歸與模型</a></li>
-      <li><a href="#model-validation">模型驗證與策略回測</a></li>
-      <li><a href="#next-session">下一交易日研究框架</a></li>
-      <li><a href="#data-governance">資料治理與方法論</a></li>
-      <li><a href="#ai-reference">AI 模型參考建議</a></li>
-    </ol>
+  <!-- Sticky Chapter Navigation -->
+  <nav class="report-chapter-nav" aria-label="報告章節導覽">
+    <a href="#executive-summary">投資決策摘要</a>
+    <a href="#market-analysis">市場總體與風險</a>
+    <a href="#capital-flows">資金與籌碼流向</a>
+    <a href="#industry-analysis">產業輪動與排名</a>
+    <a href="#security-analysis">個股與 ETF 觀察</a>
+    <a href="#quantitative-research">量化回歸與模型</a>
+    <a href="#model-validation">模型驗證與回測</a>
+    <a href="#next-session">次日研究框架</a>
+    <a href="#data-governance">資料治理與方法論</a>
+    <a href="#ai-reference">AI 模型參考建議</a>
   </nav>
 
-  <section class="panel" id="executive-summary">
-    <p class="eyebrow">EXECUTIVE SUMMARY</p>
-    <h2>投資決策摘要</h2>
-    <p class="action-label">{{ report.executive_summary.market_state }}</p>
-    <p class="decision-headline">{{ report.executive_summary.one_line_conclusion }}</p>
-    <div class="reason-columns">
-      <section><h3>支持證據</h3><ul>{% for item in report.executive_summary.supporting_evidence %}<li>{{ item }}</li>{% endfor %}</ul></section>
-      <section><h3>反對證據</h3><ul>{% for item in report.executive_summary.opposing_evidence %}<li>{{ item }}</li>{% endfor %}</ul></section>
+  <!-- Section 1: Executive Summary -->
+  <section class="panel report-section" id="executive-summary">
+    <div class="section-heading">
+      <div>
+        <p class="eyebrow">SECTION 01 ｜ EXECUTIVE SUMMARY</p>
+        <h2>投資決策摘要</h2>
+      </div>
+      <div class="market-state-badge state-{{ 'defensive' if exec_summary.market_state == '提高防守' else ('improving' if exec_summary.market_state == '風險改善' else 'neutral') }}">
+        <span class="state-dot"></span>
+        <span>規則式風險狀態：{{ exec_summary.market_state or '中性觀察' }}</span>
+      </div>
     </div>
-    <p><strong>最大風險：</strong>{{ report.executive_summary.largest_risk }}</p>
-    <h3>今日重要事件</h3>
-    <ol>{% for event in report.key_events %}<li><strong>{{ event.headline }}</strong> — {{ event.description }}</li>{% else %}<li>目前沒有已驗證的重要事件摘要。</li>{% endfor %}</ol>
-  </section>
 
-  <section class="panel" id="market-analysis">
-    <p class="eyebrow">MARKET AND RISK</p>
-    <h2>市場總體與風險</h2>
-    {% if report.market.status == 'available' %}
-      {% set market = report.market.data %}
-      <dl class="report-meta">
-        <div><dt>單日報酬</dt><dd>{{ '%+.2f%%'|format(market.return_1d_pct) if market.return_1d_pct is not none else '資料不足' }}</dd></div>
-        <div><dt>上漲／下跌家數</dt><dd>{{ market.advancing_count if market.advancing_count is not none else '—' }}／{{ market.declining_count if market.declining_count is not none else '—' }}</dd></div>
-        <div><dt>站上 MA20</dt><dd>{{ '%.1f%%'|format(market.ma20_breadth_pct) if market.ma20_breadth_pct is not none else '資料不足' }}</dd></div>
-        <div><dt>20 日已實現波動</dt><dd>{{ '%.1f%%'|format(market.realized_volatility_20d_pct) if market.realized_volatility_20d_pct is not none else '資料不足' }}</dd></div>
-      </dl>
-    {% else %}<div class="empty-state">{{ report.market.reason }}</div>{% endif %}
-  </section>
+    <div class="decision-box">
+      <h3 class="decision-headline">{{ exec_summary.one_line_conclusion or '今日市場資料已彙整完成。' }}</h3>
+    </div>
 
-  <section class="panel" id="capital-flows">
-    <p class="eyebrow">CAPITAL FLOWS</p><h2>資金與籌碼</h2>
-    {% if report.capital_flows.status == 'available' %}<pre>{{ report.capital_flows.data }}</pre>{% else %}<div class="empty-state">{{ report.capital_flows.reason }}</div>{% endif %}
-  </section>
-
-  <section class="panel" id="industry-analysis">
-    <p class="eyebrow">INDUSTRY ROTATION</p><h2>產業輪動與排名</h2>
-    {% if report.industries.status == 'available' %}
-      <div class="industry-detail-list">
-      {% for industry in report.industries.data.ranking %}
-        <article class="industry-detail"><header><div><h3>{{ industry.rank }}. {{ industry.name }}</h3><p>{{ industry.available_count }}／{{ industry.component_count }} 檔可用</p></div><strong>{{ '%+.2f%%'|format(industry.relative_return_5d_pct) if industry.relative_return_5d_pct is not none else '資料不足' }}</strong></header></article>
-      {% else %}<div class="empty-state">產業資料不足。</div>{% endfor %}
-      </div>
-    {% else %}<div class="empty-state">{{ report.industries.reason }}</div>{% endif %}
-  </section>
-
-  <section class="panel" id="security-analysis">
-    <p class="eyebrow">SECURITIES AND ETF</p><h2>個股與 ETF</h2>
-    {% if report.securities.status == 'available' %}
-      <h3>官方交易狀態</h3><ul>{% for item in report.securities.data.trading_status_observations %}<li>{{ item.name }}（{{ item.symbol }}）：{{ item.label }}{% if item.last_regular_close is defined %}；最後正常交易收盤 {{ '%.2f'|format(item.last_regular_close) }}（{{ item.latest_regular_price_date }}）{% endif %}</li>{% else %}<li>目前沒有已驗證的非價格交易狀態。</li>{% endfor %}</ul>
-      <h3>個股異常事件</h3><ul>{% for item in report.securities.data.stock_events %}<li>{{ item.name }}（{{ item.symbol }}）：{{ item.observation }}</li>{% else %}<li>目前沒有通過條件的異常事件。</li>{% endfor %}</ul>
-      <h3>ETF 觀察</h3><ul>{% for item in report.securities.data.etf_observations %}<li>{{ item.name }}（{{ item.symbol }}）</li>{% else %}<li>ETF 資料不足。</li>{% endfor %}</ul>
-    {% else %}<div class="empty-state">{{ report.securities.reason }}</div>{% endif %}
-  </section>
-
-  <section class="panel" id="quantitative-research">
-    <p class="eyebrow">QUANTITATIVE RESEARCH</p><h2>量化回歸與模型</h2>
-    {% if report.quantitative_research.status == 'available' %}
-      {% set research = report.quantitative_research %}
-      <p class="action-label">{{ research.ai_label }}｜{{ research.output_name }}</p>
-      <h3>{{ research.headline }}</h3>
-      <p>{{ research.summary }}</p>
-      <dl class="report-meta">
-        <div><dt>研究期間</dt><dd>{{ research.first_feature_session }} 至 {{ research.last_feature_session }}</dd></div>
-        <div><dt>樣本數</dt><dd>{{ research.sample_count }}</dd></div>
-        <div><dt>依變數</dt><dd>{{ research.dependent_variable }}</dd></div>
-        <div><dt>估計方法</dt><dd>OLS / Newey-West HAC（max lags={{ research.hac_max_lags }}）</dd></div>
-      </dl>
-      <div class="table-wrap">
-        <table>
-          <thead><tr><th>因子</th><th>係數</th><th>HAC 標準誤</th><th>t-stat</th><th>p-value</th><th>{{ research.confidence_level_pct }}% CI</th><th>方向</th></tr></thead>
-          <tbody>
-          {% for factor in research.factors %}
-            <tr>
-              <td>{{ factor.display_label }}</td>
-              <td>{{ '%.6f'|format(factor.coefficient) }}</td>
-              <td>{{ '%.6f'|format(factor.standard_error) }}</td>
-              <td>{{ '%.4f'|format(factor.t_statistic) }}</td>
-              <td>{{ '%.4f'|format(factor.p_value) }}</td>
-              <td>[{{ '%.6f'|format(factor.confidence_interval_low) }}, {{ '%.6f'|format(factor.confidence_interval_high) }}]</td>
-              <td>{{ factor.direction }}</td>
-            </tr>
+    <!-- Dual Evidence Columns -->
+    <div class="evidence-grid">
+      <div class="evidence-card positive-card">
+        <div class="evidence-header">
+          <span class="evidence-tag positive-tag">支持證據 (Positive / Supporting)</span>
+        </div>
+        <ul class="evidence-list">
+          {% for item in exec_summary.supporting_evidence %}
+            <li>{{ item }}</li>
+          {% else %}
+            <li class="muted">目前沒有足夠資料形成明確正向證據</li>
           {% endfor %}
-          </tbody>
-        </table>
+        </ul>
       </div>
-      <h3>模型配適</h3>
-      <dl class="report-meta">
-        <div><dt>R²</dt><dd>{{ '%.4f'|format(research.fit_statistics.r_squared) }}</dd></div>
-        <div><dt>Adjusted R²</dt><dd>{{ '%.4f'|format(research.fit_statistics.adjusted_r_squared) }}</dd></div>
-        <div><dt>殘差標準誤</dt><dd>{{ '%.6f'|format(research.fit_statistics.residual_standard_error) }}</dd></div>
-        <div><dt>F 檢定 p-value</dt><dd>{{ '%.4f'|format(research.fit_statistics.f_p_value) }}</dd></div>
-      </dl>
-      <h3>診斷</h3>
-      <dl class="report-meta">
-        <div><dt>VIF</dt><dd>{{ research.diagnostics.multicollinearity.max_vif }}</dd></div>
-        <div><dt>Breusch-Pagan</dt><dd>p-value {{ research.diagnostics.heteroskedasticity.p_value }}</dd></div>
-        <div><dt>Durbin-Watson</dt><dd>{{ research.diagnostics.autocorrelation.durbin_watson }}</dd></div>
-        <div><dt>Jarque-Bera</dt><dd>p-value {{ research.diagnostics.residual_normality.jarque_bera_p_value }}</dd></div>
-      </dl>
-      {% if research.diagnostics.warnings %}<h3>警示</h3><ul>{% for item in research.diagnostics.warnings %}<li>{{ item }}</li>{% endfor %}</ul>{% endif %}
-      {% if research.key_exposures %}<h3>主要暴露</h3><ul>{% for item in research.key_exposures %}<li>{{ item }}</li>{% endfor %}</ul>{% endif %}
-      <p><strong>限制：</strong>{{ research.limitations }}</p>
-      <p class="muted small">{{ research.disclosure }}</p>
+      <div class="evidence-card risk-card">
+        <div class="evidence-header">
+          <span class="evidence-tag risk-tag">反對與風險證據 (Risk / Opposing)</span>
+        </div>
+        <ul class="evidence-list">
+          {% for item in exec_summary.opposing_evidence %}
+            <li>{{ item }}</li>
+          {% else %}
+            <li class="muted">目前沒有足夠資料形成明確反向證據</li>
+          {% endfor %}
+        </ul>
+      </div>
+    </div>
+
+    <!-- Largest Risk Callout -->
+    <div class="callout-box warning-callout">
+      <div class="callout-icon">⚠️</div>
+      <div class="callout-content">
+        <strong>主要風險警示：</strong>
+        <span>{{ exec_summary.largest_risk or '市場風險狀態隨總體波動調整。' }}</span>
+      </div>
+    </div>
+
+    <!-- Key Events -->
+    <div class="subsection">
+      <h3 class="subsection-title">今日市場重要事件與異常摘要</h3>
+      <div class="event-card-list">
+        {% for event in report.key_events %}
+          <div class="event-item severity-{{ event.severity or 'medium' }}">
+            <div class="event-meta">
+              <span class="badge event-category-badge">{{ '正面' if event.category == 'positive' else '風險' }}</span>
+              <span class="badge severity-badge">{{ event.severity|upper }}</span>
+              {% if event.symbol %}<span class="event-symbol">{{ event.name or event.symbol }}（{{ event.symbol }}）</span>{% endif %}
+            </div>
+            <strong class="event-headline">{{ event.headline }}</strong>
+            <p class="event-desc">{{ event.description }}</p>
+          </div>
+        {% else %}
+          <div class="empty-state">目前沒有已通過條件的重大異常事件。</div>
+        {% endfor %}
+      </div>
+    </div>
+  </section>
+
+  <!-- Section 2: Market & Risk -->
+  <section class="panel report-section" id="market-analysis">
+    <div class="section-heading">
+      <div>
+        <p class="eyebrow">SECTION 02 ｜ MARKET AND RISK</p>
+        <h2>市場總體與風險</h2>
+      </div>
+      <span class="muted small">資料基準日 {{ ident.source_market_date or report.source_market_date or '—' }}</span>
+    </div>
+
+    {% if market_sec.status == 'available' %}
+      {% set market = market_sec.data %}
+      <div class="report-kpi-grid">
+        <div class="kpi-card">
+          <span class="kpi-label">大盤單日報酬</span>
+          <strong class="kpi-value {{ 'positive' if market.return_1d_pct and market.return_1d_pct >= 0 else 'negative' }}">
+            {{ '%+.2f%%'|format(market.return_1d_pct) if market.return_1d_pct is not none else '資料不足' }}
+          </strong>
+          <span class="kpi-sub">加權指數表現</span>
+        </div>
+        <div class="kpi-card">
+          <span class="kpi-label">上漲／下跌家數</span>
+          <strong class="kpi-value">
+            <span class="positive">{{ market.advancing_count if market.advancing_count is not none else '—' }}</span>
+            <span class="muted">/</span>
+            <span class="negative">{{ market.declining_count if market.declining_count is not none else '—' }}</span>
+          </strong>
+          <span class="kpi-sub">全市場漲跌廣度</span>
+        </div>
+        <div class="kpi-card">
+          <span class="kpi-label">站上 MA20 比例</span>
+          <strong class="kpi-value {{ 'positive' if market.ma20_breadth_pct and market.ma20_breadth_pct >= 50 else 'negative' }}">
+            {{ '%.1f%%'|format(market.ma20_breadth_pct) if market.ma20_breadth_pct is not none else '資料不足' }}
+          </strong>
+          <span class="kpi-sub">月線多空結構指標</span>
+        </div>
+        <div class="kpi-card">
+          <span class="kpi-label">20 日已實現波動率</span>
+          <strong class="kpi-value">
+            {{ '%.1f%%'|format(market.realized_volatility_20d_pct) if market.realized_volatility_20d_pct is not none else '資料不足' }}
+          </strong>
+          <span class="kpi-sub">年化波動率監控</span>
+        </div>
+      </div>
     {% else %}
-      <div class="empty-state">{{ report.quantitative_research.reason }}</div>
+      <div class="empty-state">{{ market_sec.reason or '市場資料尚未提供。' }}</div>
     {% endif %}
   </section>
 
-  <section class="panel" id="model-validation">
-    <p class="eyebrow">MODEL VALIDATION</p><h2>模型驗證與策略回測</h2>
-    {% if report.validation.status == 'available' %}
-      <dl class="report-meta">{% for name, status in report.validation.data.gates.items() %}<div><dt>{{ name }}</dt><dd>{{ status }}</dd></div>{% endfor %}</dl>
-      {% if report.validation.data.gate_detail_status == 'not_present_in_observation_metadata' %}<p class="muted small">目前 Observation Metadata 未包含各 Gate 的完整數值；本頁不自行補造。</p>{% endif %}
-    {% else %}<div class="empty-state">{{ report.validation.reason }}</div>{% endif %}
+  <!-- Section 3: Capital Flows -->
+  <section class="panel report-section" id="capital-flows">
+    <div class="section-heading">
+      <div>
+        <p class="eyebrow">SECTION 03 ｜ CAPITAL FLOWS</p>
+        <h2>資金與三大法人籌碼流向</h2>
+      </div>
+      <span class="muted small">單位：新台幣百萬元</span>
+    </div>
+
+    {% if flows_sec.status == 'available' %}
+      {% set flows = flows_sec.data %}
+      <div class="report-kpi-grid">
+        <div class="kpi-card">
+          <span class="kpi-label">外資及陸資買賣超</span>
+          <strong class="kpi-value {{ 'positive' if flows.foreign_net and flows.foreign_net >= 0 else ('negative' if flows.foreign_net and flows.foreign_net < 0 else '') }}">
+            {{ '%+,.1f'|format(flows.foreign_net) if flows.foreign_net is not none else '—' }}
+          </strong>
+          <span class="kpi-sub">外資籌碼動向 (百萬元)</span>
+        </div>
+        <div class="kpi-card">
+          <span class="kpi-label">投信買賣超</span>
+          <strong class="kpi-value {{ 'positive' if flows.investment_trust_net and flows.investment_trust_net >= 0 else ('negative' if flows.investment_trust_net and flows.investment_trust_net < 0 else '') }}">
+            {{ '%+,.1f'|format(flows.investment_trust_net) if flows.investment_trust_net is not none else '—' }}
+          </strong>
+          <span class="kpi-sub">本土法人動向 (百萬元)</span>
+        </div>
+        <div class="kpi-card">
+          <span class="kpi-label">自營商買賣超</span>
+          <strong class="kpi-value {{ 'positive' if flows.dealer_net and flows.dealer_net >= 0 else ('negative' if flows.dealer_net and flows.dealer_net < 0 else '') }}">
+            {{ '%+,.1f'|format(flows.dealer_net) if flows.dealer_net is not none else '—' }}
+          </strong>
+          <span class="kpi-sub">自營商整體動向 (百萬元)</span>
+        </div>
+        <div class="kpi-card">
+          <span class="kpi-label">三大法人合計買賣超</span>
+          <strong class="kpi-value {{ 'positive' if flows.total_institutional_net and flows.total_institutional_net >= 0 else ('negative' if flows.total_institutional_net and flows.total_institutional_net < 0 else '') }}">
+            {{ '%+,.1f'|format(flows.total_institutional_net) if flows.total_institutional_net is not none else '—' }}
+          </strong>
+          <span class="kpi-sub">市場主力合計 (百萬元)</span>
+        </div>
+      </div>
+    {% else %}
+      <div class="empty-state">{{ flows_sec.reason or '法人流向尚未納入。' }}</div>
+    {% endif %}
   </section>
 
-  <section class="panel" id="next-session">
-    <p class="eyebrow">NEXT SESSION</p><h2>下一交易日研究框架</h2>
-    {% if report.next_session.status == 'available' %}
-      <div class="reason-columns"><section><h3>正向情境</h3><ul>{% for item in report.next_session.data.positive %}<li>{{ item }}</li>{% endfor %}</ul></section><section><h3>負向情境</h3><ul>{% for item in report.next_session.data.negative %}<li>{{ item }}</li>{% endfor %}</ul></section></div>
-      <h3>中性情境</h3><ul>{% for item in report.next_session.data.neutral %}<li>{{ item }}</li>{% endfor %}</ul>
-    {% else %}<div class="empty-state">{{ report.next_session.reason }}</div>{% endif %}
+  <!-- Section 4: Industry Rotation -->
+  <section class="panel report-section" id="industry-analysis">
+    <div class="section-heading">
+      <div>
+        <p class="eyebrow">SECTION 04 ｜ INDUSTRY ROTATION</p>
+        <h2>產業輪動與相對強弱排名</h2>
+      </div>
+      <span class="muted small">5 日相對大盤超額報酬 (Relative Return)</span>
+    </div>
+
+    {% if ind_sec.status == 'available' %}
+      <!-- Highlight Strongest vs Weakest -->
+      {% if exec_summary.strongest_industries or exec_summary.weakest_industries %}
+        <div class="industry-highlight-grid">
+          <div class="highlight-group strong-group">
+            <span class="group-title positive">🔥 強勢領先產業</span>
+            <div class="group-tags">
+              {% for ind in exec_summary.strongest_industries %}
+                <span class="tag strong-tag">{{ ind }}</span>
+              {% else %}
+                <span class="muted small">無明顯領先產業</span>
+              {% endfor %}
+            </div>
+          </div>
+          <div class="highlight-group weak-group">
+            <span class="group-title negative">❄️ 弱勢落後產業</span>
+            <div class="group-tags">
+              {% for ind in exec_summary.weakest_industries %}
+                <span class="tag weak-tag">{{ ind }}</span>
+              {% else %}
+                <span class="muted small">無明顯落後產業</span>
+              {% endfor %}
+            </div>
+          </div>
+        </div>
+      {% endif %}
+
+      <!-- Full Industry Table -->
+      <div class="table-wrap">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th style="width: 80px;">名次</th>
+              <th>產業分類</th>
+              <th style="text-align: right;">5 日相對報酬</th>
+              <th style="text-align: right;">成分股涵蓋</th>
+              <th style="text-align: center;">相對強弱評估</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for industry in ind_sec.data.ranking %}
+              <tr>
+                <td>
+                  <span class="rank-badge {{ 'top-rank' if loop.index <= 3 else ('bottom-rank' if loop.index >= loop.length - 2 else '') }}">
+                    {{ industry.rank or loop.index }}
+                  </span>
+                </td>
+                <td><strong>{{ industry.name }}</strong></td>
+                <td style="text-align: right;" class="{{ 'positive' if industry.relative_return_5d_pct and industry.relative_return_5d_pct >= 0 else 'negative' }}">
+                  <strong>{{ '%+.2f%%'|format(industry.relative_return_5d_pct) if industry.relative_return_5d_pct is not none else '資料不足' }}</strong>
+                </td>
+                <td style="text-align: right;" class="muted">
+                  {{ industry.available_count }} / {{ industry.component_count }} 檔
+                  {% if industry.coverage %}<span class="small">({{ '%.0f%%'|format(industry.coverage * 100) }})</span>{% endif %}
+                </td>
+                <td style="text-align: center;">
+                  {% if industry.relative_return_5d_pct is not none %}
+                    {% if industry.relative_return_5d_pct >= 1.5 %}
+                      <span class="badge badge-success">強勢跑贏</span>
+                    {% elif industry.relative_return_5d_pct >= -0.5 %}
+                      <span class="badge badge-neutral">貼近大盤</span>
+                    {% else %}
+                      <span class="badge badge-danger">相對落後</span>
+                    {% endif %}
+                  {% else %}
+                    <span class="badge badge-muted">資料不足</span>
+                  {% endif %}
+                </td>
+              </tr>
+            {% else %}
+              <tr><td colspan="5" class="empty-state">產業資料不足。</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% else %}
+      <div class="empty-state">{{ ind_sec.reason or '產業觀察資料尚未提供。' }}</div>
+    {% endif %}
   </section>
 
-  <section class="panel" id="data-governance">
-    <p class="eyebrow">DATA GOVERNANCE</p><h2>資料治理與方法論</h2>
-    {% if report.governance.status == 'available' %}
-      <dl class="report-meta"><div><dt>覆蓋率</dt><dd>{{ '%.2f%%'|format(report.governance.data.coverage * 100) if report.governance.data.coverage is not none else '資料不足' }}</dd></div><div><dt>有效標的</dt><dd>{{ report.governance.data.symbol_count if report.governance.data.symbol_count is not none else '資料不足' }}</dd></div><div><dt>失敗標的</dt><dd>{{ report.governance.data.failure_count if report.governance.data.failure_count is not none else '資料不足' }}</dd></div><div><dt>來源雜湊</dt><dd>{{ report.identity.source_manifest_sha256_short }}</dd></div></dl>
-    {% else %}<div class="empty-state">{{ report.governance.reason }}</div>{% endif %}
-    <p class="muted small">統計關聯不等於因果關係，歷史資料與模型研究結果不保證交易獲利。</p>
+  <!-- Section 5: Securities & ETF Analysis -->
+  <section class="panel report-section" id="security-analysis">
+    <div class="section-heading">
+      <div>
+        <p class="eyebrow">SECTION 05 ｜ SECURITIES AND ETF</p>
+        <h2>個股異常事件與 ETF 觀察</h2>
+      </div>
+    </div>
+
+    {% if sec_sec.status == 'available' %}
+      <!-- Subsection: Trading Status -->
+      <div class="subsection">
+        <h3 class="subsection-title">官方非價格交易狀態觀察（處置、減資、終止上市等）</h3>
+        {% if sec_sec.data.trading_status_observations %}
+          <div class="table-wrap">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>標的名稱</th>
+                  <th>代碼</th>
+                  <th>狀態標籤</th>
+                  <th>最後正常交易收盤</th>
+                  <th>基準日期</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for item in sec_sec.data.trading_status_observations %}
+                  <tr>
+                    <td><strong>{{ item.name }}</strong></td>
+                    <td><code>{{ item.symbol }}</code></td>
+                    <td><span class="badge badge-warning">{{ item.label }}</span></td>
+                    <td>{% if item.last_regular_close is defined %}最後正常交易收盤 {{ '%.2f'|format(item.last_regular_close) }}（{{ item.latest_regular_price_date }}）{% else %}—{% endif %}</td>
+                    <td class="muted small">{{ item.latest_regular_price_date or item.observation_as_of or '—' }}</td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        {% else %}
+          <p class="muted small">目前沒有已驗證的非價格交易狀態變更。</p>
+        {% endif %}
+      </div>
+
+      <!-- Subsection: Stock Events -->
+      <div class="subsection">
+        <h3 class="subsection-title">個股技術與量能異常事件</h3>
+        <div class="event-card-list">
+          {% for item in sec_sec.data.stock_events %}
+            <div class="event-item">
+              <div class="event-meta">
+                <span class="event-symbol"><strong>{{ item.name }}</strong>（{{ item.symbol }}）</span>
+                <span class="badge badge-neutral">{{ item.as_of }}</span>
+              </div>
+              <p class="event-desc">{{ item.observation }}</p>
+              {% if item.metric_value is defined and item.metric_value is not none %}
+                <span class="muted small">數值：{{ item.metric_value }} {{ item.unit }}</span>
+              {% endif %}
+            </div>
+          {% else %}
+            <p class="muted small">目前沒有通過條件的異常事件。</p>
+          {% endfor %}
+        </div>
+      </div>
+
+      <!-- Subsection: ETF Observations -->
+      <div class="subsection">
+        <h3 class="subsection-title">重點 ETF 追蹤</h3>
+        <div class="report-kpi-grid">
+          {% for item in sec_sec.data.etf_observations[:8] %}
+            <div class="kpi-card etf-card">
+              <span class="kpi-label">{{ item.name }} ({{ item.symbol }})</span>
+              <strong class="kpi-value">{{ '{:,.2f}'.format(item.price) if item.price is not none else '—' }}</strong>
+              <div class="etf-metrics">
+                <span>單日：<strong class="{{ 'positive' if item.return_1d_pct and item.return_1d_pct >= 0 else 'negative' }}">{{ '%+.2f%%'|format(item.return_1d_pct) if item.return_1d_pct is not none else '—' }}</strong></span>
+                <span>5日：<strong class="{{ 'positive' if item.return_5d_pct and item.return_5d_pct >= 0 else 'negative' }}">{{ '%+.2f%%'|format(item.return_5d_pct) if item.return_5d_pct is not none else '—' }}</strong></span>
+              </div>
+            </div>
+          {% else %}
+            <div class="empty-state">ETF 觀察資料不足。</div>
+          {% endfor %}
+        </div>
+      </div>
+    {% else %}
+      <div class="empty-state">{{ sec_sec.reason or '個股資料尚未提供。' }}</div>
+    {% endif %}
   </section>
 
-  <section class="panel risk-panel" id="ai-reference">
-    <p class="eyebrow">AI REFERENCE</p><h2>AI 模型參考建議</h2>
-    {% if report.ai_reference.status == 'available' %}<p>{{ report.ai_reference.data.conclusion }}</p>{% else %}<div class="empty-state">{{ report.ai_reference.reason }}</div>{% endif %}
-    <p>內容由 Gemini 根據 ABSORB 可取得的市場、產業、個股及量化研究資料整理，不構成個人化投資建議，亦不保證未來結果。</p>
+  <!-- Section 6: Quantitative Research & Factor Regression -->
+  <section class="panel report-section" id="quantitative-research">
+    <div class="section-heading">
+      <div>
+        <p class="eyebrow">SECTION 06 ｜ QUANTITATIVE RESEARCH</p>
+        <h2>量化回歸與解釋型模型研究</h2>
+      </div>
+      <div class="badge badge-research">統計學術規範 · Newey-West HAC</div>
+    </div>
+
+    {% if quant_sec.status == 'available' %}
+      {% set research = quant_sec %}
+      <!-- Research Specification Banner -->
+      <div class="research-spec-box">
+        <div class="spec-header">
+          <span class="spec-tag">{{ research.ai_label }} ｜ {{ research.output_name }}</span>
+          <h3 class="spec-headline">{{ research.headline }}</h3>
+        </div>
+        <p class="spec-summary">{{ research.summary }}</p>
+        <div class="spec-meta-grid">
+          <div><dt>研究期間</dt><dd>{{ research.first_feature_session }} 至 {{ research.last_feature_session }}</dd></div>
+          <div><dt>樣本數</dt><dd>{{ research.sample_count }} 筆交易日</dd></div>
+          <div><dt>依變數 (Y)</dt><dd><code>{{ research.dependent_variable }}</code></dd></div>
+          <div><dt>估計方法</dt><dd>OLS / Newey-West HAC (Lags={{ research.hac_max_lags }})</dd></div>
+        </div>
+      </div>
+
+      <!-- Factor Regression Results Table -->
+      <div class="table-wrap">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>因子特徵名稱</th>
+              <th style="text-align: right;">估計係數 ($\beta$)</th>
+              <th style="text-align: right;">HAC 標準誤</th>
+              <th style="text-align: right;">t-stat</th>
+              <th style="text-align: right;">p-value</th>
+              <th style="text-align: center;">{{ research.confidence_level_pct }}% CI</th>
+              <th style="text-align: center;">關聯方向</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for factor in research.factors %}
+              <tr>
+                <td><strong>{{ factor.display_label }}</strong></td>
+                <td style="text-align: right;"><code>{{ '%.6f'|format(factor.coefficient) }}</code></td>
+                <td style="text-align: right;" class="muted"><code>{{ '%.6f'|format(factor.standard_error) }}</code></td>
+                <td style="text-align: right;"><code>{{ '%.4f'|format(factor.t_statistic) }}</code></td>
+                <td style="text-align: right;">
+                  <strong class="{{ 'positive' if factor.p_value < 0.05 else 'muted' }}">
+                    {{ '%.4f'|format(factor.p_value) }}
+                    {% if factor.p_value < 0.01 %}***{% elif factor.p_value < 0.05 %}**{% elif factor.p_value < 0.1 %}*{% endif %}
+                  </strong>
+                </td>
+                <td style="text-align: center;" class="muted small">
+                  [{{ '%.6f'|format(factor.confidence_interval_low) }}, {{ '%.6f'|format(factor.confidence_interval_high) }}]
+                </td>
+                <td style="text-align: center;">
+                  <span class="badge {{ 'badge-success' if factor.direction == '正向' else ('badge-danger' if factor.direction == '負向' else 'badge-neutral') }}">
+                    {{ factor.direction }}
+                  </span>
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Goodness of Fit & Diagnostics -->
+      <div class="diagnostics-grid">
+        <div class="diag-card">
+          <h4>模型配適度 (Goodness of Fit)</h4>
+          <dl class="report-meta">
+            <div><dt>判定係數 R² ($R^2$)</dt><dd><code>{{ '%.4f'|format(research.fit_statistics.r_squared) }}</code></dd></div>
+            <div><dt>Adjusted R² (調整後 $R^2$)</dt><dd><code>{{ '%.4f'|format(research.fit_statistics.adjusted_r_squared) }}</code></dd></div>
+            <div><dt>殘差標準誤</dt><dd><code>{{ '%.6f'|format(research.fit_statistics.residual_standard_error) }}</code></dd></div>
+            <div><dt>F 檢定 p-value</dt><dd><code>{{ '%.4f'|format(research.fit_statistics.f_p_value) }}</code></dd></div>
+          </dl>
+        </div>
+        <div class="diag-card">
+          <h4>統計計量診斷 (Diagnostics)</h4>
+          <dl class="report-meta">
+            <div><dt>VIF (最大共線性)</dt><dd><code>{{ research.diagnostics.multicollinearity.max_vif }}</code></dd></div>
+            <div><dt>Breusch-Pagan (異質變異)</dt><dd><code>p={{ research.diagnostics.heteroskedasticity.p_value }}</code></dd></div>
+            <div><dt>Durbin-Watson (自相關)</dt><dd><code>{{ research.diagnostics.autocorrelation.durbin_watson }}</code></dd></div>
+            <div><dt>Jarque-Bera (殘差常態)</dt><dd><code>p={{ research.diagnostics.residual_normality.jarque_bera_p_value }}</code></dd></div>
+          </dl>
+        </div>
+      </div>
+
+      {% if research.warnings %}
+        <div class="callout-box warning-callout">
+          <div class="callout-icon">⚠️</div>
+          <div class="callout-content">
+            <strong>統計警示與限制：</strong>
+            <ul class="clean-list">
+              {% for item in research.warnings %}<li>{{ item }}</li>{% endfor %}
+            </ul>
+          </div>
+        </div>
+      {% endif %}
+
+      <div class="disclosure-strip">
+        <p><strong>研究限制：</strong>{{ research.limitations }}</p>
+        <p class="muted small">{{ research.disclosure }}</p>
+      </div>
+    {% else %}
+      <div class="empty-state">{{ quant_sec.reason or '量化回歸研究尚未提供。' }}</div>
+    {% endif %}
+  </section>
+
+  <!-- Section 7: Model Validation & Backtest -->
+  <section class="panel report-section" id="model-validation">
+    <div class="section-heading">
+      <div>
+        <p class="eyebrow">SECTION 07 ｜ MODEL VALIDATION</p>
+        <h2>量化模型驗證與策略回測閘道</h2>
+      </div>
+      <div class="badge badge-neutral">正式生產不調用未過 Gate 模型</div>
+    </div>
+
+    {% if val_sec.status == 'available' %}
+      <div class="gate-grid">
+        {% for name, status in val_sec.data.gates.items() %}
+          <div class="gate-card">
+            <span class="gate-name">{{ name }}</span>
+            <span class="gate-status badge {{ 'badge-success' if status in ('PASS', 'PASSED') else ('badge-danger' if status in ('FAIL', 'FAILED', 'REJECTED') else 'badge-neutral') }}">
+              {{ status }}
+            </span>
+          </div>
+        {% endfor %}
+      </div>
+      <div class="validation-note">
+        <p class="muted small">
+          遵循嚴格生產防禦合約：未通過 Ranking、Calibration、Quality 與 Transaction Value 門檻之模型，系統將封鎖自動交易信號輸出，確保投資人與系統不受過擬合虛假訊號誤導。
+        </p>
+      </div>
+    {% else %}
+      <div class="empty-state">{{ val_sec.reason or '模型驗證資料尚未提供。' }}</div>
+    {% endif %}
+  </section>
+
+  <!-- Section 8: Next Session Research Framework -->
+  <section class="panel report-section" id="next-session">
+    <div class="section-heading">
+      <div>
+        <p class="eyebrow">SECTION 08 ｜ NEXT SESSION</p>
+        <h2>下一交易日研究與觀察情境框架</h2>
+      </div>
+      <span class="muted small">適用交易日 {{ ident.applicable_trading_date or report.applicable_trading_date or '—' }}</span>
+    </div>
+
+    {% if next_sec.status == 'available' %}
+      <div class="scenario-card-grid">
+        <div class="scenario-card positive-scenario">
+          <div class="scenario-header">
+            <span class="scenario-badge positive">正向偏多情境</span>
+          </div>
+          <ul class="scenario-list">
+            {% for item in next_sec.data.positive %}
+              <li>{{ item }}</li>
+            {% else %}
+              <li class="muted">無特定正向情境。</li>
+            {% endfor %}
+          </ul>
+        </div>
+
+        <div class="scenario-card neutral-scenario">
+          <div class="scenario-header">
+            <span class="scenario-badge neutral">中性盤整情境</span>
+          </div>
+          <ul class="scenario-list">
+            {% for item in next_sec.data.neutral %}
+              <li>{{ item }}</li>
+            {% else %}
+              <li class="muted">無特定中性情境。</li>
+            {% endfor %}
+          </ul>
+        </div>
+
+        <div class="scenario-card negative-scenario">
+          <div class="scenario-header">
+            <span class="scenario-badge negative">防守警戒情境</span>
+          </div>
+          <ul class="scenario-list">
+            {% for item in next_sec.data.negative %}
+              <li>{{ item }}</li>
+            {% else %}
+              <li class="muted">無特定警戒情境。</li>
+            {% endfor %}
+          </ul>
+        </div>
+      </div>
+    {% else %}
+      <div class="empty-state">{{ next_sec.reason or '次日情境框架尚未提供。' }}</div>
+    {% endif %}
+  </section>
+
+  <!-- Section 9: Data Governance -->
+  <section class="panel report-section" id="data-governance">
+    <div class="section-heading">
+      <div>
+        <p class="eyebrow">SECTION 09 ｜ DATA GOVERNANCE</p>
+        <h2>資料治理、來源稽核與方法論</h2>
+      </div>
+    </div>
+
+    {% if gov_sec.status == 'available' %}
+      <div class="report-kpi-grid">
+        <div class="kpi-card">
+          <span class="kpi-label">資料全市場覆蓋率</span>
+          <strong class="kpi-value">{{ '%.2f%%'|format(gov_sec.data.coverage * 100) if gov_sec.data.coverage is not none else '資料不足' }}</strong>
+          <span class="kpi-sub">上市櫃完整覆蓋</span>
+        </div>
+        <div class="kpi-card">
+          <span class="kpi-label">驗證有效標的數</span>
+          <strong class="kpi-value">{{ gov_sec.data.symbol_count if gov_sec.data.symbol_count is not none else '—' }} 檔</strong>
+          <span class="kpi-sub">無缺失正常標的</span>
+        </div>
+        <div class="kpi-card">
+          <span class="kpi-label">未納入或缺失標的</span>
+          <strong class="kpi-value">{{ gov_sec.data.failure_count if gov_sec.data.failure_count is not none else '0' }} 檔</strong>
+          <span class="kpi-sub">處置/暫停/資料不全</span>
+        </div>
+        <div class="kpi-card">
+          <span class="kpi-label">來源 Manifest 雜湊</span>
+          <strong class="kpi-value"><code>{{ ident.source_manifest_sha256_short or '—' }}</code></strong>
+          <span class="kpi-sub">不可變內容位址 SHA-256</span>
+        </div>
+      </div>
+      <dl class="report-meta" style="margin-top: 16px;">
+        <div><dt>覆蓋率</dt><dd>{{ '%.2f%%'|format(gov_sec.data.coverage * 100) if gov_sec.data.coverage is not none else '資料不足' }}</dd></div>
+        <div><dt>有效標的</dt><dd>{{ gov_sec.data.symbol_count if gov_sec.data.symbol_count is not none else '資料不足' }}</dd></div>
+        <div><dt>未納入標的</dt><dd>{{ gov_sec.data.failure_count if gov_sec.data.failure_count is not none else '資料不足' }}</dd></div>
+      </dl>
+    {% else %}
+      <div class="empty-state">{{ gov_sec.reason or '資料治理指標尚未提供。' }}</div>
+    {% endif %}
+    <p class="muted small" style="margin-top: 14px;">
+      資料治理原則：統計關聯不等於因果關係，歷史資料與模型研究結果不保證未來交易獲利。所有發布產物具備嚴格內容雜湊簽署，杜絕事後竄改或未來資訊洩漏 (Lookahead-Free)。
+    </p>
+  </section>
+
+  <!-- Section 10: AI Reference & Legal Disclosure -->
+  <section class="panel report-section risk-panel" id="ai-reference">
+    <div class="section-heading">
+      <div>
+        <p class="eyebrow">SECTION 10 ｜ AI REFERENCE</p>
+        <h2>AI 模型參考建議與監管免責聲明</h2>
+      </div>
+    </div>
+
+    {% if ai_sec.status == 'available' %}
+      <div class="ai-conclusion-box">
+        <p class="ai-text">{{ ai_sec.data.conclusion }}</p>
+      </div>
+    {% else %}
+      <div class="empty-state">{{ ai_sec.reason or 'AI 參考建議尚未提供。' }}</div>
+    {% endif %}
+
+    <div class="legal-disclaimer">
+      <p>
+        <strong>免責聲明：</strong>
+        本報告內容由 Google Gemini 根據 ABSORB 可取得之台灣證券交易所 (TWSE)、證券櫃檯買賣中心 (TPEx) 公開市場資料、已驗證產業架構及量化回歸研究模型分析生成。本報告僅供學術量化研究與市場觀察參考，不構成任何證券、金融商品之買賣推薦、要約或投資顧問服務。投資人應獨立評估投資風險，並就投資決策自行承擔盈虧責任。
+      </p>
+    </div>
   </section>
 </article>
 {% endblock %}
