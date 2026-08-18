@@ -10,6 +10,10 @@ $Identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $Principal = New-ScheduledTaskPrincipal -UserId $Identity.Name -LogonType Interactive -RunLevel Limited
 $TaskWrapper = Join-Path $PSScriptRoot 'invoke_pipeline_task.ps1'
 if (-not (Test-Path -LiteralPath $TaskWrapper -PathType Leaf)) { throw "Task wrapper not found: $TaskWrapper" }
+$HiddenLauncher = Join-Path $PSScriptRoot 'run_hidden.vbs'
+if (-not (Test-Path -LiteralPath $HiddenLauncher -PathType Leaf)) { throw "Hidden launcher not found: $HiddenLauncher" }
+$WscriptExe = (Get-Command wscript.exe -ErrorAction Stop).Source
+$PowerShellExe = (Get-Command powershell.exe -ErrorAction Stop).Source
 $Definitions = @(
   @{ Name='ABSORB-TW-PostClose'; Job='TW-PostClose'; Time='17:10'; RepetitionInterval='PT20M'; RepetitionDuration='PT4H50M' },
   @{ Name='ABSORB-TW-PreMarket'; Job='TW-PreMarket'; Time='07:30' },
@@ -19,7 +23,25 @@ $Definitions = @(
   @{ Name='ABSORB-ReportUploadRecovery'; Job='ReportUploadRecovery'; Time='09:35' }
 )
 foreach ($Definition in $Definitions) {
-  $Action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$TaskWrapper`" -Job `"$($Definition.Job)`" -DataRoot `"$DataRoot`"" -WorkingDirectory $RepoRoot
+  $ActionArguments = @(
+    '//B',
+    '//NoLogo',
+    "`"$HiddenLauncher`"",
+    "`"$PowerShellExe`"",
+    '-NoProfile',
+    '-NonInteractive',
+    '-WindowStyle',
+    'Hidden',
+    '-ExecutionPolicy',
+    'Bypass',
+    '-File',
+    "`"$TaskWrapper`"",
+    '-Job',
+    "`"$($Definition.Job)`"",
+    '-DataRoot',
+    "`"$DataRoot`""
+  ) -join ' '
+  $Action = New-ScheduledTaskAction -Execute $WscriptExe -Argument $ActionArguments -WorkingDirectory $RepoRoot
   $At = [datetime]::ParseExact($Definition.Time, 'HH:mm', $null)
   $Trigger = if ($Definition.Days) {
     New-ScheduledTaskTrigger -Weekly -DaysOfWeek $Definition.Days -At $At
