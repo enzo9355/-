@@ -1,7 +1,10 @@
+import datetime
 import os
 import subprocess
 import unittest
 from pathlib import Path
+
+UTC = datetime.timezone.utc
 
 
 class PipelineSchedulerTests(unittest.TestCase):
@@ -206,18 +209,50 @@ class PipelineSchedulerTests(unittest.TestCase):
         self.assertIn("'--source-market-date', $SourceMarketDate", script)
         self.assertNotIn("'--source-market-date', $Manifest.market_as_of", script)
 
-    def test_observation_only_upload_scopes_pointers_to_tw_post_close(self):
+    def test_observation_only_upload_scopes_pointers_to_tw_daily_reports(self):
         script = (
             Path(__file__).parents[1] / "scripts" / "upload_local_quant.ps1"
         ).read_text(encoding="utf-8")
 
-        self.assertIn("$Markets = if ($ObservationOnly)", script)
+        self.assertIn("} elseif ($ObservationOnly) {", script)
         self.assertIn("@('TW')", script)
         self.assertIn("if (-not $ObservationOnly -and", script)
-        self.assertIn("$ReportV2Types = if ($ObservationOnly)", script)
-        self.assertIn("@('post_close')", script)
+        self.assertIn("Get-ObservationReportV2Types", script)
+        self.assertIn("latest-TW-pre_market.json", script)
+        self.assertIn("[switch]$ReportV2Only", script)
+        self.assertIn("$Markets = if ($ReportV2Only)", script)
+        self.assertIn("if (-not $ReportV2Only)", script)
         self.assertIn("foreach ($Type in $ReportV2Types)", script)
         self.assertNotIn("foreach ($Market in @('TW', 'US'))", script)
+
+        common = (
+            Path(__file__).parents[1]
+            / "scripts"
+            / "observation_release_common.ps1"
+        )
+        completed = subprocess.run(
+            [
+                r"C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                (
+                    f". '{common}'; "
+                    "$types=@(Get-ObservationReportV2Types -ObservationOnly); "
+                    "if (($types -join '|') -ne 'post_close|pre_market') { exit 46 }"
+                ),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(
+            completed.returncode,
+            0,
+            completed.stdout + completed.stderr,
+        )
 
     def test_full_backtest_logs_nonfatal_python_warnings_but_keeps_exit_code(self):
         source = (
@@ -269,5 +304,239 @@ class PipelineSchedulerTests(unittest.TestCase):
         self.assertNotIn("$Output = & $Gcloud @Arguments 2>&1", release_common)
         self.assertNotIn("& $Gcloud @Arguments", upload)
 
+    def test_post_close_scheduler_bounded_repetition_and_idempotency(self):
+        scripts = Path(__file__).parents[1] / "scripts"
+        install_source = (scripts / "install_pipeline_tasks.ps1").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("RepetitionInterval='PT20M'", install_source)
+        self.assertIn("RepetitionDuration='PT4H50M'", install_source)
+        self.assertIn("RepetitionNode", install_source)
+        self.assertIn("StopAtDurationEnd", install_source)
 
-if __name__ == "__main__": unittest.main()
+        post_close_source = (scripts / "run_tw_post_close_pipeline.ps1").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("post_close_pipeline_guard.ps1", post_close_source)
+        self.assertIn("Test-PostCloseCompletion", post_close_source)
+        self.assertIn("skipping duplicate execution", post_close_source)
+        self.assertLess(
+            post_close_source.index("post_close_pipeline_guard.ps1"),
+            post_close_source.index("python_runtime.ps1"),
+        )
+
+    @staticmethod
+    def _invoke_completion_guard(guard, root, target_date):
+        completed = subprocess.run(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                (
+                    f". '{guard}'; "
+                    f"if (Test-PostCloseCompletion -DataRoot '{root}' "
+                    f"-TargetDate '{target_date}') {{ exit 0 }} else {{ exit 1 }}"
+                ),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        return completed.returncode == 0, f"{completed.stdout}\n{completed.stderr}"
+
+    def test_post_close_completion_guard_requires_end_to_end_evidence(self):
+        import json
+        import tempfile
+
+        guard = (
+            Path(__file__).parents[1]
+            / "scripts"
+            / "post_close_pipeline_guard.ps1"
+        )
+        self.assertTrue(guard.is_file())
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            pointer_dir = root / "publish" / "reports" / "v2"
+            pointer_path = pointer_dir / "latest-TW-post_close.json"
+            status_dir = root / "logs" / "tasks"
+            status_path = status_dir / "current-TW-PostClose.json"
+            pointer_dir.mkdir(parents=True, exist_ok=True)
+            status_dir.mkdir(parents=True, exist_ok=True)
+
+            # 1. Nothing published yet -> must NOT skip (re-run required)
+            completed, _output = self._invoke_completion_guard(
+                guard, root, "2026-08-17"
+            )
+            self.assertFalse(completed)
+
+            # 2. Local pointer exists but no wrapper receipt (promote done,
+            #    upload failed) -> must NOT skip; retry must re-run upload
+            pointer_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 2,
+                        "kind": "absorb-report",
+                        "market": "TW",
+                        "report_type": "post_close",
+                        "source_market_date": "2026-08-17",
+                        "metadata": "metadata/a.json",
+                        "metadata_sha256": "a" * 64,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            completed, _output = self._invoke_completion_guard(
+                guard, root, "2026-08-17"
+            )
+            self.assertFalse(completed)
+
+            # 3. Pointer + failed receipt -> must NOT skip
+            status_path.write_text(
+                json.dumps(
+                    {
+                        "job": "TW-PostClose",
+                        "started_at": "2026-08-17T17:10:00+08:00",
+                        "success": False,
+                        "exit_code": 1,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            completed, _output = self._invoke_completion_guard(
+                guard, root, "2026-08-17"
+            )
+            self.assertFalse(completed)
+
+            # 4. Pointer + success receipt for a different day -> must NOT skip
+            status_path.write_text(
+                json.dumps(
+                    {
+                        "job": "TW-PostClose",
+                        "started_at": "2026-08-16T17:10:00+08:00",
+                        "success": True,
+                        "exit_code": 0,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            completed, _output = self._invoke_completion_guard(
+                guard, root, "2026-08-17"
+            )
+            self.assertFalse(completed)
+
+            # 5. Pointer + success receipt for the same day -> skip
+            status_path.write_text(
+                json.dumps(
+                    {
+                        "job": "TW-PostClose",
+                        "started_at": "2026-08-17T21:50:00+08:00",
+                        "success": True,
+                        "exit_code": 0,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            completed, _output = self._invoke_completion_guard(
+                guard, root, "2026-08-17"
+            )
+            self.assertTrue(completed)
+
+            # 6. Corrupt pointer JSON -> must NOT skip (fail-open into re-run)
+            pointer_path.write_text("{ not valid json", encoding="utf-8")
+            completed, _output = self._invoke_completion_guard(
+                guard, root, "2026-08-17"
+            )
+            self.assertFalse(completed)
+
+            # 7. Pointer for another source date -> must NOT skip
+            pointer_path.write_text(
+                json.dumps({"source_market_date": "2026-08-14"}),
+                encoding="utf-8",
+            )
+            completed, _output = self._invoke_completion_guard(
+                guard, root, "2026-08-17"
+            )
+            self.assertFalse(completed)
+
+    def test_availability_aware_retry_contract_and_date_preservation(self):
+        import json
+        import tempfile
+        from stock_papi.batch.post_close import PostClosePipeline, PostClosePipelineError
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            target_date = datetime.date(2026, 7, 14)
+            publish_dir = root / "publish" / "reports" / "v2"
+            publish_dir.mkdir(parents=True, exist_ok=True)
+            latest_file = publish_dir / "latest-TW-post_close.json"
+
+            # 1. Unavailable official dataset -> fail-closed (no latest created)
+            calls = []
+            def failing_source():
+                raise RuntimeError("official margin data unavailable")
+
+            wired = {
+                "load_source": failing_source,
+                "infer": lambda v: calls.append("infer"),
+                "settle": lambda v: calls.append("settle"),
+                "aggregate": lambda v, i, s: calls.append("aggregate"),
+                "render": lambda r: calls.append("render"),
+                "publish": lambda r, ren: calls.append("publish"),
+                "upload": lambda rec: calls.append("upload"),
+                "remote_verify": lambda rec: calls.append("verify"),
+                "notify": lambda rec: calls.append("notify"),
+            }
+            pipeline = PostClosePipeline(
+                root,
+                target_market_date=target_date,
+                source_manifest="quant/v1/manifests/TW-20260714T090000Z-aaaaaaaaaaaa.json",
+                source_manifest_sha256="a" * 64,
+                model_version="lgbm-5d-v1",
+                callbacks=wired,
+            )
+            with self.assertRaises(RuntimeError):
+                pipeline.run(now=datetime.datetime(2026, 7, 14, 17, 10, tzinfo=UTC))
+            self.assertEqual(calls, [])
+            self.assertFalse(latest_file.exists())
+
+            # 2. Retry succeeds later (e.g. 21:20) without date drift
+            def success_source():
+                return {
+                    "market": "TW",
+                    "market_as_of": "2026-07-14",
+                    "manifest_path": "quant/v1/manifests/TW-20260714T090000Z-aaaaaaaaaaaa.json",
+                    "manifest_sha256": "a" * 64,
+                    "model_version": "lgbm-5d-v1",
+                    "failure_rate": 0.0,
+                    "sample_data": False,
+                }
+
+            def publish_cb(report, rendered):
+                calls.append("publish")
+                latest_file.write_text(
+                    json.dumps({
+                        "source_market_date": "2026-07-14",
+                        "applicable_trading_date": "2026-07-15",
+                        "report_type": "post_close",
+                    }),
+                    encoding="utf-8",
+                )
+                return {"content_sha256": "b" * 64}
+
+            wired["load_source"] = success_source
+            wired["publish"] = publish_cb
+            res = pipeline.run(now=datetime.datetime(2026, 7, 14, 21, 20, tzinfo=UTC))
+            self.assertEqual(res["status"], "completed")
+            self.assertIn("publish", calls)
+            self.assertTrue(latest_file.exists())
+
+            latest_data = json.loads(latest_file.read_text(encoding="utf-8"))
+            self.assertEqual(latest_data["source_market_date"], "2026-07-14")
+            self.assertEqual(latest_data["applicable_trading_date"], "2026-07-15")
+
+
+if __name__ == "__main__":
+    unittest.main()

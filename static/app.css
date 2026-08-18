@@ -1005,6 +1005,17 @@ a:focus-visible,button:focus-visible,input:focus-visible,select:focus-visible,su
   color: var(--muted);
 }
 
+.etf-metrics {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px 8px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
 /* Industry highlight */
 .industry-highlight-grid {
   display: grid;

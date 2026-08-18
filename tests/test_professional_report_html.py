@@ -108,6 +108,157 @@ class ProfessionalReportHtmlTests(unittest.TestCase):
         self.assertIn("最後正常交易收盤 100.00（2026-07-16）", output)
         self.assertNotIn("quant/v1/manifests/", output)
 
+    def test_etf_observations_render_verified_fields_and_safe_fallback(self):
+        template_text = pathlib.Path(
+            "templates/reports/post_close_professional.html"
+        ).read_text(encoding="utf-8")
+        env = Environment(
+            loader=DictLoader(
+                {
+                    "reports/post_close_professional.html": template_text,
+                    "base.html": "{% block title %}{% endblock %}{% block nav_reports %}{% endblock %}{% block content %}{% endblock %}",
+                }
+            )
+        )
+        metadata = self._metadata()
+        metadata["content"]["etf_observations"] = [
+            {
+                "symbol": "0050",
+                "name": "元大台灣50",
+                "price": 106.4,
+                "return_1d_pct": -0.28,
+                "return_5d_pct": 3.45,
+                "volume_ratio": 0.4,
+                "trend_observation": "above_ma20",
+                "as_of": "2026-07-17",
+            },
+            {
+                "symbol": "0056",
+                "name": "元大高股息",
+                "price": None,
+                "return_1d_pct": None,
+                "return_5d_pct": None,
+                "volume_ratio": None,
+                "trend_observation": None,
+                "as_of": "2026-07-17",
+            },
+        ]
+        report = build_professional_post_close_artifact(
+            metadata, code_commit_sha="b" * 40
+        )
+        view = build_professional_report_view(report)
+        output = env.get_template("reports/post_close_professional.html").render(
+            report=view
+        )
+        # Verify 0050 full fields
+        self.assertIn("元大台灣50", output)
+        self.assertIn("0050", output)
+        self.assertIn("106.40", output)
+        self.assertIn("-0.28%", output)
+        self.assertIn("+3.45%", output)
+        self.assertIn("站上 MA20", output)
+        self.assertIn("0.40", output)
+
+        # Verify 0056 fallback
+        self.assertIn("元大高股息", output)
+        self.assertIn("0056", output)
+
+    def test_etf_observations_survive_zero_missing_and_malformed_fields(self):
+        template_text = pathlib.Path(
+            "templates/reports/post_close_professional.html"
+        ).read_text(encoding="utf-8")
+        env = Environment(
+            loader=DictLoader(
+                {
+                    "reports/post_close_professional.html": template_text,
+                    "base.html": "{% block title %}{% endblock %}{% block nav_reports %}{% endblock %}{% block content %}{% endblock %}",
+                }
+            )
+        )
+        metadata = self._metadata()
+        report = build_professional_post_close_artifact(
+            metadata, code_commit_sha="b" * 40
+        )
+        view = build_professional_report_view(report)
+        view["securities"]["data"]["etf_observations"] = [
+            {
+                "symbol": "0050",
+                "name": "零值標的",
+                "price": 0.0,
+                "return_1d_pct": 0.0,
+                "return_5d_pct": 0.0,
+                "volume_ratio": 0.0,
+                "trend_observation": "insufficient",
+                "as_of": "2026-07-17",
+            },
+            {
+                "symbol": "0056",
+                "name": "缺鍵標的",
+                "as_of": "2026-07-17",
+            },
+            {
+                "symbol": "0057",
+                "name": "型別異常標的",
+                "price": "abc",
+                "return_1d_pct": "x",
+                "return_5d_pct": None,
+                "volume_ratio": None,
+                "trend_observation": None,
+                "as_of": "2026-07-17",
+            },
+        ]
+        output = env.get_template("reports/post_close_professional.html").render(
+            report=view
+        )
+        self.assertIn("零值標的", output)
+        self.assertIn("0.00", output)
+        self.assertIn("+0.00%", output)
+        self.assertIn("資料不足", output)
+        self.assertIn("缺鍵標的", output)
+        self.assertIn("型別異常標的", output)
+        self.assertNotIn("Traceback", output)
+        self.assertNotIn("Undefined", output)
+
+    def test_scenario_empty_and_non_empty_states(self):
+        template_text = pathlib.Path(
+            "templates/reports/post_close_professional.html"
+        ).read_text(encoding="utf-8")
+        env = Environment(
+            loader=DictLoader(
+                {
+                    "reports/post_close_professional.html": template_text,
+                    "base.html": "{% block title %}{% endblock %}{% block nav_reports %}{% endblock %}{% block content %}{% endblock %}",
+                }
+            )
+        )
+        view = self._view()
+        # View generated with breadth=39.7 has negative scenario populated, positive scenario empty
+        self.assertEqual(len(view["next_session"]["data"]["positive"]), 0)
+        self.assertGreater(len(view["next_session"]["data"]["negative"]), 0)
+
+        output = env.get_template("reports/post_close_professional.html").render(
+            report=view
+        )
+        self.assertIn("目前沒有符合此情境的已驗證條件", output)
+        self.assertIn("站上 MA20 比例 <= 40%", output)
+
+        # Invert: positive populated, negative empty
+        metadata = self._metadata()
+        metadata["content"]["market_observation"]["ma20_breadth_pct"] = 72.0
+        metadata["content"]["market_observation"]["realized_volatility_20d_pct"] = 12.0
+        report = build_professional_post_close_artifact(
+            metadata, code_commit_sha="b" * 40
+        )
+        view_pos = build_professional_report_view(report)
+        self.assertGreater(len(view_pos["next_session"]["data"]["positive"]), 0)
+        self.assertEqual(len(view_pos["next_session"]["data"]["negative"]), 0)
+
+        output_pos = env.get_template("reports/post_close_professional.html").render(
+            report=view_pos
+        )
+        self.assertIn("站上 MA20 比例 >= 60%", output_pos)
+        self.assertIn("目前沒有符合此情境的已驗證條件", output_pos)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -166,7 +166,7 @@ def register_report_routes(
                     )
                     if fallback is not None:
                         canonical_date = fallback.get("source_market_date")
-                        if canonical_date:
+                        if canonical_date and canonical_date != date_param:
                             return redirect(url_for("post_close_report_page", trading_date=canonical_date), code=302)
             else:
                 # For pre_market, date_param is applicable_trading_date

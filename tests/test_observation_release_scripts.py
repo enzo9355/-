@@ -1,4 +1,6 @@
 import hashlib
+import json
+import os
 import subprocess
 import tempfile
 import unittest
@@ -10,6 +12,28 @@ SCRIPTS = ROOT / "scripts"
 
 
 class ObservationReleaseScriptTests(unittest.TestCase):
+    @staticmethod
+    def _windows_powershell(command, *, environment=None):
+        return subprocess.run(
+            [
+                r"C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                command,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=environment,
+        )
+
+    @staticmethod
+    def _ps_quote(path):
+        return str(path).replace("'", "''")
+
     def test_common_path_guard_fails_closed_before_parent_becomes_null(self):
         source = (
             SCRIPTS / "observation_release_common.ps1"
@@ -197,6 +221,219 @@ class ObservationReleaseScriptTests(unittest.TestCase):
                 "changed during snapshot",
                 failure.stdout + failure.stderr,
             )
+
+    def test_pending_pointer_journal_remains_flat_after_three_appends(self):
+        common = SCRIPTS / "observation_release_common.ps1"
+        with tempfile.TemporaryDirectory() as temporary:
+            journal = Path(temporary) / "receipt.json.pending.json"
+            command = (
+                "$ErrorActionPreference='Stop'; "
+                f". '{self._ps_quote(common)}'; "
+                f"$path='{self._ps_quote(journal)}'; "
+                "Write-GcloudPendingPointerJournal -Path $path -Entry "
+                "([ordered]@{uri='gs://bucket/u1';source='s1';expected_generation='1';"
+                "source_sha256=('a'*64);created_at='2026-08-17T01:00:00Z'}); "
+                "Write-GcloudPendingPointerJournal -Path $path -Entry "
+                "([ordered]@{uri='gs://bucket/u2';source='s2';expected_generation='2';"
+                "source_sha256=('b'*64);created_at='2026-08-17T01:01:00Z'}); "
+                "Write-GcloudPendingPointerJournal -Path $path -Entry "
+                "([ordered]@{uri='gs://bucket/u3';source='s3';expected_generation='3';"
+                "source_sha256=('c'*64);created_at='2026-08-17T01:02:00Z'})"
+            )
+            completed = self._windows_powershell(command)
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            entries = json.loads(journal.read_text(encoding="utf-8-sig"))
+            self.assertEqual(
+                [entry["uri"] for entry in entries],
+                ["gs://bucket/u1", "gs://bucket/u2", "gs://bucket/u3"],
+            )
+
+    def test_pending_pointer_journal_reader_flattens_legacy_ps51_shape(self):
+        common = SCRIPTS / "observation_release_common.ps1"
+        with tempfile.TemporaryDirectory() as temporary:
+            journal = Path(temporary) / "receipt.json.pending.json"
+            journal.write_text(
+                json.dumps(
+                    [
+                        {
+                            "value": [
+                                {
+                                    "uri": "gs://bucket/u1",
+                                    "source": "s1",
+                                    "expected_generation": "1",
+                                    "source_sha256": "a" * 64,
+                                    "created_at": "2026-08-17T01:00:00Z",
+                                },
+                                {
+                                    "uri": "gs://bucket/u2",
+                                    "source": "s2",
+                                    "expected_generation": "2",
+                                    "source_sha256": "b" * 64,
+                                    "created_at": "2026-08-17T01:01:00Z",
+                                },
+                            ],
+                            "Count": 2,
+                        },
+                        {
+                            "uri": "gs://bucket/u3",
+                            "source": "s3",
+                            "expected_generation": "3",
+                            "source_sha256": "c" * 64,
+                            "created_at": "2026-08-17T01:02:00Z",
+                        },
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            command = (
+                "$ErrorActionPreference='Stop'; "
+                f". '{self._ps_quote(common)}'; "
+                f"$entries=@(Read-GcloudPendingPointerJournal -Path "
+                f"'{self._ps_quote(journal)}'); "
+                "if (($entries.uri -join '|') -ne "
+                "'gs://bucket/u1|gs://bucket/u2|gs://bucket/u3') { exit 41 }"
+            )
+            completed = self._windows_powershell(command)
+            self.assertEqual(
+                completed.returncode,
+                0,
+                completed.stdout + completed.stderr,
+            )
+
+    def test_gcloud_json_readback_uses_strict_utf8_file_transport(self):
+        common = SCRIPTS / "observation_release_common.ps1"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "remote.json"
+            source.write_text(
+                json.dumps(
+                    {
+                        "title": "ABSORB 盤前風險更新",
+                        "summary": ["資料不足，維持盤後觀察"],
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+                encoding="utf-8",
+            )
+            fake_gcloud = root / "gcloud.cmd"
+            fake_gcloud.write_text(
+                "@echo off\n"
+                "if /I not \"%1\"==\"storage\" exit /b 21\n"
+                "if /I not \"%2\"==\"cp\" exit /b 22\n"
+                "copy /b \"%ABSORB_FAKE_GCLOUD_SOURCE%\" \"%5\" >nul\n"
+                "exit /b %errorlevel%\n",
+                encoding="ascii",
+            )
+            environment = os.environ.copy()
+            environment["ABSORB_FAKE_GCLOUD_SOURCE"] = str(source)
+            command = (
+                "$ErrorActionPreference='Stop'; "
+                f". '{self._ps_quote(common)}'; "
+                f"$document=Get-GcloudJson -Gcloud "
+                f"'{self._ps_quote(fake_gcloud)}' -Uri 'gs://test/remote.json'; "
+                "if ($document.title -ne 'ABSORB 盤前風險更新') { exit 42 }; "
+                "if ($document.summary[0] -ne '資料不足，維持盤後觀察') { exit 43 }"
+            )
+            completed = self._windows_powershell(
+                command,
+                environment=environment,
+            )
+            self.assertEqual(
+                completed.returncode,
+                0,
+                completed.stdout + completed.stderr,
+            )
+
+    def test_successor_receipt_evidence_binds_generation_and_sha(self):
+        common = SCRIPTS / "observation_release_common.ps1"
+        with tempfile.TemporaryDirectory() as temporary:
+            receipt_root = Path(temporary) / "observation-lkg"
+            capture_root = receipt_root / "successor"
+            capture_root.mkdir(parents=True)
+            previous = capture_root / "reports-v2-index.json"
+            previous.write_bytes(b'{"generation":"successor"}')
+            digest = hashlib.sha256(previous.read_bytes()).hexdigest()
+            successor = capture_root / "receipt.json"
+            successor.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "kind": "absorb-observation-lkg",
+                        "bucket": "line-stock-bot-498908-quant-snapshots",
+                        "capture_id": "successor",
+                        "captured_at": "2026-08-18T00:00:00Z",
+                        "pointers": [
+                            {
+                                "name": "reports-v2-index",
+                                "uri": "gs://bucket/index.json",
+                                "exists": True,
+                                "generation": "20",
+                                "previous_file": previous.name,
+                                "previous_sha256": digest,
+                                "previous_size": previous.stat().st_size,
+                                "applied_generation": None,
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            command = (
+                "$ErrorActionPreference='Stop'; "
+                f". '{self._ps_quote(common)}'; "
+                "$entry=[pscustomobject]@{uri='gs://bucket/index.json';"
+                f"source='{self._ps_quote(previous)}';"
+                f"source_sha256='{digest}';expected_generation='10';"
+                "created_at='2026-08-17T23:00:00Z'}; "
+                "$evidence=Get-VerifiedSuccessorPointerEvidence "
+                "-Entry $entry "
+                f"-SuccessorReceiptPaths @('{self._ps_quote(successor)}') "
+                f"-ReceiptRoot '{self._ps_quote(receipt_root)}' "
+                "-Bucket 'line-stock-bot-498908-quant-snapshots'; "
+                "if ($evidence.generation -ne '20') { exit 44 }; "
+                f"if ($evidence.sha256 -ne '{digest}') {{ exit 45 }}"
+            )
+            completed = self._windows_powershell(command)
+            self.assertEqual(
+                completed.returncode,
+                0,
+                completed.stdout + completed.stderr,
+            )
+
+    def test_receipt_pointer_capture_validation_rejects_tampering(self):
+        common = SCRIPTS / "observation_release_common.ps1"
+        with tempfile.TemporaryDirectory() as temporary:
+            capture_root = Path(temporary)
+            previous = capture_root / "reports-v2-index.json"
+            previous.write_bytes(b'{"captured":true}')
+            digest = hashlib.sha256(previous.read_bytes()).hexdigest()
+            command = (
+                "$ErrorActionPreference='Stop'; "
+                f". '{self._ps_quote(common)}'; "
+                "$pointer=[pscustomobject]@{"
+                "uri='gs://bucket/index.json';exists=$true;generation='10';"
+                f"previous_file='{previous.name}';previous_sha256='{digest}';"
+                f"previous_size={previous.stat().st_size};applied_generation=$null}}; "
+                "Assert-ObservationLkgPointerCapture -Pointer $pointer "
+                f"-CaptureRoot '{self._ps_quote(capture_root)}' "
+                "-Bucket 'bucket'"
+            )
+            valid = self._windows_powershell(command)
+            self.assertEqual(valid.returncode, 0, valid.stdout + valid.stderr)
+
+            previous.write_bytes(b'{"captured":false}')
+            tampered = self._windows_powershell(command)
+            self.assertNotEqual(tampered.returncode, 0)
+            self.assertIn(
+                "capture hash mismatch",
+                (tampered.stdout + tampered.stderr).lower(),
+            )
+
+        reconciler = (SCRIPTS / "reconcile_observation_lkg.ps1").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("Assert-ObservationLkgPointerCapture", reconciler)
 
     def test_lkg_capture_records_absent_or_hash_verified_previous_pointers(self):
         source = (SCRIPTS / "capture_observation_lkg.ps1").read_text(

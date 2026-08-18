@@ -20,6 +20,13 @@ $HistoricalTargetDate = $ParsedTargetDate.Date -lt [DateTime]::Today
 if ($HistoricalTargetDate -and $PublishObservation) {
     throw 'Historical TargetDate cannot publish observation products'
 }
+if ($PublishObservation) {
+    . (Join-Path $PSScriptRoot 'post_close_pipeline_guard.ps1')
+    if (Test-PostCloseCompletion -DataRoot $DataRoot -TargetDate $TargetDate) {
+        Write-Output "TW post-close observation report for $TargetDate is already verified and published end-to-end; skipping duplicate execution."
+        exit 0
+    }
+}
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 . (Join-Path $PSScriptRoot 'python_runtime.ps1')
 $PythonExe = Resolve-AbsorbPythonExecutable -RepoRoot $RepoRoot
