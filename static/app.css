@@ -1089,6 +1089,12 @@ a:focus-visible,button:focus-visible,input:focus-visible,select:focus-visible,su
   background: var(--surface-2);
 }
 
+.data-table .col-rank { width: 80px; }
+.data-table .align-right { text-align: right; }
+.data-table .align-center { text-align: center; }
+.report-meta-spaced { margin-top: 16px; }
+.governance-note { margin-top: 14px; }
+
 .rank-badge {
   display: inline-flex;
   align-items: center;
