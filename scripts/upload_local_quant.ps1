@@ -6,12 +6,17 @@ param(
     [switch]$RequireDashboard,
     [switch]$ObservationOnly,
     [string]$LkgReceiptPath,
-    [string]$PreflightDataRoot
+    [string]$PreflightDataRoot,
+    [switch]$ReportV2Only
 )
 
 $ErrorActionPreference = 'Stop'
 if ($DataRoot -notin @('D:\AbsorbData', 'D:\StockPapiData')) { throw 'Data root is not allowlisted' }
 if ($Bucket -ne 'line-stock-bot-498908-quant-snapshots') { throw 'Bucket is not allowlisted' }
+if (
+    $ReportV2Only -and
+    (-not $ObservationOnly -or -not $RequireReportV2 -or $RequireDashboard)
+) { throw 'ReportV2Only requires ObservationOnly and RequireReportV2 only' }
 . (Join-Path $PSScriptRoot 'observation_release_common.ps1')
 
 $PublishRoot = Join-Path `
@@ -34,6 +39,7 @@ $ObservationOnlyPointerAllowlist = @(
     "gs://$Bucket/quant/v1/latest-TW.json",
     "gs://$Bucket/reports/v2/index-TW.json",
     "gs://$Bucket/reports/v2/latest-TW-post_close.json",
+    "gs://$Bucket/reports/v2/latest-TW-pre_market.json",
     "gs://$Bucket/dashboard/v1/latest-TW.json"
 )
 $ReceiptUpdated = $false
@@ -143,19 +149,6 @@ function Invoke-GcloudCopyBatch {
 
     $Result = Invoke-GcloudCaptured -Gcloud $Gcloud -Arguments $Arguments
     if ($Result.text) { Write-Output $Result.text.TrimEnd() }
-}
-
-function Get-GcloudJson {
-    param([string]$Uri)
-    $OldPythonPath = $env:PYTHONPATH
-    try {
-        $env:PYTHONPATH = $null
-        $Text = (& $Gcloud storage cat $Uri | Out-String)
-        if ($LASTEXITCODE -ne 0) { throw "gcloud read-back failed with exit code $LASTEXITCODE" }
-        return $Text | ConvertFrom-Json
-    } finally {
-        $env:PYTHONPATH = $OldPythonPath
-    }
 }
 
 function Set-GcloudMutablePointer {
@@ -555,16 +548,16 @@ function Publish-ReportsV2 {
         -Source $IndexPath `
         -Destination "gs://$Bucket/reports/v2/index-TW.json" `
         -ExpectedSha256 $IndexPointerHash | Out-Null
-    $RemoteIndex = Get-GcloudJson "gs://$Bucket/reports/v2/index-TW.json"
+    $RemoteIndex = Get-GcloudJson `
+        -Gcloud $Gcloud `
+        -Uri "gs://$Bucket/reports/v2/index-TW.json"
     if ($RemoteIndex.schema_version -ne 2 -or $RemoteIndex.market -ne 'TW' -or @($RemoteIndex.reports).Count -ne $Reports.Count) {
         throw 'Report v2 remote index read-back mismatch'
     }
     $Uploaded = New-Object System.Collections.Generic.List[string]
-    $ReportV2Types = if ($ObservationOnly) {
-        @('post_close')
-    } else {
-        @('post_close', 'pre_market', 'weekly_model')
-    }
+    $ReportV2Types = @(
+        Get-ObservationReportV2Types -ObservationOnly:$ObservationOnly
+    )
     foreach ($Type in $ReportV2Types) {
         $LatestName = "latest-TW-$Type.json"
         $LatestCandidate = Join-Path $Resolved $LatestName
@@ -600,7 +593,9 @@ function Publish-ReportsV2 {
             -Source $LatestPath `
             -Destination "gs://$Bucket/reports/v2/$LatestName" `
             -ExpectedSha256 $LatestPointerHash | Out-Null
-        $RemoteLatest = Get-GcloudJson "gs://$Bucket/reports/v2/$LatestName"
+        $RemoteLatest = Get-GcloudJson `
+            -Gcloud $Gcloud `
+            -Uri "gs://$Bucket/reports/v2/$LatestName"
         if (
             [string]$RemoteLatest.report_type -ne $Type -or
             [string]$RemoteLatest.metadata -ne [string]$Latest.metadata -or
@@ -671,7 +666,9 @@ function Publish-DashboardV1 {
         -Source $LatestPath `
         -Destination "gs://$Bucket/dashboard/v1/latest-TW.json" `
         -ExpectedSha256 $LatestPointerHash | Out-Null
-    $Remote = Get-GcloudJson "gs://$Bucket/dashboard/v1/latest-TW.json"
+    $Remote = Get-GcloudJson `
+        -Gcloud $Gcloud `
+        -Uri "gs://$Bucket/dashboard/v1/latest-TW.json"
     if (
         [string]$Remote.sha256 -ne $Digest -or
         [string]$Remote.observation_as_of -ne
@@ -791,7 +788,13 @@ try {
     }
 
     $UploadedMarkets = @()
-    $Markets = if ($ObservationOnly) { @('TW') } else { @('TW', 'US') }
+    $Markets = if ($ReportV2Only) {
+        @()
+    } elseif ($ObservationOnly) {
+        @('TW')
+    } else {
+        @('TW', 'US')
+    }
     foreach ($Market in $Markets) {
         $LatestPath = Join-Path $ResolvedRoot "latest-$Market.json"
         if (-not (Test-Path -LiteralPath $LatestPath -PathType Leaf)) { continue }
@@ -1198,12 +1201,14 @@ try {
 
     $DashboardUploaded = $false
     $DashboardUploadError = $null
-    try {
-        $DashboardUploaded = Publish-DashboardV1
-    } catch {
-        $DashboardUploadError = $_.Exception.Message
-        Write-Warning "Dashboard 上傳失敗：$DashboardUploadError"
-        Send-ReportUploadFailureNotification "Dashboard 上傳失敗：$DashboardUploadError"
+    if (-not $ReportV2Only) {
+        try {
+            $DashboardUploaded = Publish-DashboardV1
+        } catch {
+            $DashboardUploadError = $_.Exception.Message
+            Write-Warning "Dashboard 上傳失敗：$DashboardUploadError"
+            Send-ReportUploadFailureNotification "Dashboard 上傳失敗：$DashboardUploadError"
+        }
     }
 
     $Status = @{

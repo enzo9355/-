@@ -209,18 +209,50 @@ class PipelineSchedulerTests(unittest.TestCase):
         self.assertIn("'--source-market-date', $SourceMarketDate", script)
         self.assertNotIn("'--source-market-date', $Manifest.market_as_of", script)
 
-    def test_observation_only_upload_scopes_pointers_to_tw_post_close(self):
+    def test_observation_only_upload_scopes_pointers_to_tw_daily_reports(self):
         script = (
             Path(__file__).parents[1] / "scripts" / "upload_local_quant.ps1"
         ).read_text(encoding="utf-8")
 
-        self.assertIn("$Markets = if ($ObservationOnly)", script)
+        self.assertIn("} elseif ($ObservationOnly) {", script)
         self.assertIn("@('TW')", script)
         self.assertIn("if (-not $ObservationOnly -and", script)
-        self.assertIn("$ReportV2Types = if ($ObservationOnly)", script)
-        self.assertIn("@('post_close')", script)
+        self.assertIn("Get-ObservationReportV2Types", script)
+        self.assertIn("latest-TW-pre_market.json", script)
+        self.assertIn("[switch]$ReportV2Only", script)
+        self.assertIn("$Markets = if ($ReportV2Only)", script)
+        self.assertIn("if (-not $ReportV2Only)", script)
         self.assertIn("foreach ($Type in $ReportV2Types)", script)
         self.assertNotIn("foreach ($Market in @('TW', 'US'))", script)
+
+        common = (
+            Path(__file__).parents[1]
+            / "scripts"
+            / "observation_release_common.ps1"
+        )
+        completed = subprocess.run(
+            [
+                r"C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                (
+                    f". '{common}'; "
+                    "$types=@(Get-ObservationReportV2Types -ObservationOnly); "
+                    "if (($types -join '|') -ne 'post_close|pre_market') { exit 46 }"
+                ),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(
+            completed.returncode,
+            0,
+            completed.stdout + completed.stderr,
+        )
 
     def test_full_backtest_logs_nonfatal_python_warnings_but_keeps_exit_code(self):
         source = (
