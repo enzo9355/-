@@ -108,6 +108,21 @@ class ProfessionalReportHtmlTests(unittest.TestCase):
         self.assertIn("最後正常交易收盤 100.00（2026-07-16）", output)
         self.assertNotIn("quant/v1/manifests/", output)
 
+    def test_template_uses_csp_safe_classes_instead_of_inline_styles(self):
+        template_text = pathlib.Path(
+            "templates/reports/post_close_professional.html"
+        ).read_text(encoding="utf-8")
+
+        self.assertNotIn("style=", template_text)
+        for css_class in (
+            "col-rank",
+            "align-right",
+            "align-center",
+            "report-meta-spaced",
+            "governance-note",
+        ):
+            self.assertIn(css_class, template_text)
+
     def test_etf_observations_render_verified_fields_and_safe_fallback(self):
         template_text = pathlib.Path(
             "templates/reports/post_close_professional.html"

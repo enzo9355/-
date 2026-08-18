@@ -283,11 +283,11 @@
         <table class="data-table">
           <thead>
             <tr>
-              <th style="width: 80px;">名次</th>
+              <th class="col-rank">名次</th>
               <th>產業分類</th>
-              <th style="text-align: right;">5 日相對報酬</th>
-              <th style="text-align: right;">成分股涵蓋</th>
-              <th style="text-align: center;">相對強弱評估</th>
+              <th class="align-right">5 日相對報酬</th>
+              <th class="align-right">成分股涵蓋</th>
+              <th class="align-center">相對強弱評估</th>
             </tr>
           </thead>
           <tbody>
@@ -299,14 +299,14 @@
                   </span>
                 </td>
                 <td><strong>{{ industry.name }}</strong></td>
-                <td style="text-align: right;" class="{{ 'positive' if industry.relative_return_5d_pct and industry.relative_return_5d_pct >= 0 else 'negative' }}">
+                <td class="align-right {{ 'positive' if industry.relative_return_5d_pct and industry.relative_return_5d_pct >= 0 else 'negative' }}">
                   <strong>{{ '%+.2f%%'|format(industry.relative_return_5d_pct) if industry.relative_return_5d_pct is not none else '資料不足' }}</strong>
                 </td>
-                <td style="text-align: right;" class="muted">
+                <td class="align-right muted">
                   {{ industry.available_count }} / {{ industry.component_count }} 檔
                   {% if industry.coverage %}<span class="small">({{ '%.0f%%'|format(industry.coverage * 100) }})</span>{% endif %}
                 </td>
-                <td style="text-align: center;">
+                <td class="align-center">
                   {% if industry.relative_return_5d_pct is not none %}
                     {% if industry.relative_return_5d_pct >= 1.5 %}
                       <span class="badge badge-success">強勢跑贏</span>
@@ -454,31 +454,31 @@
           <thead>
             <tr>
               <th>因子特徵名稱</th>
-              <th style="text-align: right;">估計係數 ($\beta$)</th>
-              <th style="text-align: right;">HAC 標準誤</th>
-              <th style="text-align: right;">t-stat</th>
-              <th style="text-align: right;">p-value</th>
-              <th style="text-align: center;">{{ research.confidence_level_pct }}% CI</th>
-              <th style="text-align: center;">關聯方向</th>
+              <th class="align-right">估計係數 ($\beta$)</th>
+              <th class="align-right">HAC 標準誤</th>
+              <th class="align-right">t-stat</th>
+              <th class="align-right">p-value</th>
+              <th class="align-center">{{ research.confidence_level_pct }}% CI</th>
+              <th class="align-center">關聯方向</th>
             </tr>
           </thead>
           <tbody>
             {% for factor in research.factors %}
               <tr>
                 <td><strong>{{ factor.display_label }}</strong></td>
-                <td style="text-align: right;"><code>{{ '%.6f'|format(factor.coefficient) }}</code></td>
-                <td style="text-align: right;" class="muted"><code>{{ '%.6f'|format(factor.standard_error) }}</code></td>
-                <td style="text-align: right;"><code>{{ '%.4f'|format(factor.t_statistic) }}</code></td>
-                <td style="text-align: right;">
+                <td class="align-right"><code>{{ '%.6f'|format(factor.coefficient) }}</code></td>
+                <td class="align-right muted"><code>{{ '%.6f'|format(factor.standard_error) }}</code></td>
+                <td class="align-right"><code>{{ '%.4f'|format(factor.t_statistic) }}</code></td>
+                <td class="align-right">
                   <strong class="{{ 'positive' if factor.p_value < 0.05 else 'muted' }}">
                     {{ '%.4f'|format(factor.p_value) }}
                     {% if factor.p_value < 0.01 %}***{% elif factor.p_value < 0.05 %}**{% elif factor.p_value < 0.1 %}*{% endif %}
                   </strong>
                 </td>
-                <td style="text-align: center;" class="muted small">
+                <td class="align-center muted small">
                   [{{ '%.6f'|format(factor.confidence_interval_low) }}, {{ '%.6f'|format(factor.confidence_interval_high) }}]
                 </td>
-                <td style="text-align: center;">
+                <td class="align-center">
                   <span class="badge {{ 'badge-success' if factor.direction == '正向' else ('badge-danger' if factor.direction == '負向' else 'badge-neutral') }}">
                     {{ factor.direction }}
                   </span>
@@ -651,7 +651,7 @@
           <span class="kpi-sub">不可變內容位址 SHA-256</span>
         </div>
       </div>
-      <dl class="report-meta" style="margin-top: 16px;">
+      <dl class="report-meta report-meta-spaced">
         <div><dt>覆蓋率</dt><dd>{{ '%.2f%%'|format(gov_sec.data.coverage * 100) if gov_sec.data.coverage is not none else '資料不足' }}</dd></div>
         <div><dt>有效標的</dt><dd>{{ gov_sec.data.symbol_count if gov_sec.data.symbol_count is not none else '資料不足' }}</dd></div>
         <div><dt>未納入標的</dt><dd>{{ gov_sec.data.failure_count if gov_sec.data.failure_count is not none else '資料不足' }}</dd></div>
@@ -659,7 +659,7 @@
     {% else %}
       <div class="empty-state">{{ gov_sec.reason or '資料治理指標尚未提供。' }}</div>
     {% endif %}
-    <p class="muted small" style="margin-top: 14px;">
+    <p class="muted small governance-note">
       資料治理原則：統計關聯不等於因果關係，歷史資料與模型研究結果不保證未來交易獲利。所有發布產物具備嚴格內容雜湊簽署，杜絕事後竄改或未來資訊洩漏 (Lookahead-Free)。
     </p>
   </section>
