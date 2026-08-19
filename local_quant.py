@@ -541,6 +541,7 @@ def publish_market_snapshot(
     failed_symbols=(),
     *,
     target_market_date=None,
+    unavailable_symbols=(),
 ):
     if market not in ("TW", "US"):
         raise ValueError("unsupported market")
@@ -554,11 +555,20 @@ def publish_market_snapshot(
     symbols = sorted({validate_market_symbol(market, symbol) for symbol in symbols})
     if not symbols:
         raise ValueError("market universe is empty")
-    excluded = {
+    failed = {
         validate_market_symbol(market, symbol) for symbol in failed_symbols
     }
-    if not excluded.issubset(symbols):
+    unavailable = {
+        validate_market_symbol(market, symbol) for symbol in unavailable_symbols
+    }
+    if not failed.issubset(symbols) or not unavailable.issubset(symbols):
         raise ValueError("failed symbols must belong to market universe")
+    if target_market_date is not None and failed - unavailable:
+        raise RuntimeError(
+            "operational symbol failures are not publishable: "
+            + ", ".join(sorted(failed - unavailable))
+        )
+    excluded = failed | unavailable
     generated_at = generated_at or datetime.datetime.now(TAIPEI)
     if generated_at.tzinfo is None:
         generated_at = generated_at.replace(tzinfo=TAIPEI)
@@ -577,9 +587,6 @@ def publish_market_snapshot(
                 root, market, symbol, generated_at, target_market_date
             )
         except RuntimeError as exc:
-            if target_market_date is not None:
-                errors.append(str(exc))
-                continue
             excluded.add(symbol)
             errors.append(str(exc))
             continue
@@ -622,8 +629,8 @@ def publish_market_snapshot(
     else:
         market_as_of = None
     failure_rate = len(excluded) / len(symbols)
-    threshold = 0.05 if market == "TW" else 0.25
-    if failure_rate >= threshold or not candidates:
+    threshold_percent = 5 if market == "TW" else 25
+    if len(excluded) * 100 >= len(symbols) * threshold_percent or not candidates:
         detail = f"; {errors[0]}" if errors else ""
         raise RuntimeError(
             f"market failure rate {failure_rate:.2%} is not publishable{detail}"
@@ -679,11 +686,13 @@ def publish_market_snapshot(
             "failure_rate": failure_rate,
             "coverage": len(entries) / len(symbols),
             "failed_symbols": sorted(excluded),
+            "unavailable_symbols": sorted(unavailable),
+            "unavailable_count": len(unavailable),
             "market_as_of": market_as_of,
             "symbols": entries,
         }
     else:
-        manifest_schema = 3
+        manifest_schema = 4
         expected_non_price = {}
         for symbol, candidate in candidates.items():
             status = candidate["trading_status_evidence"]
@@ -698,26 +707,29 @@ def publish_market_snapshot(
                 ],
             }
         regular_count = len(entries) - len(expected_non_price)
-        denominator = len(symbols) - len(expected_non_price)
+        denominator = len(entries) - len(expected_non_price)
         if denominator <= 0:
             raise RuntimeError("regular price denominator is invalid")
+        operational_failed = sorted(failed - unavailable)
         manifest = {
             "schema_version": manifest_schema,
             "market": market,
             "generated_at": generated_text,
             "target_market_date": target_market_date.isoformat(),
             "observation_as_of": target_market_date.isoformat(),
-            "universe_count": len(symbols),
+            "active_universe_count": len(symbols),
             "observation_count": len(entries),
             "regular_price_symbol_count": regular_count,
-            "expected_non_price_symbol_count": len(expected_non_price),
-            "operational_failure_count": len(excluded),
+            "verified_non_price_symbol_count": len(expected_non_price),
+            "unavailable_count": len(unavailable),
+            "unavailable_symbols": sorted(unavailable),
+            "operational_failure_count": len(operational_failed),
+            "operational_failed_symbols": operational_failed,
+            "operational_failure_rate": len(operational_failed) / len(symbols),
+            "observation_coverage": len(entries) / len(symbols),
             "regular_price_denominator": denominator,
             "regular_price_coverage": regular_count / denominator,
-            "observation_coverage": len(entries) / len(symbols),
-            "operational_failure_rate": failure_rate,
             "expected_non_price_symbols": expected_non_price,
-            "operational_failed_symbols": sorted(excluded),
             "symbols": entries,
         }
     latest_path = publish_root / f"latest-{market}.json"

@@ -11,6 +11,7 @@ from tests.report_fixtures import (
     warmup_stock_document,
     write_quant_publish,
     write_quant_publish_v3,
+    write_quant_publish_v4,
 )
 
 
@@ -61,6 +62,44 @@ class DailyReportSourceTests(unittest.TestCase):
             source.manifest.expected_non_price_symbols["2303"]["evidence_sha256"],
         )
         self.assertEqual(by_symbol["2303"].as_of.isoformat(), "2026-07-16")
+
+    def test_v4_loader_reads_unavailable_partition_separately_from_operational(self):
+        from reporting.source_loader import load_report_source
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            write_quant_publish_v4(root)
+            source = load_report_source(root, market="TW")
+
+        self.assertEqual(source.manifest.schema_version, 4)
+        self.assertEqual(source.manifest.active_universe_count, 21)
+        self.assertEqual(source.manifest.symbol_count, 20)
+        self.assertEqual(source.manifest.unavailable_count, 1)
+        self.assertEqual(source.manifest.unavailable_symbols, ["6001"])
+        self.assertEqual(source.manifest.operational_failure_count, 0)
+        self.assertEqual(source.manifest.operational_failed_symbols, [])
+        self.assertEqual(source.manifest.verified_non_price_symbol_count, 1)
+        self.assertEqual(len(source.stocks), 20)
+
+    def test_v3_loader_rejects_v4_manifest_document(self):
+        from reporting.exceptions import ReportSourceError
+        from reporting.source_loader import _validate_manifest_v3
+
+        with tempfile.TemporaryDirectory() as temporary:
+            publish = write_quant_publish_v4(Path(temporary))
+            latest = json.loads((publish / "latest-TW.json").read_text(encoding="utf-8"))
+            manifest = json.loads(
+                (publish / latest["manifest"]).read_text(encoding="utf-8")
+            )
+            with self.assertRaises(ReportSourceError):
+                _validate_manifest_v3(manifest, "TW")
+
+    def test_dispatch_rejects_unknown_manifest_schema(self):
+        from reporting.exceptions import ReportSourceError
+        from reporting.source_loader import _validate_manifest
+
+        with self.assertRaisesRegex(ReportSourceError, "unsupported"):
+            _validate_manifest({"schema_version": 5, "market": "TW"}, "TW")
 
     def test_v3_loader_rejects_mixed_pointer_manifest_versions(self):
         from reporting.exceptions import ReportSourceError

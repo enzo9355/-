@@ -408,13 +408,13 @@ function Assert-QuantManifest {
     if (
         $null -eq $Manifest -or
         -not (Test-JsonInteger $Manifest.schema_version) -or
-        $Manifest.schema_version -notin @(2, 3) -or
+        $Manifest.schema_version -notin @(2, 3, 4) -or
         $Manifest.market -ne $Market
     ) {
         throw 'LKG manifest schema or market is invalid'
     }
-    if ($Manifest.schema_version -eq 3 -and $Market -ne 'TW') {
-        throw 'Manifest v3 is TW-only'
+    if ($Manifest.schema_version -in @(3, 4) -and $Market -ne 'TW') {
+        throw 'Manifest v3/v4 is TW-only'
     }
     if (
         -not (Test-IsoTimestamp $Manifest.generated_at) -or
@@ -527,19 +527,42 @@ function Assert-QuantManifest {
         -not (Test-IsoDate $Manifest.target_market_date) -or
         [string]$Manifest.observation_as_of -ne [string]$Manifest.target_market_date
     ) {
-        throw 'LKG manifest v3 date metadata is invalid'
+        throw 'LKG manifest v3/v4 date metadata is invalid'
+    }
+    $Schema = [int]$Manifest.schema_version
+    $UniverseName = if ($Schema -eq 4) { 'active_universe_count' } else { 'universe_count' }
+    $StatusCountName = if ($Schema -eq 4) {
+        'verified_non_price_symbol_count'
+    } else {
+        'expected_non_price_symbol_count'
     }
     $CountNames = @(
-        'universe_count',
+        $UniverseName,
         'observation_count',
         'regular_price_symbol_count',
-        'expected_non_price_symbol_count',
+        $StatusCountName,
         'operational_failure_count',
         'regular_price_denominator'
     )
     foreach ($Name in $CountNames) {
         if (-not (Test-JsonInteger $Manifest.$Name) -or [long]$Manifest.$Name -lt 0) {
-            throw "LKG manifest v3 count is invalid: $Name"
+            throw "LKG manifest v3/v4 count is invalid: $Name"
+        }
+    }
+    if ($Schema -eq 4) {
+        $UnavailableSymbols = if ($null -eq $Manifest.unavailable_symbols) {
+            @()
+        } elseif ($Manifest.unavailable_symbols -is [string]) {
+            throw 'LKG manifest v4 unavailable symbols are invalid'
+        } else {
+            @($Manifest.unavailable_symbols)
+        }
+        if (
+            -not (Test-JsonInteger $Manifest.unavailable_count) -or
+            [long]$Manifest.unavailable_count -ne $UnavailableSymbols.Count -or
+            [long]$Manifest.operational_failure_count -ne 0
+        ) {
+            throw 'LKG manifest v4 unavailable partition is invalid'
         }
     }
     $ExpectedProperties = if ($null -eq $Manifest.expected_non_price_symbols) {
@@ -550,25 +573,32 @@ function Assert-QuantManifest {
     $OperationalFailures = if ($null -eq $Manifest.operational_failed_symbols) {
         @()
     } elseif ($Manifest.operational_failed_symbols -is [string]) {
-        throw 'LKG manifest v3 operational failures are invalid'
+        throw 'LKG manifest v3/v4 operational failures are invalid'
     } else {
         @($Manifest.operational_failed_symbols)
     }
+    $UniverseCount = [long]$Manifest.$UniverseName
+    $StatusCount = [long]$Manifest.$StatusCountName
+    $ExpectedDenominator = if ($Schema -eq 4) {
+        [long]$Manifest.observation_count
+    } else {
+        $UniverseCount
+    }
     if (
-        [long]$Manifest.universe_count -lt 1 -or
+        $UniverseCount -lt 1 -or
         [long]$Manifest.regular_price_denominator -lt 1 -or
         [long]$Manifest.observation_count -ne $SymbolProperties.Count -or
-        [long]$Manifest.expected_non_price_symbol_count -ne $ExpectedProperties.Count -or
+        $StatusCount -ne $ExpectedProperties.Count -or
         [long]$Manifest.operational_failure_count -ne $OperationalFailures.Count -or
         [long]$Manifest.regular_price_symbol_count +
-            [long]$Manifest.expected_non_price_symbol_count -ne
+            $StatusCount -ne
             [long]$Manifest.observation_count -or
         [long]$Manifest.observation_count +
-            [long]$Manifest.operational_failure_count -ne
-            [long]$Manifest.universe_count -or
+            [long]$Manifest.operational_failure_count +
+            $(if ($Schema -eq 4) { [long]$Manifest.unavailable_count } else { 0 }) -ne
+            $UniverseCount -or
         [long]$Manifest.regular_price_denominator -ne
-            ([long]$Manifest.universe_count -
-            [long]$Manifest.expected_non_price_symbol_count) -or
+            ($ExpectedDenominator - $StatusCount) -or
         -not (Test-JsonNumber $Manifest.regular_price_coverage) -or
         [double]$Manifest.regular_price_coverage -lt 0 -or
         [double]$Manifest.regular_price_coverage -gt 1 -or
@@ -582,17 +612,17 @@ function Assert-QuantManifest {
         [double]$Manifest.observation_coverage -gt 1 -or
         [math]::Abs(
             [double]$Manifest.observation_coverage -
-            ([long]$Manifest.observation_count / [double]$Manifest.universe_count)
+            ([long]$Manifest.observation_count / [double]$UniverseCount)
         ) -gt 1e-12 -or
         -not (Test-JsonNumber $Manifest.operational_failure_rate) -or
         [double]$Manifest.operational_failure_rate -lt 0 -or
         [double]$Manifest.operational_failure_rate -ge 0.05 -or
         [math]::Abs(
             [double]$Manifest.operational_failure_rate -
-            ([long]$Manifest.operational_failure_count / [double]$Manifest.universe_count)
+            ([long]$Manifest.operational_failure_count / [double]$UniverseCount)
         ) -gt 1e-12
     ) {
-        throw 'LKG manifest v3 arithmetic or coverage is invalid'
+        throw 'LKG manifest v3/v4 arithmetic or coverage is invalid'
     }
 
     $ExpectedBySymbol = @{}
@@ -624,9 +654,24 @@ function Assert-QuantManifest {
             $ExpectedBySymbol.ContainsKey($Symbol) -or
             @($SymbolProperties | Where-Object { $_.Name -eq $Symbol }).Count -ne 0
         ) {
-            throw 'LKG manifest v3 operational failures are invalid'
+            throw 'LKG manifest v3/v4 operational failures are invalid'
         }
         $SeenOperational[$Symbol] = $true
+    }
+    if ($Schema -eq 4) {
+        $SeenUnavailable = @{}
+        foreach ($RawSymbol in $UnavailableSymbols) {
+            $Symbol = [string]$RawSymbol
+            if (
+                -not (Test-MarketSymbol $Symbol $Market) -or
+                $SeenUnavailable.ContainsKey($Symbol) -or
+                $ExpectedBySymbol.ContainsKey($Symbol) -or
+                @($SymbolProperties | Where-Object { $_.Name -eq $Symbol }).Count -ne 0
+            ) {
+                throw 'LKG manifest v4 unavailable symbols are invalid'
+            }
+            $SeenUnavailable[$Symbol] = $true
+        }
     }
     $RegularSeen = 0
     $StatusSeen = 0
@@ -687,9 +732,9 @@ function Assert-QuantManifest {
     }
     if (
         $RegularSeen -ne [long]$Manifest.regular_price_symbol_count -or
-        $StatusSeen -ne [long]$Manifest.expected_non_price_symbol_count
+        $StatusSeen -ne $StatusCount
     ) {
-        throw 'LKG manifest v3 symbol partition is invalid'
+        throw 'LKG manifest v3/v4 symbol partition is invalid'
     }
 }
 
@@ -710,14 +755,14 @@ try {
     $Manifest = Get-JsonFile $ManifestPath
     if (
         -not (Test-JsonInteger $Current.schema_version) -or
-        $Current.schema_version -notin @(2, 3) -or
+        $Current.schema_version -notin @(2, 3, 4) -or
         $Current.market -ne $Market -or
         -not (Test-IsoTimestamp $Current.generated_at)
     ) {
         throw 'Active latest pointer schema or market is invalid'
     }
-    if ($Current.schema_version -eq 3 -and $Market -ne 'TW') {
-        throw 'Manifest v3 is TW-only'
+    if ($Current.schema_version -in @(3, 4) -and $Market -ne 'TW') {
+        throw 'Manifest v3/v4 is TW-only'
     }
     if (
         [string]$Current.manifest -notmatch

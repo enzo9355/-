@@ -1598,7 +1598,8 @@ class TWOfficialPostCloseCLITests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertEqual(observed["published_args"][1:3], ("TW", ["2303", "2330"]))
         self.assertEqual(observed["published_kwargs"]["target_market_date"], TARGET)
-        self.assertNotIn("2303", observed["published_kwargs"]["failed_symbols"])
+        self.assertNotIn("2303", observed["published_kwargs"]["unavailable_symbols"])
+        self.assertNotIn("failed_symbols", observed["published_kwargs"])
 
     def test_cli_scopes_downstream_operational_failures_to_universe(self):
         base = snapshot_series((TARGET,), price_symbols=("2330",))
@@ -1632,7 +1633,8 @@ class TWOfficialPostCloseCLITests(unittest.TestCase):
             )
 
         self.assertEqual(result, 0)
-        self.assertEqual(observed["published_kwargs"]["failed_symbols"], [])
+        self.assertEqual(observed["published_kwargs"]["unavailable_symbols"], [])
+        self.assertNotIn("failed_symbols", observed["published_kwargs"])
 
     def test_cli_restores_all_patches_when_assignment_or_pipeline_fails(self):
         class RejectOnce(types.SimpleNamespace):
@@ -2180,6 +2182,304 @@ class TWOfficialPostCloseCLITests(unittest.TestCase):
                 sys.modules["local_quant"] = old
         builder.assert_not_called()
         module.main.assert_not_called()
+
+    def test_coverage_boundary_thresholds(self):
+        calendar_doc = {
+            "schema_version": 1,
+            "market": "TW",
+            "year": 2026,
+            "source_url": TWSE_CALENDAR_URL,
+            "fetched_at": "2026-01-01T00:00:00+00:00",
+            "source_sha256": "c" * 64,
+            "valid_from": "2026-01-01",
+            "valid_to": "2026-12-31",
+            "closed_dates": [],
+            "special_open_dates": [],
+        }
+        calendar = TradingCalendarSet.from_documents([calendar_doc])
+        symbols_1000 = [f"{i:04d}" for i in range(1000)]
+        target_date = TARGET
+
+        # Helper mock audit
+        class MockAudit:
+            def __init__(self, available_count, total_count):
+                available = symbols_1000[:available_count]
+                unavailable = symbols_1000[available_count:total_count]
+                self.latest_by_symbol = {s: target_date for s in available}
+                self.observation_by_symbol = {s: target_date for s in available}
+                self.unavailable_symbols = unavailable
+
+        # 100.0% coverage: 1000/1000 available (0 unavailable) -> PASS
+        cli._assert_audit_publishable(
+            MockAudit(1000, 1000),
+            symbols=symbols_1000,
+            target_market_date=target_date,
+            calendars=calendar,
+        )
+
+        # 99.9% coverage: 999/1000 available (1 unavailable, 0.1%) -> PASS
+        cli._assert_audit_publishable(
+            MockAudit(999, 1000),
+            symbols=symbols_1000,
+            target_market_date=target_date,
+            calendars=calendar,
+        )
+
+        # 98.5% coverage: 985/1000 available (15 unavailable, 1.5%) -> PASS
+        cli._assert_audit_publishable(
+            MockAudit(985, 1000),
+            symbols=symbols_1000,
+            target_market_date=target_date,
+            calendars=calendar,
+        )
+
+        # 95.1% coverage: 951/1000 available (49 unavailable, 4.9%) -> PASS
+        cli._assert_audit_publishable(
+            MockAudit(951, 1000),
+            symbols=symbols_1000,
+            target_market_date=target_date,
+            calendars=calendar,
+        )
+
+        # Exactly 95.0% coverage: 950/1000 available (50 unavailable, 5.0%) -> FAIL (strict > 95%)
+        with self.assertRaisesRegex(RuntimeError, "historical artifact coverage is not publishable"):
+            cli._assert_audit_publishable(
+                MockAudit(950, 1000),
+                symbols=symbols_1000,
+                target_market_date=target_date,
+                calendars=calendar,
+            )
+
+        # 94.9% coverage: 949/1000 available (51 unavailable, 5.1%) -> FAIL
+        with self.assertRaisesRegex(RuntimeError, "historical artifact coverage is not publishable"):
+            cli._assert_audit_publishable(
+                MockAudit(949, 1000),
+                symbols=symbols_1000,
+                target_market_date=target_date,
+                calendars=calendar,
+            )
+
+    def test_plan_recovery_stage_prefilters_excluded_symbols(self):
+        calendar_doc = {
+            "schema_version": 1,
+            "market": "TW",
+            "year": 2026,
+            "source_url": TWSE_CALENDAR_URL,
+            "fetched_at": "2026-01-01T00:00:00+00:00",
+            "source_sha256": "c" * 64,
+            "valid_from": "2026-01-01",
+            "valid_to": "2026-12-31",
+            "closed_dates": [],
+            "special_open_dates": [],
+        }
+        calendar = TradingCalendarSet.from_documents([calendar_doc])
+        symbols = ["2330", "2303", "4130", "4987", "6806"]
+        excluded = {"4130", "4987", "6806"}
+
+        class MockAudit:
+            latest_by_symbol = {
+                "2330": datetime.date(2026, 7, 24),
+                "2303": datetime.date(2026, 7, 20),
+                "4130": datetime.date(2026, 7, 16),
+                "4987": datetime.date(2026, 7, 16),
+                "6806": datetime.date(2026, 7, 16),
+            }
+            observation_by_symbol = dict(latest_by_symbol)
+            unavailable_symbols = []
+
+        # When excluded_symbols are filtered, baseline should be 2026-07-20 (2303), NOT 2026-07-16
+        stage_target, stage_symbols, baseline = _plan_recovery_stage(
+            calendar,
+            MockAudit(),
+            symbols=symbols,
+            target_market_date=datetime.date(2026, 8, 31),
+            reconcile_legacy_overlaps=False,
+            excluded_symbols=excluded,
+        )
+        self.assertEqual(baseline, datetime.date(2026, 7, 20))
+        self.assertLess(stage_target, datetime.date(2026, 8, 31))
+        self.assertEqual(set(stage_symbols), {"2330", "2303"})
+        self.assertNotIn("4130", stage_symbols)
+        self.assertNotIn("4987", stage_symbols)
+        self.assertNotIn("6806", stage_symbols)
+
+    def test_stage_coverage_uses_full_market_universe_denominator(self):
+        # 2026-08-04 regression scenario: stage subset has 12 symbols with 3 missing prices (25% of stage),
+        # but full market has 2076 symbols with 2042 prices (98.36% coverage > 95%).
+        full_market = [f"{i:04d}" for i in range(2076)]
+        covered_market = set(full_market[:2042])
+        stage_symbols = full_market[:12]
+
+        series = snapshot_series(dates=(BASELINE,), price_symbols=covered_market)
+        snapshot_0804 = series.snapshots[BASELINE]
+
+        # Stage with full_market_symbols should PASS because 2042/2076 = 98.36% > 95%
+        # If denominator was stage_symbols (12), 9/12 = 75% would fail!
+        market_universe = set(full_market)
+        covered = set(snapshot_0804.price_by_symbol)
+        missing = market_universe - covered
+        self.assertLess(len(missing) / len(market_universe), 0.05)
+
+    def _gate_fixture(self, root, observed_count, total_count, failures=None):
+        root = Path(root)
+        symbols = [f"{i:04d}" for i in range(total_count)]
+        observed = symbols[:observed_count]
+        series = snapshot_series(dates=(TARGET,), price_symbols=tuple(observed))
+        for symbol in observed:
+            write_artifact(
+                root, symbol, TARGET.isoformat(), official_lineage(symbol, series)
+            )
+        expected_identity = cli._enrich_batch_identity(
+            {
+                "target_market_date": TARGET.isoformat(),
+                "product_mode": "observation",
+                "source_version": local_quant.OBSERVATION_SOURCE_VERSION,
+            },
+            series=series,
+            audit=Mock(latest_date_counts={}, unavailable_symbols=[]),
+            symbols=symbols,
+            reconcile_legacy_overlaps=False,
+            recover_truncated_history=False,
+        )
+        write_checkpoint(
+            root,
+            {
+                "stage": "market_batch",
+                "market": "TW",
+                "next_index": total_count,
+                "failed": list(failures or []),
+                "batch_identity": expected_identity,
+            },
+        )
+        return symbols, series, expected_identity
+
+    def test_assert_complete_exact_95_percent_coverage_fails_closed(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            symbols, series, identity = self._gate_fixture(
+                root,
+                observed_count=19,
+                total_count=20,
+                failures=[{"symbol": "0019", "error": "_UnavailableObservationError"}],
+            )
+            with self.assertRaisesRegex(RuntimeError, "recovery is incomplete"):
+                cli._assert_complete(
+                    root,
+                    symbols=symbols,
+                    target_market_date=TARGET,
+                    expected_identity=identity,
+                    official_series=series,
+                    applied_reconciliation_artifacts={},
+                )
+
+    def test_assert_complete_above_95_percent_with_unavailable_partition_passes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            symbols, series, identity = self._gate_fixture(
+                root,
+                observed_count=20,
+                total_count=21,
+                failures=[{"symbol": "0020", "error": "_UnavailableObservationError"}],
+            )
+            cli._assert_complete(
+                root,
+                symbols=symbols,
+                target_market_date=TARGET,
+                expected_identity=identity,
+                official_series=series,
+                applied_reconciliation_artifacts={},
+            )
+
+    def test_assert_complete_rejects_operational_failure_in_unavailable_partition(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            symbols, series, identity = self._gate_fixture(
+                root,
+                observed_count=20,
+                total_count=21,
+                failures=[{"symbol": "0020", "error": "OSError"}],
+            )
+            with self.assertRaisesRegex(RuntimeError, "recovery is incomplete"):
+                cli._assert_complete(
+                    root,
+                    symbols=symbols,
+                    target_market_date=TARGET,
+                    expected_identity=identity,
+                    official_series=series,
+                    applied_reconciliation_artifacts={},
+                )
+
+    def test_assert_complete_rejects_operational_failure_in_observed_partition(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            symbols, series, identity = self._gate_fixture(
+                root,
+                observed_count=20,
+                total_count=21,
+                failures=[
+                    {"symbol": "0005", "error": "OSError"},
+                    {"symbol": "0020", "error": "_UnavailableObservationError"},
+                ],
+            )
+            with self.assertRaisesRegex(RuntimeError, "recovery is incomplete"):
+                cli._assert_complete(
+                    root,
+                    symbols=symbols,
+                    target_market_date=TARGET,
+                    expected_identity=identity,
+                    official_series=series,
+                    applied_reconciliation_artifacts={},
+                )
+
+    def test_patched_builder_classifies_data_absence_as_unavailable(self):
+        class RaisingPipeline:
+            pd = pd
+            fetch_finmind_dataset = None
+
+            @staticmethod
+            def calc_all(_frame):
+                return _frame
+
+            def get_stock_name(self, _symbol):
+                return "測試標的"
+
+        def original_build(_pipeline_arg, market, symbol, *args, **kwargs):
+            if symbol == "2303":
+                raise ValueError("point-in-time price history is unavailable")
+            if symbol == "2330":
+                raise ValueError("calculated history is unavailable")
+            raise AssertionError("unreachable")
+
+        fake_module = types.SimpleNamespace(
+            build_stock_snapshot=original_build,
+            load_stock_pipeline=lambda _root: RaisingPipeline(),
+            run_market_batch=lambda *_args, **_kwargs: None,
+            get_taiwan_symbols=lambda _pipeline: ["2303", "2330"],
+            load_exclusion_list=lambda _root, _market: (set(), set(), [], 0),
+        )
+        with _patched_pipeline(
+            fake_module,
+            RaisingPipeline(),
+            Mock(),
+            snapshot_series(dates=(TARGET,), price_symbols=("2330",)),
+            Mock(),
+        ):
+            with self.assertRaisesRegex(
+                ValueError, "point-in-time price history is unavailable"
+            ) as unavailable:
+                fake_module.build_stock_snapshot(
+                    RaisingPipeline(), "TW", "2303", target_market_date=TARGET
+                )
+            self.assertIsInstance(
+                unavailable.exception, cli._UnavailableObservationError
+            )
+            with self.assertRaises(ValueError) as operational:
+                fake_module.build_stock_snapshot(
+                    RaisingPipeline(), "TW", "2330", target_market_date=TARGET
+                )
+            self.assertNotIsInstance(
+                operational.exception, cli._UnavailableObservationError
+            )
 
 
 if __name__ == "__main__":

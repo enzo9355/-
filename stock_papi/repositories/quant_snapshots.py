@@ -30,7 +30,7 @@ def published_quant_manifest(market, today=None, *, load_object, cache=QUANT_MAN
         manifest_path = str(latest["manifest"])
         schema_version = latest.get("schema_version")
         if (
-            schema_version not in {2, 3}
+            schema_version not in {2, 3, 4}
             or latest.get("market") != market
             or re.fullmatch(
                 rf"manifests/{market}-[0-9]{{8}}T[0-9]{{6}}Z-[0-9a-f]{{12}}\.json",
@@ -62,7 +62,11 @@ def published_quant_manifest(market, today=None, *, load_object, cache=QUANT_MAN
         ):
             return None
         symbols = manifest.get("symbols")
-        universe_count = manifest.get("universe_count")
+        universe_count = (
+            manifest.get("universe_count")
+            if schema_version in (2, 3)
+            else manifest.get("active_universe_count")
+        )
         if schema_version == 2:
             market_date = datetime.date.fromisoformat(str(manifest["market_as_of"]))
             symbol_count = manifest.get("symbol_count")
@@ -88,7 +92,7 @@ def published_quant_manifest(market, today=None, *, load_object, cache=QUANT_MAN
                 or not math.isclose(failure_rate, failure_count / universe_count)
             ):
                 return None
-        else:
+        elif schema_version == 3:
             target = datetime.date.fromisoformat(str(manifest["target_market_date"]))
             market_date = datetime.date.fromisoformat(str(manifest["observation_as_of"]))
             observation_count = manifest.get("observation_count")
@@ -137,6 +141,62 @@ def published_quant_manifest(market, today=None, *, load_object, cache=QUANT_MAN
                 or failure_rate >= 0.05
             ):
                 return None
+        elif schema_version == 4:
+            target = datetime.date.fromisoformat(str(manifest["target_market_date"]))
+            market_date = datetime.date.fromisoformat(str(manifest["observation_as_of"]))
+            observation_count = manifest.get("observation_count")
+            regular_count = manifest.get("regular_price_symbol_count")
+            status_count = manifest.get("verified_non_price_symbol_count")
+            unavailable_count = manifest.get("unavailable_count")
+            unavailable_symbols = manifest.get("unavailable_symbols")
+            operational_count = manifest.get("operational_failure_count")
+            operational_symbols = manifest.get("operational_failed_symbols")
+            denominator = manifest.get("regular_price_denominator")
+            regular_coverage = manifest.get("regular_price_coverage")
+            observation_coverage = manifest.get("observation_coverage")
+            expected = manifest.get("expected_non_price_symbols")
+            failed_symbols = (unavailable_symbols or []) + (operational_symbols or [])
+            counts = (
+                universe_count,
+                observation_count,
+                regular_count,
+                status_count,
+                unavailable_count,
+                operational_count,
+                denominator,
+            )
+            if (
+                market != "TW"
+                or "market_as_of" in manifest
+                or target != market_date
+                or any(type(value) is not int or value < 0 for value in counts)
+                or universe_count < 1
+                or denominator < 1
+                or not isinstance(symbols, dict)
+                or not isinstance(expected, dict)
+                or not isinstance(unavailable_symbols, list)
+                or not isinstance(operational_symbols, list)
+                or len(set(unavailable_symbols)) != len(unavailable_symbols)
+                or len(set(operational_symbols)) != len(operational_symbols)
+                or unavailable_count != len(unavailable_symbols)
+                or operational_count != 0
+                or operational_count != len(operational_symbols)
+                or observation_count != len(symbols)
+                or status_count != len(expected)
+                or regular_count + status_count != observation_count
+                or observation_count + unavailable_count != universe_count
+                or denominator != observation_count - status_count
+                or set(expected) - set(symbols)
+                or set(unavailable_symbols) & set(symbols)
+                or type(regular_coverage) not in (int, float)
+                or type(observation_coverage) not in (int, float)
+                or not math.isclose(regular_coverage, regular_count / denominator)
+                or not math.isclose(observation_coverage, observation_count / universe_count)
+                or observation_count * 100 <= universe_count * 95
+            ):
+                return None
+        else:
+            return None
             for symbol, status in expected.items():
                 entry = symbols.get(symbol)
                 if (
@@ -199,7 +259,7 @@ def fetch_quant_snapshot(
                 )
             ):
                 return None
-        elif manifest_schema == 3:
+        elif manifest_schema in (3, 4):
             if (
                 market != "TW"
                 or entry.get("observation_as_of")
@@ -231,7 +291,7 @@ def fetch_quant_snapshot(
             or not isinstance(document.get("daily"), list)
         ):
             return None
-        if manifest_schema == 3:
+        if manifest_schema in (3, 4):
             if not document["daily"] or not isinstance(document["daily"][-1], dict):
                 return None
             latest_date = str(document["daily"][-1].get("Date") or "").split("T", 1)[0]

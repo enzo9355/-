@@ -101,7 +101,7 @@ if ($LatestItem.PSIsContainer -or $LatestItem.Length -le 0 -or $LatestItem.Lengt
 }
 $Latest = Get-Content -LiteralPath $LatestPath -Raw -Encoding utf8 | ConvertFrom-Json
 $LatestSchema = [int]$Latest.schema_version
-if ($LatestSchema -notin @(2, 3) -or [string]$Latest.market -ne 'TW') {
+if ($LatestSchema -notin @(2, 3, 4) -or [string]$Latest.market -ne 'TW') {
     throw 'Invalid TW latest pointer'
 }
 $ManifestRelative = [string]$Latest.manifest
@@ -186,13 +186,21 @@ if (
             $Manifest.PSObject.Properties['market_as_of'] -eq $null -or
             [string]$Manifest.market_as_of -ne $SourceMarketDate
         )) -or
-    ($LatestSchema -eq 3 -and
+    ($LatestSchema -in @(3, 4) -and
         (
             $Manifest.PSObject.Properties['market_as_of'] -ne $null -or
             [string]$Manifest.observation_as_of -notmatch '^\d{4}-\d{2}-\d{2}$' -or
             [string]$Manifest.target_market_date -notmatch '^\d{4}-\d{2}-\d{2}$' -or
             [string]$Manifest.observation_as_of -ne
                 [string]$Manifest.target_market_date
+        )) -or
+    ($LatestSchema -eq 4 -and
+        (
+            $Manifest.PSObject.Properties['active_universe_count'] -eq $null -or
+            [int]$Manifest.active_universe_count -le 0 -or
+            $Manifest.PSObject.Properties['unavailable_count'] -eq $null -or
+            [int]$Manifest.unavailable_count -lt 0 -or
+            [int]$Manifest.operational_failure_count -ne 0
         ))
 ) {
     throw 'Manifest date contract is invalid'

@@ -68,8 +68,8 @@ class ReleaseOperationsTests(unittest.TestCase):
         ]
 
         for required in (
-            "$Latest.schema_version -notin @(2, 3)",
-            "Manifest v3 is TW-only",
+            "$Latest.schema_version -notin @(2, 3, 4)",
+            "Manifest v3/v4 is TW-only",
             "Get-ObservationManifestCoverage",
             "ExpectedSha256",
             "generated_at",
@@ -90,8 +90,8 @@ class ReleaseOperationsTests(unittest.TestCase):
         quant = source[source.index("if ($LkgManifest"):]
 
         for required in (
-            "$Current.schema_version -notin @(2, 3)",
-            "Manifest v3 is TW-only",
+            "$Current.schema_version -notin @(2, 3, 4)",
+            "Manifest v3/v4 is TW-only",
             "observation_coverage",
             "regular_price_coverage",
             "operational_failure_rate",

@@ -210,12 +210,129 @@ def _validate_manifest_v3(document: dict[str, Any], market: str) -> None:
         if latest >= target:
             raise ReportSourceError("manifest v3 status date is invalid")
 
+    unavailable = document.get("unavailable_symbols")
+    unavailable_count = document.get("unavailable_count")
+    if unavailable is not None or unavailable_count is not None:
+        if (
+            not isinstance(unavailable, list)
+            or len(set(unavailable)) != len(unavailable)
+            or any(
+                re.fullmatch(r"[0-9]{4,6}", str(item)) is None
+                for item in unavailable
+            )
+            or type(unavailable_count) is not int
+            or unavailable_count != len(unavailable)
+            or unavailable_count > failure_count
+            or not set(unavailable) <= set(failed)
+        ):
+            raise ReportSourceError("manifest v3 unavailable partition is invalid")
+
+
+def _validate_manifest_v4(document: dict[str, Any], market: str) -> None:
+    try:
+        target = datetime.date.fromisoformat(str(document["target_market_date"]))
+        observation = datetime.date.fromisoformat(str(document["observation_as_of"]))
+        datetime.datetime.fromisoformat(
+            str(document["generated_at"]).replace("Z", "+00:00")
+        )
+        universe = document["active_universe_count"]
+        observation_count = document["observation_count"]
+        regular_count = document["regular_price_symbol_count"]
+        status_count = document["verified_non_price_symbol_count"]
+        unavailable_count = document["unavailable_count"]
+        unavailable = document["unavailable_symbols"]
+        operational_count = document["operational_failure_count"]
+        operational = document["operational_failed_symbols"]
+        denominator = document["regular_price_denominator"]
+        regular_coverage = document["regular_price_coverage"]
+        observation_coverage = document["observation_coverage"]
+        operational_rate = document["operational_failure_rate"]
+        symbols = document["symbols"]
+        expected = document["expected_non_price_symbols"]
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ReportSourceError("manifest v4 fields are invalid") from exc
+    numeric_counts = (
+        universe,
+        observation_count,
+        regular_count,
+        status_count,
+        unavailable_count,
+        operational_count,
+        denominator,
+    )
+    if (
+        document.get("schema_version") != 4
+        or market != "TW"
+        or document.get("market") != market
+        or "market_as_of" in document
+        or observation != target
+        or target > datetime.date.today()
+        or any(type(value) is not int or value < 0 for value in numeric_counts)
+        or universe < 1
+        or denominator < 1
+        or not isinstance(symbols, dict)
+        or not isinstance(expected, dict)
+        or not isinstance(unavailable, list)
+        or not isinstance(operational, list)
+        or len(set(unavailable)) != len(unavailable)
+        or any(re.fullmatch(r"[0-9]{4,6}", str(item)) is None for item in unavailable)
+        or len(set(operational)) != len(operational)
+        or any(re.fullmatch(r"[0-9]{4,6}", str(item)) is None for item in operational)
+        or len(symbols) != observation_count
+        or len(expected) != status_count
+        or len(unavailable) != unavailable_count
+        or len(operational) != operational_count
+        or regular_count + status_count != observation_count
+        or observation_count + unavailable_count != universe
+        or operational_count != 0
+        or denominator != observation_count - status_count
+        or set(expected) - set(symbols)
+        or set(unavailable) & set(symbols)
+        or set(operational) & set(symbols)
+        or type(regular_coverage) not in (int, float)
+        or type(observation_coverage) not in (int, float)
+        or type(operational_rate) not in (int, float)
+        or not math.isclose(float(regular_coverage), regular_count / denominator)
+        or not math.isclose(float(observation_coverage), observation_count / universe)
+        or not math.isclose(float(operational_rate), operational_count / universe)
+        or not 0 < float(regular_coverage) <= 1
+        or not 0 < float(observation_coverage) <= 1
+        or observation_count * 100 <= universe * 95
+    ):
+        raise ReportSourceError("manifest v4 consistency check failed")
+    for symbol, status in expected.items():
+        if (
+            re.fullmatch(r"[0-9]{4,6}", str(symbol)) is None
+            or not isinstance(status, dict)
+            or status.get("status")
+            not in {"official_no_regular_trade", "officially_suspended"}
+            or re.fullmatch(
+                r"[0-9a-f]{64}", str(status.get("evidence_sha256") or "")
+            )
+            is None
+            or re.fullmatch(
+                r"[0-9a-f]{64}", str(status.get("artifact_sha256") or "")
+            )
+            is None
+        ):
+            raise ReportSourceError("manifest v4 status entry is invalid")
+        try:
+            latest = datetime.date.fromisoformat(
+                str(status["latest_regular_price_date"])
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ReportSourceError("manifest v4 status date is invalid") from exc
+        if latest >= target:
+            raise ReportSourceError("manifest v4 status date is invalid")
+
 
 def _validate_manifest(document: dict[str, Any], market: str) -> None:
     if document.get("schema_version") == 2:
         _validate_manifest_v2(document, market)
     elif document.get("schema_version") == 3:
         _validate_manifest_v3(document, market)
+    elif document.get("schema_version") == 4:
+        _validate_manifest_v4(document, market)
     else:
         raise ReportSourceError("manifest schema is unsupported")
 
@@ -298,7 +415,7 @@ def _load_manifest_source(
             )
         ):
             raise ReportSourceError("stock object v2 status metadata is invalid")
-        if schema_version == 3 and (
+        if schema_version in (3, 4) and (
             entry.get("observation_as_of") != manifest["observation_as_of"]
             or entry.get("latest_regular_price_date") != entry.get("as_of")
             or entry.get("observation_kind")
@@ -336,7 +453,7 @@ def _load_manifest_source(
         latest_date = str(document["daily"][-1].get("Date") or "").split("T", 1)[0]
         if latest_date != entry.get("as_of"):
             raise ReportSourceError("stock object daily as_of mismatch")
-        if schema_version == 3:
+        if schema_version in (3, 4):
             latest_summary = document.get("latest")
             expected = manifest["expected_non_price_symbols"].get(symbol)
             status = document.get("trading_status_evidence")
@@ -418,17 +535,30 @@ def _load_manifest_source(
         market=market,
         generated_at=str(manifest["generated_at"]),
         market_as_of=as_of,
-        universe_count=manifest["universe_count"],
+        universe_count=(
+            manifest["universe_count"]
+            if schema_version in (2, 3)
+            else manifest["active_universe_count"]
+        ),
         symbol_count=expected_stock_count,
         failure_count=(
             manifest["failure_count"]
             if schema_version == 2
             else manifest["operational_failure_count"]
+            if schema_version == 3
+            else manifest["unavailable_count"]
+            + manifest["operational_failure_count"]
         ),
         failure_rate=float(
             manifest["failure_rate"]
             if schema_version == 2
             else manifest["operational_failure_rate"]
+            if schema_version == 3
+            else (
+                manifest["unavailable_count"]
+                + manifest["operational_failure_count"]
+            )
+            / manifest["active_universe_count"]
         ),
         coverage=float(
             manifest["coverage"]
@@ -440,27 +570,34 @@ def _load_manifest_source(
             for item in (
                 manifest["failed_symbols"]
                 if schema_version == 2
+                else (
+                    manifest["operational_failed_symbols"]
+                    + manifest["unavailable_symbols"]
+                )
+                if schema_version == 4
                 else manifest["operational_failed_symbols"]
             )
         ],
         manifest_path=manifest_relative,
         manifest_sha256=manifest_sha,
-        target_market_date=(as_of if schema_version == 3 else None),
-        observation_as_of=(as_of if schema_version == 3 else None),
+        target_market_date=(as_of if schema_version in (3, 4) else None),
+        observation_as_of=(as_of if schema_version in (3, 4) else None),
         regular_price_symbol_count=manifest.get("regular_price_symbol_count"),
-        expected_non_price_symbol_count=manifest.get(
-            "expected_non_price_symbol_count"
+        expected_non_price_symbol_count=(
+            manifest["expected_non_price_symbol_count"]
+            if schema_version == 3
+            else manifest.get("verified_non_price_symbol_count")
         ),
         operational_failure_count=manifest.get("operational_failure_count"),
         regular_price_denominator=manifest.get("regular_price_denominator"),
         regular_price_coverage=(
             float(manifest["regular_price_coverage"])
-            if schema_version == 3
+            if schema_version in (3, 4)
             else None
         ),
         observation_coverage=(
             float(manifest["observation_coverage"])
-            if schema_version == 3
+            if schema_version in (3, 4)
             else None
         ),
         expected_non_price_symbols={
@@ -473,6 +610,16 @@ def _load_manifest_source(
             str(item)
             for item in manifest.get("operational_failed_symbols", [])
         ],
+        unavailable_symbols=(
+            [str(item) for item in manifest["unavailable_symbols"]]
+            if manifest.get("unavailable_symbols") is not None
+            else None
+        ),
+        unavailable_count=manifest.get("unavailable_count"),
+        active_universe_count=manifest.get("active_universe_count"),
+        verified_non_price_symbol_count=manifest.get(
+            "verified_non_price_symbol_count"
+        ),
     )
     return LoadedReportSource(source_manifest, stocks)
 
@@ -494,7 +641,7 @@ def load_report_source(
     manifest_sha = str(latest.get("manifest_sha256") or "")
     latest_schema = latest.get("schema_version")
     if (
-        latest_schema not in {2, 3}
+        latest_schema not in {2, 3, 4}
         or latest.get("market") != market
         or re.fullmatch(r"manifests/TW-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}\.json", manifest_relative) is None
         or re.fullmatch(r"[0-9a-f]{64}", manifest_sha) is None

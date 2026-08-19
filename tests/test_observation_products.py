@@ -460,6 +460,271 @@ class ObservationProductsTests(unittest.TestCase):
                 today=datetime.date(2026, 7, 17),
             )
 
+    def test_v3_with_unavailable_symbols_below_5_percent_masks_downstream(self):
+        target = datetime.date(2026, 7, 16)
+        regular_stocks = [_stock(f"{3000 + i:04d}", [100.0 + i] * 64) for i in range(96)]
+        for stock in regular_stocks:
+            stock.as_of = target
+            stock.observation_as_of = target
+            stock.latest_regular_price_date = target
+            stock.daily[-1]["Date"] = target.isoformat() + "T00:00:00.000"
+        status_1 = _status_stock(
+            "1001", target, _no_trade_evidence("1001", target)
+        )
+        status_2 = _status_stock(
+            "1002", target, _suspended_evidence("1002", target)
+        )
+        status_stocks = [status_1, status_2]
+        all_stocks = regular_stocks + status_stocks
+        expected = {
+            stock.symbol: {
+                "status": stock.observation_kind,
+                "evidence_sha256": stock.trading_status_evidence["evidence_sha256"],
+                "artifact_sha256": stock.sha256,
+                "latest_regular_price_date": stock.as_of.isoformat(),
+            }
+            for stock in status_stocks
+        }
+        # 100 universe: 96 regular, 2 status, 2 unavailable (98% coverage)
+        manifest = ReportSourceManifest(
+            schema_version=3,
+            market="TW",
+            generated_at="2026-07-16T10:00:00Z",
+            market_as_of=target,
+            universe_count=100,
+            symbol_count=98,
+            failure_count=2,
+            failure_rate=2 / 100,
+            coverage=98 / 100,
+            failed_symbols=["2001", "2002"],
+            manifest_path="manifests/TW-20260716T100000Z-aaaaaaaaaaaa.json",
+            manifest_sha256="a" * 64,
+            target_market_date=target,
+            observation_as_of=target,
+            regular_price_symbol_count=96,
+            expected_non_price_symbol_count=2,
+            operational_failure_count=2,
+            regular_price_denominator=98,
+            regular_price_coverage=96 / 98,
+            observation_coverage=98 / 100,
+            expected_non_price_symbols=expected,
+            operational_failed_symbols=["2001", "2002"],
+        )
+        source = LoadedReportSource(manifest=manifest, stocks=all_stocks)
+        industry_map = {
+            "全市場": [s.symbol for s in all_stocks] + ["2001", "2002"],
+            "半導體": ["3000", "3001", "1001", "2001"],
+            "ETF專區": ["0050"],
+        }
+        dashboard = build_observation_dashboard(
+            source,
+            industry_map,
+            _capability(),
+            generated_at=self.generated_at,
+            today=datetime.date(2026, 7, 17),
+        )
+        quality = dashboard["data_quality"]
+        self.assertEqual(quality["universe_count"], 100)
+        self.assertEqual(quality["available_count"], 98)
+        self.assertEqual(quality["failure_count"], 2)
+        self.assertEqual(quality["regular_price_count"], 96)
+        self.assertEqual(quality["verified_status_count"], 2)
+        self.assertEqual(quality["operational_failure_count"], 2)
+        self.assertEqual(quality["failed_symbols"], ["2001", "2002"])
+        # Unavailable partition: falls back to the failure partition when the
+        # manifest does not declare the optional unavailable fields (legacy
+        # manifest backward compatibility).
+        self.assertEqual(quality["unavailable_symbols"], ["2001", "2002"])
+        self.assertEqual(quality["unavailable_count"], 2)
+
+        # Market breadth: total counted must equal 96 regular stocks
+        market = dashboard["market_observation"]
+        self.assertEqual(
+            market["advancing_count"] + market["declining_count"] + market["unchanged_count"],
+            96,
+        )
+
+        # Industry observations: 1001 (status) and 2001 (unavailable) not in regular price stock count
+        semiconductor = [ind for ind in dashboard["industry_observations"] if ind["name"] == "半導體"][0]
+        self.assertEqual(semiconductor["component_count"], 3) # without status 1001
+        self.assertEqual(semiconductor["available_count"], 2) # 3000, 3001 (2001 omitted)
+
+    def test_v4_with_unavailable_partition_masks_downstream_and_separates_operational(self):
+        target = datetime.date(2026, 7, 16)
+        regular_stocks = [_stock(f"{3000 + i:04d}", [100.0 + i] * 64) for i in range(96)]
+        for stock in regular_stocks:
+            stock.as_of = target
+            stock.observation_as_of = target
+            stock.latest_regular_price_date = target
+            stock.daily[-1]["Date"] = target.isoformat() + "T00:00:00.000"
+        status_1 = _status_stock(
+            "1001", target, _no_trade_evidence("1001", target)
+        )
+        status_2 = _status_stock(
+            "1002", target, _suspended_evidence("1002", target)
+        )
+        status_stocks = [status_1, status_2]
+        all_stocks = regular_stocks + status_stocks
+        expected = {
+            stock.symbol: {
+                "status": stock.observation_kind,
+                "evidence_sha256": stock.trading_status_evidence["evidence_sha256"],
+                "artifact_sha256": stock.sha256,
+                "latest_regular_price_date": stock.as_of.isoformat(),
+            }
+            for stock in status_stocks
+        }
+        # v4: 100 active universe = 98 observed (96 regular + 2 status) + 2 unavailable,
+        # 0 operational failures
+        manifest = ReportSourceManifest(
+            schema_version=4,
+            market="TW",
+            generated_at="2026-07-16T10:00:00Z",
+            market_as_of=target,
+            universe_count=100,
+            symbol_count=98,
+            failure_count=2,
+            failure_rate=2 / 100,
+            coverage=98 / 100,
+            failed_symbols=["2001", "2002"],
+            manifest_path="manifests/TW-20260716T100000Z-aaaaaaaaaaaa.json",
+            manifest_sha256="a" * 64,
+            target_market_date=target,
+            observation_as_of=target,
+            regular_price_symbol_count=96,
+            expected_non_price_symbol_count=None,
+            operational_failure_count=0,
+            regular_price_denominator=96,
+            regular_price_coverage=1.0,
+            observation_coverage=98 / 100,
+            expected_non_price_symbols=expected,
+            operational_failed_symbols=[],
+            unavailable_symbols=["2001", "2002"],
+            unavailable_count=2,
+            active_universe_count=100,
+            verified_non_price_symbol_count=2,
+        )
+        source = LoadedReportSource(manifest=manifest, stocks=all_stocks)
+        industry_map = {
+            "全市場": [s.symbol for s in all_stocks] + ["2001", "2002"],
+            "半導體": ["3000", "3001", "1001", "2001"],
+            "ETF專區": ["0050"],
+        }
+        dashboard = build_observation_dashboard(
+            source,
+            industry_map,
+            _capability(),
+            generated_at=self.generated_at,
+            today=datetime.date(2026, 7, 17),
+        )
+        quality = dashboard["data_quality"]
+        self.assertEqual(quality["universe_count"], 100)
+        self.assertEqual(quality["available_count"], 98)
+        self.assertEqual(quality["failure_count"], 2)
+        self.assertEqual(quality["regular_price_count"], 96)
+        self.assertEqual(quality["verified_status_count"], 2)
+        self.assertEqual(quality["unavailable_symbols"], ["2001", "2002"])
+        self.assertEqual(quality["unavailable_count"], 2)
+
+        # Market breadth: unavailable symbols must not enter breadth
+        market = dashboard["market_observation"]
+        self.assertEqual(
+            market["advancing_count"] + market["declining_count"] + market["unchanged_count"],
+            96,
+        )
+
+        # Industry observations: status 1001 and unavailable 2001 not in regular count
+        semiconductor = [ind for ind in dashboard["industry_observations"] if ind["name"] == "半導體"][0]
+        self.assertEqual(semiconductor["component_count"], 3)
+        self.assertEqual(semiconductor["available_count"], 2)
+
+        # ETF path: unavailable ETF symbol must not appear
+        etf_symbols = {item["symbol"] for item in dashboard["etf_observations"]}
+        self.assertNotIn("0050", etf_symbols)
+
+    def test_v4_source_validation_rejects_nonzero_operational_failure(self):
+        target = datetime.date(2026, 7, 16)
+        regular_stocks = [_stock(f"{3000 + i:04d}", [100.0] * 64) for i in range(98)]
+        for stock in regular_stocks:
+            stock.as_of = target
+            stock.observation_as_of = target
+            stock.latest_regular_price_date = target
+            stock.daily[-1]["Date"] = target.isoformat() + "T00:00:00.000"
+        manifest = ReportSourceManifest(
+            schema_version=4,
+            market="TW",
+            generated_at="2026-07-16T10:00:00Z",
+            market_as_of=target,
+            universe_count=100,
+            symbol_count=98,
+            failure_count=2,
+            failure_rate=2 / 100,
+            coverage=98 / 100,
+            failed_symbols=["2001", "2002"],
+            manifest_path="manifests/TW-20260716T100000Z-aaaaaaaaaaaa.json",
+            manifest_sha256="a" * 64,
+            target_market_date=target,
+            observation_as_of=target,
+            regular_price_symbol_count=98,
+            expected_non_price_symbol_count=None,
+            operational_failure_count=1,
+            regular_price_denominator=98,
+            regular_price_coverage=1.0,
+            observation_coverage=98 / 100,
+            expected_non_price_symbols={},
+            operational_failed_symbols=["2002"],
+            unavailable_symbols=["2001"],
+            unavailable_count=1,
+            active_universe_count=100,
+            verified_non_price_symbol_count=0,
+        )
+        source = LoadedReportSource(manifest=manifest, stocks=regular_stocks)
+        with self.assertRaisesRegex(ValueError, "observation source v4 counts are invalid"):
+            build_observation_dashboard(
+                source,
+                self.industry_map,
+                _capability(),
+                generated_at=self.generated_at,
+                today=datetime.date(2026, 7, 17),
+            )
+
+    def test_v3_exact_95_percent_coverage_fails(self):
+        target = datetime.date(2026, 7, 16)
+        regular_stocks = [_stock(f"{3000 + i:04d}", [100.0] * 64) for i in range(95)]
+        manifest = ReportSourceManifest(
+            schema_version=3,
+            market="TW",
+            generated_at="2026-07-16T10:00:00Z",
+            market_as_of=target,
+            universe_count=100,
+            symbol_count=95,
+            failure_count=5,
+            failure_rate=5 / 100,
+            coverage=95 / 100,
+            failed_symbols=[f"{2000 + i:04d}" for i in range(5)],
+            manifest_path="manifests/TW-20260716T100000Z-aaaaaaaaaaaa.json",
+            manifest_sha256="a" * 64,
+            target_market_date=target,
+            observation_as_of=target,
+            regular_price_symbol_count=95,
+            expected_non_price_symbol_count=0,
+            operational_failure_count=5,
+            regular_price_denominator=100,
+            regular_price_coverage=95 / 100,
+            observation_coverage=95 / 100,
+            expected_non_price_symbols={},
+            operational_failed_symbols=[f"{2000 + i:04d}" for i in range(5)],
+        )
+        source = LoadedReportSource(manifest=manifest, stocks=regular_stocks)
+        with self.assertRaisesRegex(ValueError, "observation source coverage or schema is invalid"):
+            build_observation_dashboard(
+                source,
+                self.industry_map,
+                _capability(),
+                generated_at=self.generated_at,
+                today=datetime.date(2026, 7, 17),
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
