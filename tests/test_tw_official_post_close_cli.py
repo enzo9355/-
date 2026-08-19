@@ -2318,6 +2318,167 @@ class TWOfficialPostCloseCLITests(unittest.TestCase):
         missing = market_universe - covered
         self.assertLess(len(missing) / len(market_universe), 0.05)
 
+    def _gate_fixture(self, root, observed_count, total_count, failures=None):
+        root = Path(root)
+        symbols = [f"{i:04d}" for i in range(total_count)]
+        observed = symbols[:observed_count]
+        series = snapshot_series(dates=(TARGET,), price_symbols=tuple(observed))
+        for symbol in observed:
+            write_artifact(
+                root, symbol, TARGET.isoformat(), official_lineage(symbol, series)
+            )
+        expected_identity = cli._enrich_batch_identity(
+            {
+                "target_market_date": TARGET.isoformat(),
+                "product_mode": "observation",
+                "source_version": local_quant.OBSERVATION_SOURCE_VERSION,
+            },
+            series=series,
+            audit=Mock(latest_date_counts={}, unavailable_symbols=[]),
+            symbols=symbols,
+            reconcile_legacy_overlaps=False,
+            recover_truncated_history=False,
+        )
+        write_checkpoint(
+            root,
+            {
+                "stage": "market_batch",
+                "market": "TW",
+                "next_index": total_count,
+                "failed": list(failures or []),
+                "batch_identity": expected_identity,
+            },
+        )
+        return symbols, series, expected_identity
+
+    def test_assert_complete_exact_95_percent_coverage_fails_closed(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            symbols, series, identity = self._gate_fixture(
+                root,
+                observed_count=19,
+                total_count=20,
+                failures=[{"symbol": "0019", "error": "_UnavailableObservationError"}],
+            )
+            with self.assertRaisesRegex(RuntimeError, "recovery is incomplete"):
+                cli._assert_complete(
+                    root,
+                    symbols=symbols,
+                    target_market_date=TARGET,
+                    expected_identity=identity,
+                    official_series=series,
+                    applied_reconciliation_artifacts={},
+                )
+
+    def test_assert_complete_above_95_percent_with_unavailable_partition_passes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            symbols, series, identity = self._gate_fixture(
+                root,
+                observed_count=20,
+                total_count=21,
+                failures=[{"symbol": "0020", "error": "_UnavailableObservationError"}],
+            )
+            cli._assert_complete(
+                root,
+                symbols=symbols,
+                target_market_date=TARGET,
+                expected_identity=identity,
+                official_series=series,
+                applied_reconciliation_artifacts={},
+            )
+
+    def test_assert_complete_rejects_operational_failure_in_unavailable_partition(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            symbols, series, identity = self._gate_fixture(
+                root,
+                observed_count=20,
+                total_count=21,
+                failures=[{"symbol": "0020", "error": "OSError"}],
+            )
+            with self.assertRaisesRegex(RuntimeError, "recovery is incomplete"):
+                cli._assert_complete(
+                    root,
+                    symbols=symbols,
+                    target_market_date=TARGET,
+                    expected_identity=identity,
+                    official_series=series,
+                    applied_reconciliation_artifacts={},
+                )
+
+    def test_assert_complete_rejects_operational_failure_in_observed_partition(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            symbols, series, identity = self._gate_fixture(
+                root,
+                observed_count=20,
+                total_count=21,
+                failures=[
+                    {"symbol": "0005", "error": "OSError"},
+                    {"symbol": "0020", "error": "_UnavailableObservationError"},
+                ],
+            )
+            with self.assertRaisesRegex(RuntimeError, "recovery is incomplete"):
+                cli._assert_complete(
+                    root,
+                    symbols=symbols,
+                    target_market_date=TARGET,
+                    expected_identity=identity,
+                    official_series=series,
+                    applied_reconciliation_artifacts={},
+                )
+
+    def test_patched_builder_classifies_data_absence_as_unavailable(self):
+        class RaisingPipeline:
+            pd = pd
+            fetch_finmind_dataset = None
+
+            @staticmethod
+            def calc_all(_frame):
+                return _frame
+
+            def get_stock_name(self, _symbol):
+                return "測試標的"
+
+        def original_build(_pipeline_arg, market, symbol, *args, **kwargs):
+            if symbol == "2303":
+                raise ValueError("point-in-time price history is unavailable")
+            if symbol == "2330":
+                raise ValueError("calculated history is unavailable")
+            raise AssertionError("unreachable")
+
+        fake_module = types.SimpleNamespace(
+            build_stock_snapshot=original_build,
+            load_stock_pipeline=lambda _root: RaisingPipeline(),
+            run_market_batch=lambda *_args, **_kwargs: None,
+            get_taiwan_symbols=lambda _pipeline: ["2303", "2330"],
+            load_exclusion_list=lambda _root, _market: (set(), set(), [], 0),
+        )
+        with _patched_pipeline(
+            fake_module,
+            RaisingPipeline(),
+            Mock(),
+            snapshot_series(dates=(TARGET,), price_symbols=("2330",)),
+            Mock(),
+        ):
+            with self.assertRaisesRegex(
+                ValueError, "point-in-time price history is unavailable"
+            ) as unavailable:
+                fake_module.build_stock_snapshot(
+                    RaisingPipeline(), "TW", "2303", target_market_date=TARGET
+                )
+            self.assertIsInstance(
+                unavailable.exception, cli._UnavailableObservationError
+            )
+            with self.assertRaises(ValueError) as operational:
+                fake_module.build_stock_snapshot(
+                    RaisingPipeline(), "TW", "2330", target_market_date=TARGET
+                )
+            self.assertNotIsInstance(
+                operational.exception, cli._UnavailableObservationError
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

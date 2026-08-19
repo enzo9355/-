@@ -531,6 +531,11 @@ class ObservationProductsTests(unittest.TestCase):
         self.assertEqual(quality["verified_status_count"], 2)
         self.assertEqual(quality["operational_failure_count"], 2)
         self.assertEqual(quality["failed_symbols"], ["2001", "2002"])
+        # Unavailable partition: falls back to the failure partition when the
+        # manifest does not declare the optional unavailable fields (legacy
+        # manifest backward compatibility).
+        self.assertEqual(quality["unavailable_symbols"], ["2001", "2002"])
+        self.assertEqual(quality["unavailable_count"], 2)
 
         # Market breadth: total counted must equal 96 regular stocks
         market = dashboard["market_observation"]

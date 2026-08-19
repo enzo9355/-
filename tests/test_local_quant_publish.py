@@ -452,6 +452,8 @@ class LocalQuantPublishTests(unittest.TestCase):
                 symbols,
                 generated_at=datetime.datetime(2026, 7, 30, 6, tzinfo=TAIPEI),
                 target_market_date=TARGET,
+                failed_symbols=["0098", "0099"],
+                unavailable_symbols=["0098", "0099"],
             )
             latest = json.loads(latest_path.read_text(encoding="utf-8"))
             manifest = json.loads(
@@ -464,6 +466,8 @@ class LocalQuantPublishTests(unittest.TestCase):
             self.assertEqual(manifest["expected_non_price_symbol_count"], 2)
             self.assertEqual(manifest["operational_failure_count"], 2)
             self.assertEqual(manifest["operational_failed_symbols"], ["0098", "0099"])
+            self.assertEqual(manifest["unavailable_symbols"], ["0098", "0099"])
+            self.assertEqual(manifest["unavailable_count"], 2)
             self.assertEqual(manifest["regular_price_denominator"], 98)
             self.assertEqual(manifest["regular_price_coverage"], 96 / 98)
             self.assertEqual(manifest["observation_coverage"], 98 / 100)
@@ -489,10 +493,33 @@ class LocalQuantPublishTests(unittest.TestCase):
             root = Path(temporary)
             ensure_layout(root)
             symbols = [f"{i:04d}" for i in range(100)]
+            unavailable = [f"{i:04d}" for i in range(94, 100)]
             for s in symbols[:94]:
                 write_stock_artifact(root, "TW", s, v3_document(s))
 
             with self.assertRaisesRegex(RuntimeError, "market failure rate 6.00% is not publishable"):
+                publish_market_snapshot(
+                    root,
+                    "TW",
+                    symbols,
+                    generated_at=datetime.datetime(2026, 7, 30, 6, tzinfo=TAIPEI),
+                    target_market_date=TARGET,
+                    failed_symbols=unavailable,
+                    unavailable_symbols=unavailable,
+                )
+
+    def test_v3_publish_fails_closed_on_undeclared_artifact_validation_error(self):
+        # Integrity matrix: a single observed symbol whose artifact fails validation
+        # (not declared unavailable) must fail the whole publish, even at 1% size.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            ensure_layout(root)
+            symbols = [f"{i:04d}" for i in range(100)]
+            for s in symbols[:99]:
+                write_stock_artifact(root, "TW", s, v3_document(s))
+            # 0099 has no artifact and is NOT declared unavailable -> operational gap
+
+            with self.assertRaisesRegex(RuntimeError, "artifact is (invalid|missing) for TW:0099"):
                 publish_market_snapshot(
                     root,
                     "TW",
