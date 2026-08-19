@@ -260,3 +260,78 @@ def write_quant_publish_v3(root: Path) -> Path:
         "manifest_sha256": digest,
     }, separators=(",", ":")), encoding="utf-8")
     return publish
+
+
+def write_quant_publish_v4(root):
+    """Write a v4 status-aware quant publish with a 20/21 unavailable partition."""
+    publish = Path(root) / "publish" / "quant" / "v1"
+    publish.mkdir(parents=True, exist_ok=True)
+    (publish / "objects").mkdir(exist_ok=True)
+    regular_symbols = [f"{3000 + index:04d}" for index in range(19)]
+    documents = [
+        regular_v3_stock_document(symbol) for symbol in regular_symbols
+    ] + [status_stock_document("2303")]
+    entries = {}
+    expected = {}
+    for document in documents:
+        encoded = json.dumps(document, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8")
+        compressed = gzip.compress(encoded, mtime=0)
+        digest = hashlib.sha256(compressed).hexdigest()
+        relative = f"objects/{digest}.json.gz"
+        (publish / relative).write_bytes(compressed)
+        entry = {
+            "path": relative,
+            "sha256": digest,
+            "size": len(compressed),
+            "uncompressed_size": len(encoded),
+            "as_of": document["as_of"],
+            "observation_as_of": document["observation_as_of"],
+            "latest_regular_price_date": document["latest_regular_price_date"],
+            "observation_kind": document["observation_kind"],
+            "model_version": document["model_version"],
+        }
+        status = document["trading_status_evidence"]
+        if status is not None:
+            entry["evidence_sha256"] = status["evidence_sha256"]
+            expected[document["symbol"]] = {
+                "status": status["status"],
+                "evidence_sha256": status["evidence_sha256"],
+                "artifact_sha256": digest,
+                "latest_regular_price_date": document["latest_regular_price_date"],
+            }
+        entries[document["symbol"]] = entry
+    manifest = {
+        "schema_version": 4,
+        "market": "TW",
+        "generated_at": "2026-07-30T01:00:00Z",
+        "target_market_date": "2026-07-29",
+        "observation_as_of": "2026-07-29",
+        "active_universe_count": 21,
+        "observation_count": 20,
+        "regular_price_symbol_count": 19,
+        "verified_non_price_symbol_count": 1,
+        "unavailable_count": 1,
+        "unavailable_symbols": ["6001"],
+        "operational_failure_count": 0,
+        "operational_failed_symbols": [],
+        "operational_failure_rate": 0.0,
+        "observation_coverage": 20 / 21,
+        "regular_price_denominator": 19,
+        "regular_price_coverage": 1.0,
+        "expected_non_price_symbols": expected,
+        "symbols": entries,
+    }
+    manifest_bytes = json.dumps(manifest, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    digest = hashlib.sha256(manifest_bytes).hexdigest()
+    relative = f"manifests/TW-20260730T010000Z-{digest[:12]}.json"
+    path = publish / relative
+    path.parent.mkdir(exist_ok=True)
+    path.write_bytes(manifest_bytes)
+    (publish / "latest-TW.json").write_text(json.dumps({
+        "schema_version": 4,
+        "market": "TW",
+        "generated_at": "2026-07-30T01:00:00Z",
+        "manifest": relative,
+        "manifest_sha256": digest,
+    }, separators=(",", ":")), encoding="utf-8")
+    return publish

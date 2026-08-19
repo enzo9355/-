@@ -1598,7 +1598,8 @@ class TWOfficialPostCloseCLITests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertEqual(observed["published_args"][1:3], ("TW", ["2303", "2330"]))
         self.assertEqual(observed["published_kwargs"]["target_market_date"], TARGET)
-        self.assertNotIn("2303", observed["published_kwargs"]["failed_symbols"])
+        self.assertNotIn("2303", observed["published_kwargs"]["unavailable_symbols"])
+        self.assertNotIn("failed_symbols", observed["published_kwargs"])
 
     def test_cli_scopes_downstream_operational_failures_to_universe(self):
         base = snapshot_series((TARGET,), price_symbols=("2330",))
@@ -1632,7 +1633,8 @@ class TWOfficialPostCloseCLITests(unittest.TestCase):
             )
 
         self.assertEqual(result, 0)
-        self.assertEqual(observed["published_kwargs"]["failed_symbols"], [])
+        self.assertEqual(observed["published_kwargs"]["unavailable_symbols"], [])
+        self.assertNotIn("failed_symbols", observed["published_kwargs"])
 
     def test_cli_restores_all_patches_when_assignment_or_pipeline_fails(self):
         class RejectOnce(types.SimpleNamespace):

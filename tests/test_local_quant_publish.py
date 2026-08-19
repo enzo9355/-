@@ -67,7 +67,9 @@ def no_trade_status(symbol="2303"):
 
 
 class LocalQuantPublishTests(unittest.TestCase):
-    def test_v3_manifest_partitions_regular_status_and_operational_symbols(self):
+    def test_v4_publish_rejects_genuine_operational_failed_symbols(self):
+        # v4 governance: passing failed_symbols that are not declared unavailable
+        # is a genuine operational failure and must fail closed.
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             ensure_layout(root)
@@ -84,28 +86,19 @@ class LocalQuantPublishTests(unittest.TestCase):
                 v3_document(status_symbol, status=status),
             )
 
-            latest_path = publish_market_snapshot(
-                root,
-                "TW",
-                symbols,
-                generated_at=datetime.datetime(2026, 7, 30, 6, tzinfo=TAIPEI),
-                failed_symbols=[failed_symbol],
-                target_market_date=TARGET,
-            )
-            latest = json.loads(latest_path.read_text(encoding="utf-8"))
-            manifest = json.loads(
-                (latest_path.parent / latest["manifest"]).read_text(encoding="utf-8")
-            )
+            with self.assertRaisesRegex(
+                RuntimeError, "operational symbol failures are not publishable"
+            ):
+                publish_market_snapshot(
+                    root,
+                    "TW",
+                    symbols,
+                    generated_at=datetime.datetime(2026, 7, 30, 6, tzinfo=TAIPEI),
+                    failed_symbols=[failed_symbol],
+                    target_market_date=TARGET,
+                )
 
-        self.assertEqual(manifest["observation_count"], 20)
-        self.assertEqual(manifest["regular_price_symbol_count"], 19)
-        self.assertEqual(manifest["expected_non_price_symbol_count"], 1)
-        self.assertEqual(manifest["operational_failure_count"], 1)
-        self.assertEqual(manifest["regular_price_denominator"], 20)
-        self.assertEqual(manifest["regular_price_coverage"], 19 / 20)
-        self.assertEqual(manifest["operational_failed_symbols"], [failed_symbol])
-
-    def test_v3_manifest_partitions_regular_and_status_symbols(self):
+    def test_v4_manifest_partitions_regular_and_status_symbols(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             ensure_layout(root)
@@ -125,15 +118,17 @@ class LocalQuantPublishTests(unittest.TestCase):
                 (latest_path.parent / latest["manifest"]).read_text(encoding="utf-8")
             )
 
-        self.assertEqual(latest["schema_version"], 3)
-        self.assertEqual(manifest["schema_version"], 3)
+        self.assertEqual(latest["schema_version"], 4)
+        self.assertEqual(manifest["schema_version"], 4)
         self.assertNotIn("market_as_of", manifest)
         self.assertEqual(manifest["target_market_date"], TARGET.isoformat())
         self.assertEqual(manifest["observation_as_of"], TARGET.isoformat())
-        self.assertEqual(manifest["universe_count"], 2)
+        self.assertEqual(manifest["active_universe_count"], 2)
         self.assertEqual(manifest["observation_count"], 2)
         self.assertEqual(manifest["regular_price_symbol_count"], 1)
-        self.assertEqual(manifest["expected_non_price_symbol_count"], 1)
+        self.assertEqual(manifest["verified_non_price_symbol_count"], 1)
+        self.assertEqual(manifest["unavailable_count"], 0)
+        self.assertEqual(manifest["unavailable_symbols"], [])
         self.assertEqual(manifest["operational_failure_count"], 0)
         self.assertEqual(manifest["regular_price_denominator"], 1)
         self.assertEqual(manifest["regular_price_coverage"], 1.0)
@@ -431,8 +426,9 @@ class LocalQuantPublishTests(unittest.TestCase):
                 (root / "publish" / "quant" / "v1" / "latest-US.json").exists()
             )
 
-    def test_v3_publish_with_unavailable_symbols_below_5_percent_succeeds(self):
-        # 100 active symbols: 96 regular prices, 2 verified status, 2 unavailable (98% observation coverage > 95%)
+    def test_v4_publish_with_unavailable_partition_below_5_percent_succeeds(self):
+        # 100 active symbols: 96 regular prices, 2 verified status, 2 unavailable
+        # (98% observation coverage > 95%, 0 operational failures)
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             ensure_layout(root)
@@ -452,31 +448,36 @@ class LocalQuantPublishTests(unittest.TestCase):
                 symbols,
                 generated_at=datetime.datetime(2026, 7, 30, 6, tzinfo=TAIPEI),
                 target_market_date=TARGET,
-                failed_symbols=["0098", "0099"],
                 unavailable_symbols=["0098", "0099"],
             )
             latest = json.loads(latest_path.read_text(encoding="utf-8"))
+            self.assertEqual(latest["schema_version"], 4)
             manifest = json.loads(
                 (latest_path.parent / latest["manifest"]).read_text(encoding="utf-8")
             )
+            self.assertEqual(manifest["schema_version"], 4)
 
-            self.assertEqual(manifest["universe_count"], 100)
+            self.assertEqual(manifest["active_universe_count"], 100)
             self.assertEqual(manifest["observation_count"], 98)
             self.assertEqual(manifest["regular_price_symbol_count"], 96)
-            self.assertEqual(manifest["expected_non_price_symbol_count"], 2)
-            self.assertEqual(manifest["operational_failure_count"], 2)
-            self.assertEqual(manifest["operational_failed_symbols"], ["0098", "0099"])
-            self.assertEqual(manifest["unavailable_symbols"], ["0098", "0099"])
+            self.assertEqual(manifest["verified_non_price_symbol_count"], 2)
             self.assertEqual(manifest["unavailable_count"], 2)
-            self.assertEqual(manifest["regular_price_denominator"], 98)
-            self.assertEqual(manifest["regular_price_coverage"], 96 / 98)
+            self.assertEqual(manifest["unavailable_symbols"], ["0098", "0099"])
+            self.assertEqual(manifest["operational_failure_count"], 0)
+            self.assertEqual(manifest["operational_failed_symbols"], [])
+            self.assertEqual(manifest["operational_failure_rate"], 0.0)
+            self.assertEqual(manifest["regular_price_denominator"], 96)
+            self.assertEqual(manifest["regular_price_coverage"], 96 / 96)
             self.assertEqual(manifest["observation_coverage"], 98 / 100)
-            self.assertEqual(manifest["operational_failure_rate"], 2 / 100)
+            self.assertEqual(
+                manifest["observation_count"] + manifest["unavailable_count"],
+                manifest["active_universe_count"],
+            )
 
             # Check disjoint partition:
             R = {s for s, entry in manifest["symbols"].items() if s not in manifest["expected_non_price_symbols"]}
             N = set(manifest["expected_non_price_symbols"])
-            M = set(manifest["operational_failed_symbols"])
+            M = set(manifest["unavailable_symbols"])
             A = set(symbols)
 
             self.assertEqual(len(R), 96)
@@ -487,7 +488,55 @@ class LocalQuantPublishTests(unittest.TestCase):
             self.assertTrue(N.isdisjoint(M))
             self.assertEqual(R | N | M, A)
 
-    def test_v3_publish_fails_when_unavailable_exceeds_5_percent(self):
+    def test_v4_publish_fails_closed_on_genuine_operational_failure(self):
+        # 99 observation-ready symbols + 1 genuine operational failure passed via
+        # failed_symbols (not unavailable) -> whole publish must fail closed and
+        # no new latest pointer may be created.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            ensure_layout(root)
+            symbols = [f"{i:04d}" for i in range(100)]
+            for s in symbols[:99]:
+                write_stock_artifact(root, "TW", s, v3_document(s))
+
+            before = (
+                root / "publish" / "quant" / "v1" / "latest-TW.json"
+            )
+            before_bytes = before.read_bytes() if before.exists() else None
+            with self.assertRaisesRegex(RuntimeError, "operational symbol failures are not publishable"):
+                publish_market_snapshot(
+                    root,
+                    "TW",
+                    symbols,
+                    generated_at=datetime.datetime(2026, 7, 30, 6, tzinfo=TAIPEI),
+                    target_market_date=TARGET,
+                    failed_symbols=["0099"],
+                )
+            after_bytes = before.read_bytes() if before.exists() else None
+            self.assertEqual(before_bytes, after_bytes)
+
+    def test_v4_publish_fails_closed_on_mixed_unavailable_and_operational(self):
+        # 98 observation-ready + 1 unavailable + 1 genuine operational failure
+        # -> whole publish must fail closed.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            ensure_layout(root)
+            symbols = [f"{i:04d}" for i in range(100)]
+            for s in symbols[:98]:
+                write_stock_artifact(root, "TW", s, v3_document(s))
+
+            with self.assertRaisesRegex(RuntimeError, "operational symbol failures are not publishable"):
+                publish_market_snapshot(
+                    root,
+                    "TW",
+                    symbols,
+                    generated_at=datetime.datetime(2026, 7, 30, 6, tzinfo=TAIPEI),
+                    target_market_date=TARGET,
+                    failed_symbols=["0099"],
+                    unavailable_symbols=["0098"],
+                )
+
+    def test_v4_publish_fails_when_unavailable_exceeds_5_percent(self):
         # 100 active symbols: 94 regular prices, 6 unavailable (94% coverage <= 95% threshold)
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -504,11 +553,30 @@ class LocalQuantPublishTests(unittest.TestCase):
                     symbols,
                     generated_at=datetime.datetime(2026, 7, 30, 6, tzinfo=TAIPEI),
                     target_market_date=TARGET,
-                    failed_symbols=unavailable,
                     unavailable_symbols=unavailable,
                 )
 
-    def test_v3_publish_fails_closed_on_undeclared_artifact_validation_error(self):
+    def test_v4_publish_exact_95_percent_coverage_fails_closed(self):
+        # 95 observed of 100 active = exactly 95% -> integer boundary must fail.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            ensure_layout(root)
+            symbols = [f"{i:04d}" for i in range(100)]
+            unavailable = [f"{i:04d}" for i in range(95, 100)]
+            for s in symbols[:95]:
+                write_stock_artifact(root, "TW", s, v3_document(s))
+
+            with self.assertRaisesRegex(RuntimeError, "market failure rate 5.00% is not publishable"):
+                publish_market_snapshot(
+                    root,
+                    "TW",
+                    symbols,
+                    generated_at=datetime.datetime(2026, 7, 30, 6, tzinfo=TAIPEI),
+                    target_market_date=TARGET,
+                    unavailable_symbols=unavailable,
+                )
+
+    def test_v4_publish_fails_closed_on_undeclared_artifact_validation_error(self):
         # Integrity matrix: a single observed symbol whose artifact fails validation
         # (not declared unavailable) must fail the whole publish, even at 1% size.
         with tempfile.TemporaryDirectory() as temporary:
