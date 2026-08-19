@@ -802,11 +802,11 @@ try {
         $LatestPointerHash = (Get-FileHash -LiteralPath $LatestPath -Algorithm SHA256).Hash.ToLowerInvariant()
         $Latest = Get-Content -LiteralPath $LatestPath -Raw -Encoding utf8 | ConvertFrom-Json
         $LatestSchema = [int]$Latest.schema_version
-        if ($LatestSchema -notin @(2, 3) -or $Latest.market -ne $Market) {
+        if ($LatestSchema -notin @(2, 3, 4) -or $Latest.market -ne $Market) {
             throw "Invalid latest pointer for $Market"
         }
-        if ($LatestSchema -eq 3 -and $Market -ne 'TW') {
-            throw 'Manifest v3 is TW-only'
+        if ($LatestSchema -in @(3, 4) -and $Market -ne 'TW') {
+            throw 'Manifest v3/v4 is TW-only'
         }
         $ManifestRelative = [string]$Latest.manifest
         if ($ManifestRelative -notmatch '^manifests/[A-Z]+-[0-9TZ]+-[0-9a-f]{12}\.json$') {
@@ -853,7 +853,7 @@ try {
                 ) -gt 1e-12 -or
                 [double]$Manifest.failure_rate -ge $FailureThreshold
             ) { throw "Invalid manifest arithmetic for $Market" }
-        } else {
+        } elseif ($LatestSchema -eq 3) {
             $ExpectedProperties = @(
                 $Manifest.expected_non_price_symbols.PSObject.Properties
             )
@@ -909,6 +909,67 @@ try {
                 ) -gt 1e-12 -or
                 [double]$Manifest.operational_failure_rate -ge 0.05
             ) { throw 'Invalid manifest v3 arithmetic' }
+        } elseif ($LatestSchema -eq 4) {
+            $ExpectedProperties = @(
+                $Manifest.expected_non_price_symbols.PSObject.Properties
+            )
+            $OperationalFailures = @($Manifest.operational_failed_symbols)
+            $UnavailableSymbols = @($Manifest.unavailable_symbols)
+            $CountFields = @(
+                $Manifest.active_universe_count,
+                $Manifest.observation_count,
+                $Manifest.regular_price_symbol_count,
+                $Manifest.verified_non_price_symbol_count,
+                $Manifest.unavailable_count,
+                $Manifest.operational_failure_count,
+                $Manifest.regular_price_denominator
+            )
+            if (
+                $Manifest.PSObject.Properties['market_as_of'] -or
+                [string]$Manifest.target_market_date -notmatch '^\d{4}-\d{2}-\d{2}$' -or
+                [string]$Manifest.observation_as_of -ne
+                    [string]$Manifest.target_market_date -or
+                @($CountFields | Where-Object {
+                    -not (Test-JsonInteger $_) -or [long]$_ -lt 0
+                }).Count -ne 0 -or
+                [long]$Manifest.active_universe_count -lt 1 -or
+                [long]$Manifest.regular_price_denominator -lt 1 -or
+                [long]$Manifest.observation_count -ne $SymbolProperties.Count -or
+                [long]$Manifest.verified_non_price_symbol_count -ne
+                    $ExpectedProperties.Count -or
+                [long]$Manifest.unavailable_count -ne $UnavailableSymbols.Count -or
+                [long]$Manifest.operational_failure_count -ne 0 -or
+                $OperationalFailures.Count -ne 0 -or
+                [long]$Manifest.regular_price_symbol_count +
+                    [long]$Manifest.verified_non_price_symbol_count -ne
+                    [long]$Manifest.observation_count -or
+                [long]$Manifest.observation_count +
+                    [long]$Manifest.unavailable_count -ne
+                    [long]$Manifest.active_universe_count -or
+                [long]$Manifest.regular_price_denominator -ne
+                    ([long]$Manifest.observation_count -
+                    [long]$Manifest.verified_non_price_symbol_count) -or
+                @($UnavailableSymbols | Select-Object -Unique).Count -ne
+                    $UnavailableSymbols.Count -or
+                [Math]::Abs(
+                    [double]$Manifest.regular_price_coverage -
+                    ([double]$Manifest.regular_price_symbol_count /
+                    [double]$Manifest.regular_price_denominator)
+                ) -gt 1e-12 -or
+                [Math]::Abs(
+                    [double]$Manifest.observation_coverage -
+                    ([double]$Manifest.observation_count /
+                    [double]$Manifest.active_universe_count)
+                ) -gt 1e-12 -or
+                [long]$Manifest.observation_count * 100 -le
+                    ([long]$Manifest.active_universe_count * 95)
+            ) { throw 'Invalid manifest v4 arithmetic' }
+            foreach ($Symbol in $UnavailableSymbols) {
+                if ([string]$Symbol -notmatch '^\d{4,6}$') {
+                    throw 'Invalid unavailable_symbols entry'
+                }
+            }
+        }
             $ExpectedBySymbol = @{}
             foreach ($Property in $ExpectedProperties) {
                 $Symbol = [string]$Property.Name
@@ -933,7 +994,15 @@ try {
                     $ExpectedBySymbol.ContainsKey([string]$Symbol)
                 ) { throw 'Invalid operational_failed_symbols entry' }
             }
-        }
+            if ($LatestSchema -eq 4) {
+                foreach ($Symbol in @($Manifest.unavailable_symbols)) {
+                    if (
+                        [string]$Symbol -notmatch '^\d{4,6}$' -or
+                        $ExpectedBySymbol.ContainsKey([string]$Symbol) -or
+                        $SymbolProperties.Name -contains [string]$Symbol
+                    ) { throw 'Invalid unavailable_symbols entry' }
+                }
+            }
 
         # Upload objects only after validating every object in this manifest.
         $ValidatedObjectPaths = New-Object System.Collections.Generic.List[string]

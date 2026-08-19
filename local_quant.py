@@ -555,16 +555,20 @@ def publish_market_snapshot(
     symbols = sorted({validate_market_symbol(market, symbol) for symbol in symbols})
     if not symbols:
         raise ValueError("market universe is empty")
-    excluded = {
+    failed = {
         validate_market_symbol(market, symbol) for symbol in failed_symbols
     }
     unavailable = {
         validate_market_symbol(market, symbol) for symbol in unavailable_symbols
     }
-    if not excluded.issubset(symbols) or not unavailable.issubset(symbols):
+    if not failed.issubset(symbols) or not unavailable.issubset(symbols):
         raise ValueError("failed symbols must belong to market universe")
-    if not unavailable.issubset(excluded):
-        raise ValueError("unavailable symbols must be a subset of failed symbols")
+    if target_market_date is not None and failed - unavailable:
+        raise RuntimeError(
+            "operational symbol failures are not publishable: "
+            + ", ".join(sorted(failed - unavailable))
+        )
+    excluded = failed | unavailable
     generated_at = generated_at or datetime.datetime.now(TAIPEI)
     if generated_at.tzinfo is None:
         generated_at = generated_at.replace(tzinfo=TAIPEI)
@@ -688,7 +692,7 @@ def publish_market_snapshot(
             "symbols": entries,
         }
     else:
-        manifest_schema = 3
+        manifest_schema = 4
         expected_non_price = {}
         for symbol, candidate in candidates.items():
             status = candidate["trading_status_evidence"]
@@ -703,33 +707,29 @@ def publish_market_snapshot(
                 ],
             }
         regular_count = len(entries) - len(expected_non_price)
-        denominator = len(symbols) - len(expected_non_price)
+        denominator = len(entries) - len(expected_non_price)
         if denominator <= 0:
             raise RuntimeError("regular price denominator is invalid")
+        operational_failed = sorted(failed - unavailable)
         manifest = {
             "schema_version": manifest_schema,
             "market": market,
             "generated_at": generated_text,
             "target_market_date": target_market_date.isoformat(),
             "observation_as_of": target_market_date.isoformat(),
-            "universe_count": len(symbols),
-            "symbol_count": len(entries),
+            "active_universe_count": len(symbols),
             "observation_count": len(entries),
-            "failure_count": len(excluded),
-            "failure_rate": failure_rate,
-            "coverage": len(entries) / len(symbols),
-            "failed_symbols": sorted(excluded),
             "regular_price_symbol_count": regular_count,
-            "expected_non_price_symbol_count": len(expected_non_price),
-            "operational_failure_count": len(excluded),
+            "verified_non_price_symbol_count": len(expected_non_price),
+            "unavailable_count": len(unavailable),
+            "unavailable_symbols": sorted(unavailable),
+            "operational_failure_count": len(operational_failed),
+            "operational_failed_symbols": operational_failed,
+            "operational_failure_rate": len(operational_failed) / len(symbols),
+            "observation_coverage": len(entries) / len(symbols),
             "regular_price_denominator": denominator,
             "regular_price_coverage": regular_count / denominator,
-            "observation_coverage": len(entries) / len(symbols),
-            "operational_failure_rate": failure_rate,
             "expected_non_price_symbols": expected_non_price,
-            "operational_failed_symbols": sorted(excluded),
-            "unavailable_symbols": sorted(unavailable),
-            "unavailable_count": len(unavailable),
             "symbols": entries,
         }
     latest_path = publish_root / f"latest-{market}.json"

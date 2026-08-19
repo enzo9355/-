@@ -951,7 +951,6 @@ def _run_stage(
             root,
             "TW",
             sorted(active_universe),
-            failed_symbols=sorted(unavailable_symbols),
             unavailable_symbols=sorted(unavailable_symbols),
             target_market_date=target_market_date,
         )

@@ -314,6 +314,8 @@ class ReportSourceManifest:
     operational_failed_symbols: list[str] = field(default_factory=list)
     unavailable_symbols: list[str] | None = None
     unavailable_count: int | None = None
+    active_universe_count: int | None = None
+    verified_non_price_symbol_count: int | None = None
 
 
 @dataclass

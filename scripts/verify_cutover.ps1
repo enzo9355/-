@@ -259,13 +259,13 @@ function Test-MarketPointer {
     $Latest = $LatestEvidence.document
     if (
         -not (Test-ObservationJsonInteger $Latest.schema_version) -or
-        $Latest.schema_version -notin @(2, 3) -or
+        $Latest.schema_version -notin @(2, 3, 4) -or
         $Latest.market -ne $Market
     ) {
         throw 'Latest pointer schema or market is invalid'
     }
-    if ($Latest.schema_version -eq 3 -and $Market -ne 'TW') {
-        throw 'Manifest v3 is TW-only'
+    if ($Latest.schema_version -in @(3, 4) -and $Market -ne 'TW') {
+        throw 'Manifest v3/v4 is TW-only'
     }
     if ([string]$Latest.manifest -notmatch "^manifests/$Market-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}\.json$") {
         throw 'Latest manifest path is invalid'
@@ -293,7 +293,7 @@ function Test-MarketPointer {
         throw 'Manifest schema or market is invalid'
     }
     $FailureThreshold = if ($Market -eq 'TW') { 0.05 } else { 0.25 }
-    $ExpectedModelVersion = if ($Latest.schema_version -eq 3) {
+    $ExpectedModelVersion = if ($Latest.schema_version -in @(3, 4)) {
         'observation-source-v1'
     } else {
         ''
@@ -564,11 +564,11 @@ function Get-ObservationManifestCoverage {
         throw 'Observation source manifest schema is invalid'
     }
     $SchemaVersion = [long]$RawSchemaVersion
-    if ($SchemaVersion -notin @(2, 3) -or [string]$Manifest.market -ne $ExpectedMarket) {
+    if ($SchemaVersion -notin @(2, 3, 4) -or [string]$Manifest.market -ne $ExpectedMarket) {
         throw 'Observation source manifest schema or market is invalid'
     }
-    if ($SchemaVersion -eq 3 -and $ExpectedMarket -ne 'TW') {
-        throw 'Manifest v3 is TW-only'
+    if ($SchemaVersion -in @(3, 4) -and $ExpectedMarket -ne 'TW') {
+        throw 'Manifest v3/v4 is TW-only'
     }
     if (
         $Manifest.PSObject.Properties['sample_data'] -and
@@ -577,9 +577,9 @@ function Get-ObservationManifestCoverage {
         throw 'Observation source manifest contains sample data'
     }
 
-    $SourceDate = if ($SchemaVersion -eq 3) {
+    $SourceDate = if ($SchemaVersion -in @(3, 4)) {
         if ($Manifest.PSObject.Properties['market_as_of']) {
-            throw 'Observation source manifest v3 contains legacy date field'
+            throw 'Observation source manifest v3/v4 contains legacy date field'
         }
         [string]$Manifest.target_market_date
     } else {
@@ -608,11 +608,11 @@ function Get-ObservationManifestCoverage {
             throw 'Observation source manifest is stale or future-dated'
         }
     }
-    if ($SchemaVersion -eq 3 -and [string]$Manifest.observation_as_of -ne $SourceDate) {
-        throw 'Observation source manifest v3 observation date is invalid'
+    if ($SchemaVersion -in @(3, 4) -and [string]$Manifest.observation_as_of -ne $SourceDate) {
+        throw 'Observation source manifest v3/v4 observation date is invalid'
     }
 
-    $RawCoverage = if ($SchemaVersion -eq 3) {
+    $RawCoverage = if ($SchemaVersion -in @(3, 4)) {
         $Manifest.observation_coverage
     } else {
         $Manifest.coverage
@@ -625,13 +625,19 @@ function Get-ObservationManifestCoverage {
         throw 'Observation source manifest coverage is below the cutover threshold'
     }
 
-    $RawUniverse = $Manifest.universe_count
-    $RawObserved = if ($SchemaVersion -eq 3) {
+    $RawUniverse = if ($SchemaVersion -eq 4) {
+        $Manifest.active_universe_count
+    } else {
+        $Manifest.universe_count
+    }
+    $RawObserved = if ($SchemaVersion -in @(3, 4)) {
         $Manifest.observation_count
     } else {
         $Manifest.symbol_count
     }
-    $RawFailures = if ($SchemaVersion -eq 3) {
+    $RawFailures = if ($SchemaVersion -eq 4) {
+        [long]$Manifest.unavailable_count + [long]$Manifest.operational_failure_count
+    } elseif ($SchemaVersion -eq 3) {
         $Manifest.operational_failure_count
     } else {
         $Manifest.failure_count
@@ -745,7 +751,7 @@ function Get-ObservationManifestCoverage {
     $OperationalFailures = if ($null -eq $Manifest.operational_failed_symbols) {
         @()
     } elseif ($Manifest.operational_failed_symbols -is [string]) {
-        throw 'Observation source manifest v3 operational failures are invalid'
+        throw 'Observation source manifest v3/v4 operational failures are invalid'
     } else {
         @($Manifest.operational_failed_symbols)
     }
@@ -753,29 +759,64 @@ function Get-ObservationManifestCoverage {
         $null -eq $Manifest.PSObject.Properties['expected_non_price_symbols'] -or
         $null -eq $Manifest.PSObject.Properties['operational_failed_symbols']
     ) {
-        throw 'Observation source manifest v3 partition fields are missing'
+        throw 'Observation source manifest v3/v4 partition fields are missing'
+    }
+    $StatusCountName = if ($SchemaVersion -eq 4) {
+        'verified_non_price_symbol_count'
+    } else {
+        'expected_non_price_symbol_count'
     }
     foreach ($Name in @(
         'regular_price_symbol_count',
-        'expected_non_price_symbol_count',
+        $StatusCountName,
         'operational_failure_count',
         'regular_price_denominator'
     )) {
         if (-not (Test-ObservationJsonInteger $Manifest.$Name) -or [long]$Manifest.$Name -lt 0) {
-            throw "Observation source manifest v3 count is invalid: $Name"
+            throw "Observation source manifest v3/v4 count is invalid: $Name"
+        }
+    }
+    if ($SchemaVersion -eq 4) {
+        $UnavailableSymbols = if ($null -eq $Manifest.unavailable_symbols) {
+            @()
+        } elseif ($Manifest.unavailable_symbols -is [string]) {
+            throw 'Observation source manifest v4 unavailable symbols are invalid'
+        } else {
+            @($Manifest.unavailable_symbols)
+        }
+        if (
+            -not (Test-ObservationJsonInteger $Manifest.unavailable_count) -or
+            [long]$Manifest.unavailable_count -lt 0 -or
+            [long]$Manifest.unavailable_count -ne $UnavailableSymbols.Count -or
+            [long]$Manifest.operational_failure_count -ne 0 -or
+            $OperationalFailures.Count -ne 0
+        ) {
+            throw 'Observation source manifest v4 unavailable partition is invalid'
+        }
+        $SeenUnavailable = @{}
+        foreach ($RawSymbol in $UnavailableSymbols) {
+            $Symbol = [string]$RawSymbol
+            if (
+                -not (Test-ObservationMarketSymbol $Symbol $ExpectedMarket) -or
+                $SeenUnavailable.ContainsKey($Symbol) -or
+                $SymbolEntries.ContainsKey($Symbol)
+            ) {
+                throw 'Observation source manifest v4 unavailable symbols are invalid'
+            }
+            $SeenUnavailable[$Symbol] = $true
         }
     }
     $RegularCount = [long]$Manifest.regular_price_symbol_count
-    $StatusCount = [long]$Manifest.expected_non_price_symbol_count
+    $StatusCount = [long]$Manifest.$StatusCountName
     $RegularDenominator = [long]$Manifest.regular_price_denominator
     if (
         $StatusCount -ne $ExpectedProperties.Count -or
-        $FailureCount -ne $OperationalFailures.Count -or
+        $FailureCount -ne $OperationalFailures.Count + $(if ($SchemaVersion -eq 4) { [long]$Manifest.unavailable_count } else { 0 }) -or
         $RegularCount + $StatusCount -ne $ObservedCount -or
         $RegularDenominator -le 0 -or
-        $RegularDenominator -ne $UniverseCount - $StatusCount
+        $RegularDenominator -ne $(if ($SchemaVersion -eq 4) { $ObservedCount } else { $UniverseCount }) - $StatusCount
     ) {
-        throw 'Observation source manifest v3 partition counts are invalid'
+        throw 'Observation source manifest v3/v4 partition counts are invalid'
     }
     if (
         -not (Test-ObservationJsonNumber $Manifest.regular_price_coverage) -or

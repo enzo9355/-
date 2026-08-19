@@ -156,7 +156,7 @@ def _validate_source(source, today):
     stocks = getattr(source, "stocks", None)
     if (
         manifest is None
-        or manifest.schema_version not in {2, 3}
+        or manifest.schema_version not in {2, 3, 4}
         or manifest.market != "TW"
         or not isinstance(manifest.market_as_of, datetime.date)
         or not isinstance(stocks, list)
@@ -179,9 +179,13 @@ def _validate_source(source, today):
     ):
         raise ValueError("observation source coverage or schema is invalid")
     target_date = manifest.market_as_of
-    if manifest.schema_version == 3:
+    if manifest.schema_version in (3, 4):
         regular_count = manifest.regular_price_symbol_count
-        status_count = manifest.expected_non_price_symbol_count
+        status_count = (
+            manifest.expected_non_price_symbol_count
+            if manifest.schema_version == 3
+            else manifest.verified_non_price_symbol_count
+        )
         operational_count = manifest.operational_failure_count
         denominator = manifest.regular_price_denominator
         expected = manifest.expected_non_price_symbols
@@ -200,9 +204,7 @@ def _validate_source(source, today):
             or not isinstance(expected, dict)
             or len(expected) != status_count
             or regular_count + status_count != manifest.symbol_count
-            or operational_count != manifest.failure_count
-            or manifest.universe_count != manifest.symbol_count + operational_count
-            or denominator != manifest.universe_count - status_count
+            or operational_count != manifest.operational_failure_count
             or denominator <= 0
             or any(
                 type(value) not in (int, float) or not math.isfinite(value)
@@ -221,7 +223,32 @@ def _validate_source(source, today):
             )
             or not math.isclose(manifest.coverage, manifest.observation_coverage)
         ):
-            raise ValueError("observation source v3 counts are invalid")
+            raise ValueError("observation source counts are invalid")
+        if manifest.schema_version == 3:
+            if (
+                operational_count != manifest.failure_count
+                or manifest.universe_count
+                != manifest.symbol_count + operational_count
+                or denominator != manifest.universe_count - status_count
+            ):
+                raise ValueError("observation source v3 counts are invalid")
+        else:
+            unavailable_count = manifest.unavailable_count
+            unavailable = manifest.unavailable_symbols
+            if (
+                operational_count != 0
+                or unavailable_count is None
+                or unavailable is None
+                or type(unavailable_count) is not int
+                or unavailable_count < 0
+                or not isinstance(unavailable, list)
+                or len(unavailable) != unavailable_count
+                or manifest.universe_count
+                != manifest.symbol_count + unavailable_count
+                or denominator != manifest.symbol_count - status_count
+                or manifest.symbol_count * 100 <= manifest.universe_count * 95
+            ):
+                raise ValueError("observation source v4 counts are invalid")
     age = today - manifest.market_as_of
     if not 0 <= age.days <= MAX_SOURCE_AGE_DAYS:
         raise ValueError("observation source is stale or from the future")
@@ -299,12 +326,17 @@ def _validate_source(source, today):
         ):
             raise ValueError("observation status binding is invalid")
         status_symbols.add(stock.symbol)
-    if manifest.schema_version == 3 and (
+    if manifest.schema_version in (3, 4) and (
         len(regular_symbols) != manifest.regular_price_symbol_count
-        or len(status_symbols) != manifest.expected_non_price_symbol_count
+        or len(status_symbols)
+        != (
+            manifest.expected_non_price_symbol_count
+            if manifest.schema_version == 3
+            else manifest.verified_non_price_symbol_count
+        )
         or status_symbols != set(manifest.expected_non_price_symbols)
     ):
-        raise ValueError("observation source v3 partition is invalid")
+        raise ValueError("observation source partition is invalid")
 
 
 def _trading_status_observations(stocks):
@@ -859,7 +891,7 @@ def build_observation_dashboard(
             "operational_failure_count": manifest.failure_count,
             "regular_price_coverage": _rounded(
                 manifest.regular_price_coverage
-                if manifest.schema_version == 3
+                if manifest.schema_version in (3, 4)
                 else manifest.coverage,
                 6,
             ),
