@@ -34,6 +34,22 @@ from stock_papi.quant.tw_legacy_reconciliation import (
 
 _INCOMPLETE = "TW official observation recovery is incomplete"
 _SYMBOL_RE = re.compile(r"[0-9]{4,6}")
+
+_UNAVAILABLE_BUILD_ERRORS = (
+    "price history is unavailable",
+    "point-in-time price history is unavailable",
+)
+
+
+class _UnavailableObservationError(ValueError):
+    """The official source provably has no target-date observation for a symbol.
+
+    Raised only when the snapshot build reaches the repository's data-absence
+    signature (empty history, or no history at or before the target market
+    date). The terminal gate treats failures recorded under this class as the
+    policy-defined unavailable partition (M); every other batch failure class
+    remains an operational failure and fails closed.
+    """
 _EXCLUSION_FIELDS = [
     "Symbol",
     "Name",
@@ -328,10 +344,16 @@ def _assert_complete(
     expected_identity: dict[str, Any],
     official_series: OfficialSnapshotSeries | None = None,
     applied_reconciliation_artifacts: Mapping[str, str] | None = None,
+    active_universe: list[str] | None = None,
 ) -> None:
     applied_reconciliation_artifacts = applied_reconciliation_artifacts or {}
     pending, excluded = _load_exclusion_state(root)
-    universe = set(symbols)
+    workset_universe = set(symbols)
+    universe = (
+        set(active_universe)
+        if active_universe is not None
+        else set(symbols)
+    )
     checkpoint = _load_checkpoint(root)
     failures = checkpoint.get("failed")
     next_index = checkpoint.get("next_index")
@@ -346,16 +368,19 @@ def _assert_complete(
     ):
         raise RuntimeError(_INCOMPLETE)
     failed_symbols = set()
+    operational_failed = set()
     for item in failures:
         if (
             not isinstance(item, dict)
             or set(item) != {"symbol", "error"}
             or not isinstance(item.get("symbol"), str)
-            or item["symbol"] not in universe
+            or item["symbol"] not in workset_universe
             or not isinstance(item.get("error"), str)
         ):
             raise RuntimeError(_INCOMPLETE)
         failed_symbols.add(item["symbol"])
+        if item["error"] != "_UnavailableObservationError":
+            operational_failed.add(item["symbol"])
     target_snapshot = (
         official_series.snapshots[target_market_date]
         if official_series is not None
@@ -396,8 +421,9 @@ def _assert_complete(
     M = active - (R | N)
     if R & N or R & M or N & M or (R | N | M) != active:
         raise RuntimeError(_INCOMPLETE)
-    observation_coverage = len(R | N) / len(active)
-    if observation_coverage <= 0.95:
+    if operational_failed & active:
+        raise RuntimeError(_INCOMPLETE)
+    if len(R | N) * 100 <= len(active) * 95:
         raise RuntimeError(_INCOMPLETE)
     observed = sorted(R | N)
     if failed_symbols & set(observed):
@@ -568,9 +594,14 @@ def _patched_pipeline(
             status = fetcher.status_for(str(symbol))
             if status is not None:
                 kwargs["trading_status"] = status
-        result = original_build(
-            pipeline_arg, market, symbol, *args, **kwargs
-        )
+        try:
+            result = original_build(
+                pipeline_arg, market, symbol, *args, **kwargs
+            )
+        except ValueError as exc:
+            if str(exc) in _UNAVAILABLE_BUILD_ERRORS:
+                raise _UnavailableObservationError(str(exc)) from exc
+            raise
         if market == "TW":
             result = dict(result)
             result["source_lineage"] = fetcher.lineage_for(
@@ -761,22 +792,34 @@ def _run_stage(
 
     market_symbols = full_market_symbols if full_market_symbols is not None else symbols
     market_universe = {str(value) for value in market_symbols}
+    pending, excluded = _load_exclusion_state(root)
+    gate_active_universe: set[str] | None = None
     for value, snapshot in series.snapshots.items():
         covered = set(snapshot.price_by_symbol)
         if value == target_market_date:
             covered |= set(snapshot.trading_status_by_symbol)
             covered |= set(snapshot.terminated_by_symbol)
-        missing_price = market_universe - covered
-        if value == target_market_date:
-            observation_coverage = len(covered & market_universe) / len(market_universe)
-            if observation_coverage <= 0.95:
+            status = set(snapshot.trading_status_by_symbol)
+            gate_active_universe = (
+                market_universe
+                - (set(pending) - status)
+                - (set(excluded) - status)
+                - set(snapshot.terminated_by_symbol)
+            )
+            if not gate_active_universe:
                 raise RuntimeError(
                     f"official price coverage is not publishable for {value}"
                 )
-        elif len(missing_price) / len(market_universe) >= 0.05:
-            raise RuntimeError(
-                f"official price coverage is not publishable for {value}"
-            )
+            if len(covered & gate_active_universe) * 100 <= len(gate_active_universe) * 95:
+                raise RuntimeError(
+                    f"official price coverage is not publishable for {value}"
+                )
+        else:
+            missing_price = market_universe - covered
+            if len(missing_price) * 100 >= len(market_universe) * 5:
+                raise RuntimeError(
+                    f"official price coverage is not publishable for {value}"
+                )
 
     policy = (
         "replace_verified_legacy" if reconcile_legacy_overlaps else "strict"
@@ -876,9 +919,18 @@ def _run_stage(
         expected_identity=expected_identity,
         official_series=series,
         applied_reconciliation_artifacts=applied_reconciliation_artifacts,
+        active_universe=(
+            sorted(gate_active_universe)
+            if gate_active_universe is not None
+            else None
+        ),
+    )
+    universe = (
+        gate_active_universe
+        if gate_active_universe is not None
+        else {str(value) for value in symbols}
     )
     pending, excluded = _load_exclusion_state(root)
-    universe = {str(value) for value in symbols}
     target_snapshot = series.snapshots[target_market_date]
     status_symbols = set(target_snapshot.trading_status_by_symbol) & universe
     terminated_symbols = set(target_snapshot.terminated_by_symbol) & universe
@@ -900,6 +952,7 @@ def _run_stage(
             "TW",
             sorted(active_universe),
             failed_symbols=sorted(unavailable_symbols),
+            unavailable_symbols=sorted(unavailable_symbols),
             target_market_date=target_market_date,
         )
     return 0, operational_failures

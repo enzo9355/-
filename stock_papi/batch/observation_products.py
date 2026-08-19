@@ -865,6 +865,16 @@ def build_observation_dashboard(
             ),
             "observation_coverage": _rounded(manifest.coverage, 6),
             "operational_failed_symbols": list(manifest.failed_symbols),
+            "unavailable_symbols": list(
+                manifest.unavailable_symbols
+                if getattr(manifest, "unavailable_symbols", None) is not None
+                else manifest.failed_symbols
+            ),
+            "unavailable_count": (
+                manifest.unavailable_count
+                if getattr(manifest, "unavailable_count", None) is not None
+                else manifest.failure_count
+            ),
         },
         "gates": {
             "source_identity": "PASS",

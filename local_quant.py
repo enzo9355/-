@@ -541,6 +541,7 @@ def publish_market_snapshot(
     failed_symbols=(),
     *,
     target_market_date=None,
+    unavailable_symbols=(),
 ):
     if market not in ("TW", "US"):
         raise ValueError("unsupported market")
@@ -557,8 +558,13 @@ def publish_market_snapshot(
     excluded = {
         validate_market_symbol(market, symbol) for symbol in failed_symbols
     }
-    if not excluded.issubset(symbols):
+    unavailable = {
+        validate_market_symbol(market, symbol) for symbol in unavailable_symbols
+    }
+    if not excluded.issubset(symbols) or not unavailable.issubset(symbols):
         raise ValueError("failed symbols must belong to market universe")
+    if not unavailable.issubset(excluded):
+        raise ValueError("unavailable symbols must be a subset of failed symbols")
     generated_at = generated_at or datetime.datetime.now(TAIPEI)
     if generated_at.tzinfo is None:
         generated_at = generated_at.replace(tzinfo=TAIPEI)
@@ -598,6 +604,8 @@ def publish_market_snapshot(
                 ),
             )
 
+    if target_market_date is not None and errors:
+        raise RuntimeError(errors[0])
     if target_market_date is not None:
         market_as_of = None
     elif candidates:
@@ -617,8 +625,8 @@ def publish_market_snapshot(
     else:
         market_as_of = None
     failure_rate = len(excluded) / len(symbols)
-    threshold = 0.05 if market == "TW" else 0.25
-    if failure_rate >= threshold or not candidates:
+    threshold_percent = 5 if market == "TW" else 25
+    if len(excluded) * 100 >= len(symbols) * threshold_percent or not candidates:
         detail = f"; {errors[0]}" if errors else ""
         raise RuntimeError(
             f"market failure rate {failure_rate:.2%} is not publishable{detail}"
@@ -674,6 +682,8 @@ def publish_market_snapshot(
             "failure_rate": failure_rate,
             "coverage": len(entries) / len(symbols),
             "failed_symbols": sorted(excluded),
+            "unavailable_symbols": sorted(unavailable),
+            "unavailable_count": len(unavailable),
             "market_as_of": market_as_of,
             "symbols": entries,
         }
@@ -718,6 +728,8 @@ def publish_market_snapshot(
             "operational_failure_rate": failure_rate,
             "expected_non_price_symbols": expected_non_price,
             "operational_failed_symbols": sorted(excluded),
+            "unavailable_symbols": sorted(unavailable),
+            "unavailable_count": len(unavailable),
             "symbols": entries,
         }
     latest_path = publish_root / f"latest-{market}.json"

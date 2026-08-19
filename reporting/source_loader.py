@@ -210,6 +210,23 @@ def _validate_manifest_v3(document: dict[str, Any], market: str) -> None:
         if latest >= target:
             raise ReportSourceError("manifest v3 status date is invalid")
 
+    unavailable = document.get("unavailable_symbols")
+    unavailable_count = document.get("unavailable_count")
+    if unavailable is not None or unavailable_count is not None:
+        if (
+            not isinstance(unavailable, list)
+            or len(set(unavailable)) != len(unavailable)
+            or any(
+                re.fullmatch(r"[0-9]{4,6}", str(item)) is None
+                for item in unavailable
+            )
+            or type(unavailable_count) is not int
+            or unavailable_count != len(unavailable)
+            or unavailable_count > failure_count
+            or not set(unavailable) <= set(failed)
+        ):
+            raise ReportSourceError("manifest v3 unavailable partition is invalid")
+
 
 def _validate_manifest(document: dict[str, Any], market: str) -> None:
     if document.get("schema_version") == 2:
@@ -473,6 +490,12 @@ def _load_manifest_source(
             str(item)
             for item in manifest.get("operational_failed_symbols", [])
         ],
+        unavailable_symbols=(
+            [str(item) for item in manifest["unavailable_symbols"]]
+            if manifest.get("unavailable_symbols") is not None
+            else None
+        ),
+        unavailable_count=manifest.get("unavailable_count"),
     )
     return LoadedReportSource(source_manifest, stocks)
 
