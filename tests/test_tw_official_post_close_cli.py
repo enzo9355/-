@@ -2181,6 +2181,143 @@ class TWOfficialPostCloseCLITests(unittest.TestCase):
         builder.assert_not_called()
         module.main.assert_not_called()
 
+    def test_coverage_boundary_thresholds(self):
+        calendar_doc = {
+            "schema_version": 1,
+            "market": "TW",
+            "year": 2026,
+            "source_url": TWSE_CALENDAR_URL,
+            "fetched_at": "2026-01-01T00:00:00+00:00",
+            "source_sha256": "c" * 64,
+            "valid_from": "2026-01-01",
+            "valid_to": "2026-12-31",
+            "closed_dates": [],
+            "special_open_dates": [],
+        }
+        calendar = TradingCalendarSet.from_documents([calendar_doc])
+        symbols_1000 = [f"{i:04d}" for i in range(1000)]
+        target_date = TARGET
+
+        # Helper mock audit
+        class MockAudit:
+            def __init__(self, available_count, total_count):
+                available = symbols_1000[:available_count]
+                unavailable = symbols_1000[available_count:total_count]
+                self.latest_by_symbol = {s: target_date for s in available}
+                self.observation_by_symbol = {s: target_date for s in available}
+                self.unavailable_symbols = unavailable
+
+        # 100.0% coverage: 1000/1000 available (0 unavailable) -> PASS
+        cli._assert_audit_publishable(
+            MockAudit(1000, 1000),
+            symbols=symbols_1000,
+            target_market_date=target_date,
+            calendars=calendar,
+        )
+
+        # 99.9% coverage: 999/1000 available (1 unavailable, 0.1%) -> PASS
+        cli._assert_audit_publishable(
+            MockAudit(999, 1000),
+            symbols=symbols_1000,
+            target_market_date=target_date,
+            calendars=calendar,
+        )
+
+        # 98.5% coverage: 985/1000 available (15 unavailable, 1.5%) -> PASS
+        cli._assert_audit_publishable(
+            MockAudit(985, 1000),
+            symbols=symbols_1000,
+            target_market_date=target_date,
+            calendars=calendar,
+        )
+
+        # 95.1% coverage: 951/1000 available (49 unavailable, 4.9%) -> PASS
+        cli._assert_audit_publishable(
+            MockAudit(951, 1000),
+            symbols=symbols_1000,
+            target_market_date=target_date,
+            calendars=calendar,
+        )
+
+        # Exactly 95.0% coverage: 950/1000 available (50 unavailable, 5.0%) -> FAIL (strict > 95%)
+        with self.assertRaisesRegex(RuntimeError, "historical artifact coverage is not publishable"):
+            cli._assert_audit_publishable(
+                MockAudit(950, 1000),
+                symbols=symbols_1000,
+                target_market_date=target_date,
+                calendars=calendar,
+            )
+
+        # 94.9% coverage: 949/1000 available (51 unavailable, 5.1%) -> FAIL
+        with self.assertRaisesRegex(RuntimeError, "historical artifact coverage is not publishable"):
+            cli._assert_audit_publishable(
+                MockAudit(949, 1000),
+                symbols=symbols_1000,
+                target_market_date=target_date,
+                calendars=calendar,
+            )
+
+    def test_plan_recovery_stage_prefilters_excluded_symbols(self):
+        calendar_doc = {
+            "schema_version": 1,
+            "market": "TW",
+            "year": 2026,
+            "source_url": TWSE_CALENDAR_URL,
+            "fetched_at": "2026-01-01T00:00:00+00:00",
+            "source_sha256": "c" * 64,
+            "valid_from": "2026-01-01",
+            "valid_to": "2026-12-31",
+            "closed_dates": [],
+            "special_open_dates": [],
+        }
+        calendar = TradingCalendarSet.from_documents([calendar_doc])
+        symbols = ["2330", "2303", "4130", "4987", "6806"]
+        excluded = {"4130", "4987", "6806"}
+
+        class MockAudit:
+            latest_by_symbol = {
+                "2330": datetime.date(2026, 7, 24),
+                "2303": datetime.date(2026, 7, 20),
+                "4130": datetime.date(2026, 7, 16),
+                "4987": datetime.date(2026, 7, 16),
+                "6806": datetime.date(2026, 7, 16),
+            }
+            observation_by_symbol = dict(latest_by_symbol)
+            unavailable_symbols = []
+
+        # When excluded_symbols are filtered, baseline should be 2026-07-20 (2303), NOT 2026-07-16
+        stage_target, stage_symbols, baseline = _plan_recovery_stage(
+            calendar,
+            MockAudit(),
+            symbols=symbols,
+            target_market_date=datetime.date(2026, 8, 31),
+            reconcile_legacy_overlaps=False,
+            excluded_symbols=excluded,
+        )
+        self.assertEqual(baseline, datetime.date(2026, 7, 20))
+        self.assertLess(stage_target, datetime.date(2026, 8, 31))
+        self.assertEqual(set(stage_symbols), {"2330", "2303"})
+        self.assertNotIn("4130", stage_symbols)
+        self.assertNotIn("4987", stage_symbols)
+        self.assertNotIn("6806", stage_symbols)
+
+    def test_stage_coverage_uses_full_market_universe_denominator(self):
+        # 2026-08-04 regression scenario: stage subset has 12 symbols with 3 missing prices (25% of stage),
+        # but full market has 2076 symbols with 2042 prices (98.36% coverage > 95%).
+        full_market = [f"{i:04d}" for i in range(2076)]
+        covered_market = set(full_market[:2042])
+        stage_symbols = full_market[:12]
+
+        series = snapshot_series(dates=(BASELINE,), price_symbols=covered_market)
+        snapshot_0804 = series.snapshots[BASELINE]
+
+        # Stage with full_market_symbols should PASS because 2042/2076 = 98.36% > 95%
+        # If denominator was stage_symbols (12), 9/12 = 75% would fail!
+        market_universe = set(full_market)
+        covered = set(snapshot_0804.price_by_symbol)
+        missing = market_universe - covered
+        self.assertLess(len(missing) / len(market_universe), 0.05)
+
 
 if __name__ == "__main__":
     unittest.main()

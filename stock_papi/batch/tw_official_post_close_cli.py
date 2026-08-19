@@ -167,12 +167,18 @@ def _assert_audit_publishable(
     symbols: list[str],
     target_market_date: datetime.date,
     calendars: TradingCalendarSet,
+    active_universe_count: int | None = None,
 ) -> None:
     available = set(audit.latest_by_symbol)
+    denominator = (
+        active_universe_count
+        if active_universe_count is not None and active_universe_count > 0
+        else len(symbols)
+    )
     if (
         not available
         or available != set(audit.observation_by_symbol)
-        or len(audit.unavailable_symbols) / len(symbols) >= 0.05
+        or len(audit.unavailable_symbols) / denominator >= 0.05
     ):
         raise RuntimeError("historical artifact coverage is not publishable")
     for symbol in available:
@@ -195,13 +201,15 @@ def _plan_recovery_stage(
     target_market_date: datetime.date,
     reconcile_legacy_overlaps: bool,
     ignored_symbols: set[str] | frozenset[str] = frozenset(),
+    excluded_symbols: set[str] | frozenset[str] = frozenset(),
 ) -> tuple[datetime.date, list[str], datetime.date]:
     observations = audit.observation_by_symbol
+    skip_symbols = set(ignored_symbols) | set(excluded_symbols)
     baseline = min(
         (
             observations[symbol]
             for symbol in symbols
-            if symbol not in ignored_symbols and symbol in observations
+            if symbol not in skip_symbols and symbol in observations
         ),
         default=target_market_date,
     )
@@ -218,7 +226,7 @@ def _plan_recovery_stage(
     stage_symbols = [
         symbol
         for symbol in symbols
-        if symbol not in ignored_symbols
+        if symbol not in skip_symbols
         and symbol in observations
         and observations[symbol] < stage_target
     ]
@@ -381,34 +389,42 @@ def _assert_complete(
         - (excluded - status_symbols)
         - terminated_symbols
     )
-    if failed_symbols & active:
-        raise RuntimeError(_INCOMPLETE)
     if not active:
         return
+    R = regular_symbols & active
+    N = status_symbols & active
+    M = active - (R | N)
+    if R & N or R & M or N & M or (R | N | M) != active:
+        raise RuntimeError(_INCOMPLETE)
+    observation_coverage = len(R | N) / len(active)
+    if observation_coverage <= 0.95:
+        raise RuntimeError(_INCOMPLETE)
+    observed = sorted(R | N)
+    if failed_symbols & set(observed):
+        raise RuntimeError(_INCOMPLETE)
     try:
         audit = audit_artifact_dates(
             root,
-            sorted(active),
+            observed,
             target_date=target_market_date,
         )
     except (OSError, RuntimeError, TypeError, ValueError) as exc:
         raise RuntimeError(_INCOMPLETE) from exc
     if (
         audit.unavailable_symbols
-        or set(audit.latest_by_symbol) != active
-        or set(audit.observation_by_symbol) != active
+        or set(audit.latest_by_symbol) != set(observed)
+        or set(audit.observation_by_symbol) != set(observed)
         or any(
             value != target_market_date
             for value in audit.observation_by_symbol.values()
         )
-        or ((regular_symbols & active) | (status_symbols & active)) != active
         or any(
             audit.latest_by_symbol[symbol] != target_market_date
-            for symbol in regular_symbols & active
+            for symbol in R
         )
         or any(
             audit.latest_by_symbol[symbol] >= target_market_date
-            for symbol in status_symbols & active
+            for symbol in N
         )
     ):
         raise RuntimeError(_INCOMPLETE)
@@ -424,7 +440,7 @@ def _assert_complete(
         }
         for value, snapshot in official_series.snapshots.items()
     ]
-    for symbol in sorted(active):
+    for symbol in observed:
         try:
             artifact = load_incremental_artifact(root, symbol)
         except IncrementalHistoryError as exc:
@@ -666,6 +682,7 @@ def _run_stage(
     recover_truncated_history: bool,
     publish: bool,
     recovery_symbol_allowlist: set[str] | None = None,
+    full_market_symbols: list[str] | None = None,
 ) -> tuple[int, set[str]]:
     if type(recover_truncated_history) is not bool:
         raise TypeError("recover_truncated_history must be bool")
@@ -679,6 +696,7 @@ def _run_stage(
         symbols=symbols,
         target_market_date=target_market_date,
         calendars=calendars,
+        active_universe_count=len(full_market_symbols) if full_market_symbols else len(symbols),
     )
 
     resume = None
@@ -741,16 +759,21 @@ def _run_stage(
     if resume is not None and series.manifest_sha256 != resume[0]:
         raise RuntimeError("official snapshot series does not match resume state")
 
-    universe = set(symbols)
+    market_symbols = full_market_symbols if full_market_symbols is not None else symbols
+    market_universe = {str(value) for value in market_symbols}
     for value, snapshot in series.snapshots.items():
         covered = set(snapshot.price_by_symbol)
         if value == target_market_date:
             covered |= set(snapshot.trading_status_by_symbol)
             covered |= set(snapshot.terminated_by_symbol)
-        missing_price = universe - covered
-        if (
-            value == target_market_date and missing_price
-        ) or len(missing_price) / len(universe) >= 0.05:
+        missing_price = market_universe - covered
+        if value == target_market_date:
+            observation_coverage = len(covered & market_universe) / len(market_universe)
+            if observation_coverage <= 0.95:
+                raise RuntimeError(
+                    f"official price coverage is not publishable for {value}"
+                )
+        elif len(missing_price) / len(market_universe) >= 0.05:
             raise RuntimeError(
                 f"official price coverage is not publishable for {value}"
             )
@@ -788,6 +811,8 @@ def _run_stage(
         if reconcile_legacy_overlaps
         else None
     )
+    applied_reconciliation_artifacts = {}
+    recovery_rotated_symbols: set[str] = set()
     argv = [
         "--root",
         str(root),
@@ -802,25 +827,28 @@ def _run_stage(
         "--delay",
         str(delay),
     ]
-    recovery_rotated_symbols: set[str] = set()
-    applied_reconciliation_artifacts: dict[str, str] = {}
-    with _patched_pipeline(
-        local_quant,
-        pipeline,
-        fetcher,
-        series,
-        audit,
-        backup_store=backup_store,
-        symbols=symbols,
-        recover_truncated_history=recover_truncated_history,
-        reconcile_legacy_overlaps=reconcile_legacy_overlaps,
-        recovery_rotated_symbols=recovery_rotated_symbols,
-        applied_reconciliation_artifacts=applied_reconciliation_artifacts,
-    ):
-        result = int(local_quant.main(argv))
-    if result != 0:
-        return result, set()
-    if backup_store is not None:
+    try:
+        with _patched_pipeline(
+            local_quant,
+            pipeline,
+            fetcher,
+            series,
+            audit,
+            backup_store=backup_store,
+            symbols=symbols,
+            recover_truncated_history=recover_truncated_history,
+            reconcile_legacy_overlaps=reconcile_legacy_overlaps,
+            recovery_rotated_symbols=recovery_rotated_symbols,
+            applied_reconciliation_artifacts=applied_reconciliation_artifacts,
+        ):
+            result = int(local_quant.main(argv))
+        if result != 0:
+            return result, set()
+    except (OfficialSourceFailure, RuntimeError):
+        if backup_store is not None:
+            backup_store.restore_all()
+        raise
+    if reconcile_legacy_overlaps and backup_store is not None:
         if recovery_rotated_symbols:
             applied_reconciliation_artifacts = dict(
                 applied_reconciliation_artifacts
@@ -854,15 +882,24 @@ def _run_stage(
     target_snapshot = series.snapshots[target_market_date]
     status_symbols = set(target_snapshot.trading_status_by_symbol) & universe
     terminated_symbols = set(target_snapshot.terminated_by_symbol) & universe
+    active_universe = (
+        universe
+        - (set(pending) - status_symbols)
+        - (set(excluded) - status_symbols)
+        - terminated_symbols
+    )
+    regular_symbols = set(target_snapshot.price_by_symbol) & active_universe
+    observed_symbols = regular_symbols | (status_symbols & active_universe)
+    unavailable_symbols = active_universe - observed_symbols
     operational_failures = (
-        (set(pending) | set(excluded) | terminated_symbols) & universe
-    ) - status_symbols
+        ((set(pending) | set(excluded) | terminated_symbols) & universe) - status_symbols
+    ) | unavailable_symbols
     if publish:
         local_quant.publish_market_snapshot(
             root,
             "TW",
-            [str(value) for value in symbols],
-            failed_symbols=sorted(operational_failures),
+            sorted(active_universe),
+            failed_symbols=sorted(unavailable_symbols),
             target_market_date=target_market_date,
         )
     return 0, operational_failures
@@ -892,7 +929,8 @@ def run(
     if not calendars.is_session(target_market_date):
         raise ValueError("target market date is not a trading session")
 
-    ignored_symbols: set[str] = set()
+    pending_exclusions, excluded_symbols = _load_exclusion_state(root)
+    ignored_symbols: set[str] = set(excluded_symbols)
     audit = audit_artifact_dates(root, symbols, target_date=target_market_date)
     while True:
         _assert_audit_publishable(
@@ -900,6 +938,7 @@ def run(
             symbols=symbols,
             target_market_date=target_market_date,
             calendars=calendars,
+            active_universe_count=len(set(symbols) - set(excluded_symbols)),
         )
         stage_target, stage_symbols, baseline = _plan_recovery_stage(
             calendars,
@@ -908,6 +947,7 @@ def run(
             target_market_date=target_market_date,
             reconcile_legacy_overlaps=reconcile_legacy_overlaps,
             ignored_symbols=ignored_symbols,
+            excluded_symbols=excluded_symbols,
         )
         result, inactive = _run_stage(
             local_quant=local_quant,
@@ -924,6 +964,7 @@ def run(
             recover_truncated_history=recover_truncated_history,
             publish=stage_target == target_market_date,
             recovery_symbol_allowlist=recovery_symbol_allowlist,
+            full_market_symbols=symbols,
         )
         if result != 0 or stage_target == target_market_date:
             return result
@@ -936,6 +977,7 @@ def run(
             target_market_date=target_market_date,
             reconcile_legacy_overlaps=reconcile_legacy_overlaps,
             ignored_symbols=ignored_symbols,
+            excluded_symbols=excluded_symbols,
         )
         if next_baseline <= baseline:
             raise RuntimeError(_INCOMPLETE)

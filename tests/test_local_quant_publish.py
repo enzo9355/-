@@ -431,6 +431,76 @@ class LocalQuantPublishTests(unittest.TestCase):
                 (root / "publish" / "quant" / "v1" / "latest-US.json").exists()
             )
 
+    def test_v3_publish_with_unavailable_symbols_below_5_percent_succeeds(self):
+        # 100 active symbols: 96 regular prices, 2 verified status, 2 unavailable (98% observation coverage > 95%)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            ensure_layout(root)
+            symbols = [f"{i:04d}" for i in range(100)]
+            status_1 = no_trade_status("0096")
+            status_2 = no_trade_status("0097")
+
+            for s in symbols[:96]:
+                write_stock_artifact(root, "TW", s, v3_document(s))
+            write_stock_artifact(root, "TW", "0096", v3_document("0096", status=status_1))
+            write_stock_artifact(root, "TW", "0097", v3_document("0097", status=status_2))
+            # 0098 and 0099 are unavailable (no artifact written)
+
+            latest_path = publish_market_snapshot(
+                root,
+                "TW",
+                symbols,
+                generated_at=datetime.datetime(2026, 7, 30, 6, tzinfo=TAIPEI),
+                target_market_date=TARGET,
+            )
+            latest = json.loads(latest_path.read_text(encoding="utf-8"))
+            manifest = json.loads(
+                (latest_path.parent / latest["manifest"]).read_text(encoding="utf-8")
+            )
+
+            self.assertEqual(manifest["universe_count"], 100)
+            self.assertEqual(manifest["observation_count"], 98)
+            self.assertEqual(manifest["regular_price_symbol_count"], 96)
+            self.assertEqual(manifest["expected_non_price_symbol_count"], 2)
+            self.assertEqual(manifest["operational_failure_count"], 2)
+            self.assertEqual(manifest["operational_failed_symbols"], ["0098", "0099"])
+            self.assertEqual(manifest["regular_price_denominator"], 98)
+            self.assertEqual(manifest["regular_price_coverage"], 96 / 98)
+            self.assertEqual(manifest["observation_coverage"], 98 / 100)
+            self.assertEqual(manifest["operational_failure_rate"], 2 / 100)
+
+            # Check disjoint partition:
+            R = {s for s, entry in manifest["symbols"].items() if s not in manifest["expected_non_price_symbols"]}
+            N = set(manifest["expected_non_price_symbols"])
+            M = set(manifest["operational_failed_symbols"])
+            A = set(symbols)
+
+            self.assertEqual(len(R), 96)
+            self.assertEqual(len(N), 2)
+            self.assertEqual(len(M), 2)
+            self.assertTrue(R.isdisjoint(N))
+            self.assertTrue(R.isdisjoint(M))
+            self.assertTrue(N.isdisjoint(M))
+            self.assertEqual(R | N | M, A)
+
+    def test_v3_publish_fails_when_unavailable_exceeds_5_percent(self):
+        # 100 active symbols: 94 regular prices, 6 unavailable (94% coverage <= 95% threshold)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            ensure_layout(root)
+            symbols = [f"{i:04d}" for i in range(100)]
+            for s in symbols[:94]:
+                write_stock_artifact(root, "TW", s, v3_document(s))
+
+            with self.assertRaisesRegex(RuntimeError, "market failure rate 6.00% is not publishable"):
+                publish_market_snapshot(
+                    root,
+                    "TW",
+                    symbols,
+                    generated_at=datetime.datetime(2026, 7, 30, 6, tzinfo=TAIPEI),
+                    target_market_date=TARGET,
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -172,7 +172,7 @@ def _validate_source(source, today):
         or manifest.symbol_count != len(stocks)
         or type(manifest.coverage) not in (int, float)
         or not math.isfinite(manifest.coverage)
-        or manifest.coverage < MIN_SOURCE_COVERAGE
+        or manifest.coverage <= MIN_SOURCE_COVERAGE
         or type(manifest.failure_rate) not in (int, float)
         or not math.isfinite(manifest.failure_rate)
         or not 0 <= manifest.failure_rate < 0.05

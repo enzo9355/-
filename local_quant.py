@@ -577,9 +577,6 @@ def publish_market_snapshot(
                 root, market, symbol, generated_at, target_market_date
             )
         except RuntimeError as exc:
-            if target_market_date is not None:
-                errors.append(str(exc))
-                continue
             excluded.add(symbol)
             errors.append(str(exc))
             continue
@@ -601,8 +598,6 @@ def publish_market_snapshot(
                 ),
             )
 
-    if target_market_date is not None and errors:
-        raise RuntimeError(errors[0])
     if target_market_date is not None:
         market_as_of = None
     elif candidates:
@@ -708,7 +703,12 @@ def publish_market_snapshot(
             "target_market_date": target_market_date.isoformat(),
             "observation_as_of": target_market_date.isoformat(),
             "universe_count": len(symbols),
+            "symbol_count": len(entries),
             "observation_count": len(entries),
+            "failure_count": len(excluded),
+            "failure_rate": failure_rate,
+            "coverage": len(entries) / len(symbols),
+            "failed_symbols": sorted(excluded),
             "regular_price_symbol_count": regular_count,
             "expected_non_price_symbol_count": len(expected_non_price),
             "operational_failure_count": len(excluded),
