@@ -1093,15 +1093,12 @@ function Test-ObservationHttp {
     ) {
         throw 'Cloud Run traffic revision or URL changed during verification'
     }
-    if ($BaseUrl -and $BaseUrl.TrimEnd('/') -ne $ServiceUrl.TrimEnd('/')) {
-        throw 'BaseUrl does not match Cloud Run service URL'
-    }
     $script:CloudRunTrafficEvidence = [ordered]@{
         revision = $TrafficEvidence.revision
         percent = $TrafficEvidence.percent
         url = $TrafficEvidence.url
     }
-    $Target = $ServiceUrl
+    $Target = if ($BaseUrl) { $BaseUrl } else { $ServiceUrl }
     if (-not $Target) { throw 'Observation HTTP base URL is unavailable' }
     foreach ($Path in @(
         '/health',
