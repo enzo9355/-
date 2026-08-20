@@ -77,8 +77,11 @@ def register_report_routes(
             response.headers["Retry-After"] = "60"
         return _secure_response(response, cache="no-store")
 
-    def _v2_reports(*, required=False):
-        reports = load_index_v2()
+    def _v2_reports(market="TW", *, required=False):
+        try:
+            reports = load_index_v2(market=market)
+        except TypeError:
+            reports = load_index_v2()
         if reports is None:
             if required:
                 raise ReportWebError("報告索引暫時無法使用")
@@ -90,8 +93,8 @@ def register_report_routes(
             ]
         return reports
 
-    def _daily_items(trading_date):
-        reports = _v2_reports(required=True)
+    def _daily_items(trading_date, market="TW"):
+        reports = _v2_reports(market=market, required=True)
         return [
             item
             for item in reports
@@ -145,9 +148,9 @@ def register_report_routes(
             )
             return None
 
-    def _observation_page(date_param: str, report_type: str):
+    def _observation_page(date_param: str, report_type: str, market="TW"):
         try:
-            reports = _v2_reports(required=True)
+            reports = _v2_reports(market=market, required=True)
             if report_type == "post_close":
                 # For post_close, canonical date_param is source_market_date
                 item = next(
@@ -167,7 +170,8 @@ def register_report_routes(
                     if fallback is not None:
                         canonical_date = fallback.get("source_market_date")
                         if canonical_date and canonical_date != date_param:
-                            return redirect(url_for("post_close_report_page", trading_date=canonical_date), code=302)
+                            endpoint = "post_close_report_page" if market == "TW" else "us_post_close_report_page"
+                            return redirect(url_for(endpoint, trading_date=canonical_date), code=302)
             else:
                 # For pre_market, date_param is applicable_trading_date
                 item = next(
@@ -386,12 +390,62 @@ def register_report_routes(
     def post_close_report_page(trading_date):
         if not _valid_report_date(trading_date):
             abort(404)
-        return _observation_page(trading_date, "post_close")
+        return _observation_page(trading_date, "post_close", market="TW")
 
     def pre_market_report_page(trading_date):
         if not _valid_report_date(trading_date):
             abort(404)
-        return _observation_page(trading_date, "pre_market")
+        return _observation_page(trading_date, "pre_market", market="TW")
+
+    def us_reports_page():
+        try:
+            reports_v2 = _v2_reports(market="US", required=observation_mode)
+        except ReportWebError as exc:
+            if observation_mode:
+                return _report_error(503, exc=exc)
+            reports_v2 = None
+        response = make_response(render_template(
+            "reports.html", reports=[], reports_v2=reports_v2 or [],
+            unavailable=reports_v2 is None
+        ))
+        return _secure_response(response)
+
+    def us_post_close_report_page(trading_date):
+        if not _valid_report_date(trading_date):
+            abort(404)
+        return _observation_page(trading_date, "post_close", market="US")
+
+    def us_pre_market_report_page(trading_date):
+        if not _valid_report_date(trading_date):
+            abort(404)
+        return _observation_page(trading_date, "pre_market", market="US")
+
+    def us_trading_day_report_page(trading_date):
+        if not _valid_report_date(trading_date):
+            abort(404)
+        try:
+            items = _daily_items(trading_date, market="US")
+            if not items:
+                abort(404)
+            if any(item.get("report_type") == "post_close" for item in items):
+                post_close_item = next(item for item in items if item.get("report_type") == "post_close")
+                canonical_source_date = post_close_item.get("source_market_date") or trading_date
+                return redirect(
+                    url_for("us_post_close_report_page", trading_date=canonical_source_date),
+                    code=302,
+                )
+            if any(item.get("report_type") == "pre_market" for item in items):
+                return redirect(
+                    url_for("us_pre_market_report_page", trading_date=trading_date),
+                    code=302,
+                )
+            abort(404)
+        except ReportWebError as exc:
+            return _report_error(503, report_date=trading_date, exc=exc)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            return _report_error(500, report_date=trading_date, exc=exc)
 
     def weekly_report_page(week_id):
         if observation_mode:
@@ -425,6 +479,26 @@ def register_report_routes(
         "/reports/<trading_date>/pre-market",
         "pre_market_report_page",
         pre_market_report_page,
+    )
+    app.add_url_rule(
+        "/reports/us",
+        "us_reports_page",
+        us_reports_page,
+    )
+    app.add_url_rule(
+        "/reports/us/<trading_date>/post-close",
+        "us_post_close_report_page",
+        us_post_close_report_page,
+    )
+    app.add_url_rule(
+        "/reports/us/<trading_date>/pre-market",
+        "us_pre_market_report_page",
+        us_pre_market_report_page,
+    )
+    app.add_url_rule(
+        "/reports/us/trading-day/<trading_date>",
+        "us_trading_day_report_page",
+        us_trading_day_report_page,
     )
     app.add_url_rule(
         "/reports/weekly/<week_id>", "weekly_report_page", weekly_report_page

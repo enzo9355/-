@@ -277,8 +277,9 @@ def build_professional_post_close_artifact(
         raise ValueError("metadata schema_version must be 2")
     if metadata.get("report_type") != "post_close":
         raise ValueError("professional report builder only accepts post_close metadata")
-    if metadata.get("product_mode") != "observation" or metadata.get("market") != "TW":
-        raise ValueError("metadata must be a TW observation report")
+    report_market = str(metadata.get("market") or "TW")
+    if metadata.get("product_mode") != "observation" or report_market not in ("TW", "US"):
+        raise ValueError("metadata must be a TW or US observation report")
     capability = _require_mapping(
         metadata.get("prediction_capability"), "prediction_capability"
     )
@@ -346,7 +347,7 @@ def build_professional_post_close_artifact(
             "report_type": "post_close",
             "product_tier": "institutional",
             "product_mode": "observation_with_research",
-            "market": "TW",
+            "market": report_market,
             "source_market_date": source_date,
             "applicable_trading_date": applicable_date,
             "published_at": published_at,
@@ -354,7 +355,7 @@ def build_professional_post_close_artifact(
             "source_manifest": metadata.get("source_manifest"),
             "source_manifest_sha256": metadata.get("source_manifest_sha256"),
             "content_sha256": "",
-            "report_id": f"TW-{source_date.replace('-', '')}-post-close-institutional",
+            "report_id": f"{report_market}-{source_date.replace('-', '')}-post-close-institutional",
             "generator_version": "professional-report/1",
             "code_commit_sha": code_commit_sha,
             "model_version": None,

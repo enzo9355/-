@@ -511,6 +511,15 @@ def _published_report_index():
     )
 
 
+def _published_report_index_v2(market="TW"):
+    return load_report_index(
+        load_object=_gcs_get_report_v2_object,
+        max_bytes=REPORT_INDEX_MAX_BYTES,
+        version="v2",
+        market=market,
+    )
+
+
 def _published_quant_manifest(market, today=None):
     return published_quant_manifest(
         market,
@@ -667,11 +676,12 @@ def run_ai_engine(df, *, include_oos=False):
     )
 
 
-def _published_report_index_v2():
+def _published_report_index_v2(market="TW"):
     return load_report_index(
         load_object=_gcs_get_report_v2_object,
         max_bytes=REPORT_INDEX_MAX_BYTES,
         version="v2",
+        market=market,
     )
 
 
@@ -1365,7 +1375,7 @@ def route_dependencies():
     return {
         "search_stock": lambda query: search_stock_code(query),
         "load_report_index": lambda: _published_report_index(),
-        "load_report_index_v2": lambda: _published_report_index_v2(),
+        "load_report_index_v2": lambda market="TW": _published_report_index_v2(market=market),
         "load_report_pdf": lambda item: load_report_pdf(
             item, load_object=_gcs_get_report_object
         ),

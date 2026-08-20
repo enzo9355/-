@@ -464,7 +464,7 @@ function Get-RemotePointer {
 
     if ($Definition.kind -eq 'quant') {
         if (
-            [int]$Document.schema_version -ne 3 -or
+            [int]$Document.schema_version -notin @(3, 4) -or
             [string]$Document.market -ne 'TW'
         ) {
             throw 'Live TW quant pointer schema is invalid'
@@ -491,7 +491,7 @@ function Get-RemotePointer {
         }
         $Manifest = $ManifestPayload.document
         if (
-            [int]$Manifest.schema_version -ne 3 -or
+            [int]$Manifest.schema_version -notin @(3, 4) -or
             [string]$Manifest.market -ne 'TW' -or
             [string]$Manifest.observation_as_of -notmatch '^\d{4}-\d{2}-\d{2}$' -or
             [string]$Manifest.target_market_date -notmatch '^\d{4}-\d{2}-\d{2}$' -or
@@ -730,8 +730,9 @@ function Get-LocalQuantState {
         -Root $QuantRoot `
         -MaximumBytes 100KB
     $Latest = $LatestInfo.document
+    $LatestSchema = [int]$Latest.schema_version
     if (
-        [int]$Latest.schema_version -ne 3 -or
+        $LatestSchema -notin @(3, 4) -or
         [string]$Latest.market -ne 'TW'
     ) {
         throw 'Local TW quant latest pointer schema is invalid'
@@ -755,12 +756,20 @@ function Get-LocalQuantState {
     }
     $Manifest = $ManifestInfo.document
     if (
-        [int]$Manifest.schema_version -ne 3 -or
+        [int]$Manifest.schema_version -ne $LatestSchema -or
         [string]$Manifest.market -ne 'TW' -or
         [string]$Manifest.generated_at -ne [string]$Latest.generated_at -or
         [string]$Manifest.observation_as_of -ne $TargetDate -or
         [string]$Manifest.target_market_date -ne $TargetDate -or
-        [string]$Manifest.observation_as_of -ne [string]$Manifest.target_market_date
+        [string]$Manifest.observation_as_of -ne [string]$Manifest.target_market_date -or
+        ($LatestSchema -eq 4 -and
+            (
+                $Manifest.PSObject.Properties['active_universe_count'] -eq $null -or
+                [int]$Manifest.active_universe_count -le 0 -or
+                $Manifest.PSObject.Properties['unavailable_count'] -eq $null -or
+                [int]$Manifest.unavailable_count -lt 0 -or
+                [int]$Manifest.operational_failure_count -ne 0
+            ))
     ) {
         throw 'Local TW quant manifest date or generation contract is invalid'
     }

@@ -32,9 +32,9 @@ CRITICAL_AVAILABLE_SECTIONS = frozenset({"market", "governance"})
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 _COMMIT_SHA_RE = re.compile(r"[0-9a-f]{7,64}")
 _MANIFEST_RE = re.compile(
-    r"quant/v1/manifests/TW-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}\.json"
+    r"quant/v1/manifests/(?:TW|US)-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}\.json"
 )
-_REPORT_ID_RE = re.compile(r"TW-[0-9]{8}-post-close-institutional")
+_REPORT_ID_RE = re.compile(r"(?:TW|US)-[0-9]{8}-post-close-institutional")
 
 
 def _require_string(value: Any, label: str, *, maximum: int = 500) -> str:
@@ -157,8 +157,8 @@ class ProfessionalReportIdentity:
             raise ValueError("identity product_tier must be institutional")
         if document.get("product_mode") != "observation_with_research":
             raise ValueError("identity product_mode must be observation_with_research")
-        if document.get("market") != "TW":
-            raise ValueError("identity market must be TW")
+        if document.get("market") not in ("TW", "US"):
+            raise ValueError("identity market must be TW or US")
         if source_date > applicable_date or generated_at > published_at:
             raise ValueError("identity date semantics are invalid")
         if _MANIFEST_RE.fullmatch(source_manifest) is None:
@@ -177,7 +177,7 @@ class ProfessionalReportIdentity:
             report_type="post_close",
             product_tier="institutional",
             product_mode="observation_with_research",
-            market="TW",
+            market=str(document.get("market") or "TW"),
             source_market_date=source_date,
             applicable_trading_date=applicable_date,
             published_at=published_at,

@@ -37,10 +37,15 @@ $Global:PointerStagingRunPath = $null
 $Global:LkgPointerLockStream = $null
 $ObservationOnlyPointerAllowlist = @(
     "gs://$Bucket/quant/v1/latest-TW.json",
+    "gs://$Bucket/quant/v1/latest-US.json",
     "gs://$Bucket/reports/v2/index-TW.json",
+    "gs://$Bucket/reports/v2/index-US.json",
     "gs://$Bucket/reports/v2/latest-TW-post_close.json",
+    "gs://$Bucket/reports/v2/latest-US-post_close.json",
     "gs://$Bucket/reports/v2/latest-TW-pre_market.json",
-    "gs://$Bucket/dashboard/v1/latest-TW.json"
+    "gs://$Bucket/reports/v2/latest-US-pre_market.json",
+    "gs://$Bucket/dashboard/v1/latest-TW.json",
+    "gs://$Bucket/dashboard/v1/latest-US.json"
 )
 $ReceiptUpdated = $false
 
@@ -313,7 +318,7 @@ function Assert-ObservationReportIndexPreservesLkg {
     if (
         $CapturedIndex.schema_version -ne 2 -or
         $CapturedIndex.kind -notin @('absorb-report-index', 'stock-papi-report-index') -or
-        $CapturedIndex.market -ne 'TW' -or
+        $CapturedIndex.market -notin @('TW', 'US') -or
         $null -eq $CapturedIndex.reports
     ) {
         throw 'Observation LKG captured report index is invalid'
@@ -415,7 +420,7 @@ function Publish-ReportsV2 {
             [int]$ObjectDocument.schema_version -ne 1 -or
             [string]$ObjectDocument.kind -ne $ExpectedKind -or
             $null -eq $Identity -or
-            [string]$Identity.market -ne 'TW' -or
+            [string]$Identity.market -notin @('TW', 'US') -or
             [string]$Identity.source_market_date -ne $SourceMarketDate -or
             [string]$Identity.applicable_trading_date -ne $ApplicableTradingDate -or
             [string]$Identity.source_manifest -ne $SourceManifest -or
@@ -436,172 +441,184 @@ function Publish-ReportsV2 {
             -Uri "gs://$Bucket/reports/v2/$ObjectRelative"
     }
 
-    $IndexPath = Assert-V2Path (Join-Path $Resolved 'index-TW.json')
-    $IndexFile = Get-Item -LiteralPath $IndexPath
-    if ($IndexFile.Length -le 0 -or $IndexFile.Length -gt 1MB) { throw 'Invalid report v2 index size' }
-    $IndexPointerHash = (Get-FileHash -LiteralPath $IndexPath -Algorithm SHA256).Hash.ToLowerInvariant()
-    $Index = Get-Content -LiteralPath $IndexPath -Raw -Encoding utf8 | ConvertFrom-Json
-    if ($Index.schema_version -ne 2 -or $Index.kind -notin @('absorb-report-index', 'stock-papi-report-index') -or $Index.market -ne 'TW') {
-        throw 'Invalid report v2 index'
-    }
-    $Reports = @($Index.reports)
-    if ($Reports.Count -gt 180) { throw 'Report v2 index contains too many entries' }
-    $Seen = @{}
-    foreach ($Entry in $Reports) {
-        $Type = [string]$Entry.report_type
-        if ($Type -notin @('post_close', 'pre_market', 'weekly_model')) { throw 'Invalid report v2 type' }
-        $LogicalKey = "$Type|$($Entry.source_market_date)|$($Entry.applicable_trading_date)"
-        if ($Seen.ContainsKey($LogicalKey)) { throw 'Duplicate report v2 logical key' }
-        $Seen[$LogicalKey] = $true
-        $MetadataRelative = [string]$Entry.metadata
-        if ($MetadataRelative -notmatch '^metadata/[0-9a-f]{64}\.json$') { throw 'Invalid report v2 metadata path' }
-        $MetadataPath = Assert-V2Path (Join-Path $Resolved $MetadataRelative)
-        $MetadataHash = (Get-FileHash -LiteralPath $MetadataPath -Algorithm SHA256).Hash.ToLowerInvariant()
-        if ($MetadataHash -ne [string]$Entry.metadata_sha256) { throw 'Report v2 metadata hash mismatch' }
-        $Metadata = Get-Content -LiteralPath $MetadataPath -Raw -Encoding utf8 | ConvertFrom-Json
-        if (
-            $Metadata.schema_version -ne 2 -or $Metadata.kind -notin @('absorb-report', 'stock-papi-report') -or
-            $Metadata.market -ne 'TW' -or [string]$Metadata.report_type -ne $Type -or
-            [string]$Metadata.source_market_date -ne [string]$Entry.source_market_date -or
-            [string]$Metadata.applicable_trading_date -ne [string]$Entry.applicable_trading_date
-        ) { throw 'Report v2 metadata identity mismatch' }
-        $SourceManifest = [string]$Metadata.source_manifest
-        if ($SourceManifest -notmatch '^quant/v1/manifests/TW-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}\.json$') {
-            throw 'Invalid report v2 source manifest path'
+    $Uploaded = New-Object System.Collections.Generic.List[string]
+    $ReportMarkets = @('TW', 'US')
+    foreach ($ReportMarket in $ReportMarkets) {
+        $IndexPathCandidate = Join-Path $Resolved "index-$ReportMarket.json"
+        if (-not (Test-Path -LiteralPath $IndexPathCandidate -PathType Leaf)) { continue }
+        $IndexPath = Assert-V2Path $IndexPathCandidate
+        $IndexFile = Get-Item -LiteralPath $IndexPath
+        if ($IndexFile.Length -le 0 -or $IndexFile.Length -gt 1MB) { throw "Invalid report v2 index size for $ReportMarket" }
+        $IndexPointerHash = (Get-FileHash -LiteralPath $IndexPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        $Index = Get-Content -LiteralPath $IndexPath -Raw -Encoding utf8 | ConvertFrom-Json
+        if ($Index.schema_version -ne 2 -or $Index.kind -notin @('absorb-report-index', 'stock-papi-report-index') -or $Index.market -ne $ReportMarket) {
+            throw "Invalid report v2 index for $ReportMarket"
         }
-        $SourceRelative = $SourceManifest.Substring('quant/v1/'.Length)
-        $SourcePath = Assert-AllowlistedPath (Join-Path $ResolvedRoot $SourceRelative)
-        if ((Get-FileHash -LiteralPath $SourcePath -Algorithm SHA256).Hash.ToLowerInvariant() -ne [string]$Metadata.source_manifest_sha256) {
-            throw 'Report v2 source manifest hash mismatch'
-        }
-        $CanonicalPointer = $Metadata.professional_report
-        $RegressionPointer = $Metadata.regression_research
-        if (
-            $ObservationOnly -and
-            $Type -eq 'post_close' -and
-            [string]$Metadata.product_mode -eq 'observation' -and
-            $null -eq $CanonicalPointer
-        ) {
-            throw 'Observation post-close canonical report object is missing'
-        }
-        if ($null -ne $CanonicalPointer) {
-            if ($Type -ne 'post_close') {
-                throw 'Canonical report object is only allowed for post-close'
+        $Reports = @($Index.reports)
+        if ($Reports.Count -gt 180) { throw "Report v2 index contains too many entries for $ReportMarket" }
+        $Seen = @{}
+        foreach ($Entry in $Reports) {
+            $Type = [string]$Entry.report_type
+            if ($Type -notin @('post_close', 'pre_market', 'weekly_model')) { throw 'Invalid report v2 type' }
+            $LogicalKey = "$Type|$($Entry.source_market_date)|$($Entry.applicable_trading_date)"
+            if ($Seen.ContainsKey($LogicalKey)) { throw 'Duplicate report v2 logical key' }
+            $Seen[$LogicalKey] = $true
+            $MetadataRelative = [string]$Entry.metadata
+            if ($MetadataRelative -notmatch '^metadata/[0-9a-f]{64}\.json$') { throw 'Invalid report v2 metadata path' }
+            $MetadataPath = Assert-V2Path (Join-Path $Resolved $MetadataRelative)
+            $MetadataHash = (Get-FileHash -LiteralPath $MetadataPath -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($MetadataHash -ne [string]$Entry.metadata_sha256) { throw 'Report v2 metadata hash mismatch' }
+            $Metadata = Get-Content -LiteralPath $MetadataPath -Raw -Encoding utf8 | ConvertFrom-Json
+            if (
+                $Metadata.schema_version -ne 2 -or $Metadata.kind -notin @('absorb-report', 'stock-papi-report') -or
+                $Metadata.market -ne $ReportMarket -or [string]$Metadata.report_type -ne $Type -or
+                [string]$Metadata.source_market_date -ne [string]$Entry.source_market_date -or
+                [string]$Metadata.applicable_trading_date -ne [string]$Entry.applicable_trading_date
+            ) { throw 'Report v2 metadata identity mismatch' }
+            $SourceManifest = [string]$Metadata.source_manifest
+            if ($SourceManifest -notmatch '^quant/v1/manifests/(?:TW|US)-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}\.json$') {
+                throw 'Invalid report v2 source manifest path'
             }
-            Publish-VerifiedReportObject `
-                -Pointer $CanonicalPointer `
-                -Kind 'canonical' `
-                -SourceManifest $SourceManifest `
-                -SourceManifestHash ([string]$Metadata.source_manifest_sha256) `
-                -SourceMarketDate ([string]$Entry.source_market_date) `
-                -ApplicableTradingDate ([string]$Entry.applicable_trading_date)
-        }
-        if ($null -ne $RegressionPointer) {
-            if ($Type -ne 'post_close') {
-                throw 'Regression report object is only allowed for post-close'
+            $SourceRelative = $SourceManifest.Substring('quant/v1/'.Length)
+            $SourcePath = Assert-AllowlistedPath (Join-Path $ResolvedRoot $SourceRelative)
+            if ((Get-FileHash -LiteralPath $SourcePath -Algorithm SHA256).Hash.ToLowerInvariant() -ne [string]$Metadata.source_manifest_sha256) {
+                throw 'Report v2 source manifest hash mismatch'
             }
-            Publish-VerifiedReportObject `
-                -Pointer $RegressionPointer `
-                -Kind 'regression' `
-                -SourceManifest $SourceManifest `
-                -SourceManifestHash ([string]$Metadata.source_manifest_sha256) `
-                -SourceMarketDate ([string]$Entry.source_market_date) `
-                -ApplicableTradingDate ([string]$Entry.applicable_trading_date)
-        }
-        $ContentHash = [string]$Metadata.content_sha256
-        if ($ContentHash -notmatch '^[0-9a-f]{64}$' -or $ContentHash -ne [string]$Entry.content_sha256) {
-            throw 'Report v2 content hash mismatch'
-        }
-        $HasPdf = $null -ne $Metadata.pdf_path
-        if ($Type -eq 'pre_market' -and $HasPdf) { throw 'Pre-market report v2 must not contain PDF' }
-        if ($HasPdf) {
-            $PdfRelative = [string]$Metadata.pdf_path
-            if ($PdfRelative -notmatch '^objects/[0-9a-f]{64}\.pdf$' -or [long]$Metadata.pdf_size -le 0 -or [long]$Metadata.pdf_size -gt 15MB) {
-                throw 'Invalid report v2 PDF metadata'
+            $CanonicalPointer = $Metadata.professional_report
+            $RegressionPointer = $Metadata.regression_research
+            if (
+                $ObservationOnly -and
+                $Type -eq 'post_close' -and
+                [string]$Metadata.product_mode -eq 'observation' -and
+                $null -eq $CanonicalPointer
+            ) {
+                throw 'Observation post-close canonical report object is missing'
             }
-            $PdfPath = Assert-V2Path (Join-Path $Resolved $PdfRelative)
-            $Pdf = Get-Item -LiteralPath $PdfPath
-            if ($Pdf.Length -ne [long]$Metadata.pdf_size) { throw 'Report v2 PDF size mismatch' }
-            $PdfHash = (Get-FileHash -LiteralPath $PdfPath -Algorithm SHA256).Hash.ToLowerInvariant()
-            if ($PdfHash -ne [string]$Metadata.pdf_sha256 -or $PdfRelative -ne "objects/$PdfHash.pdf") {
-                throw 'Report v2 PDF hash mismatch'
+            if ($null -ne $CanonicalPointer) {
+                if ($Type -ne 'post_close') {
+                    throw 'Canonical report object is only allowed for post-close'
+                }
+                Publish-VerifiedReportObject `
+                    -Pointer $CanonicalPointer `
+                    -Kind 'canonical' `
+                    -SourceManifest $SourceManifest `
+                    -SourceManifestHash ([string]$Metadata.source_manifest_sha256) `
+                    -SourceMarketDate ([string]$Entry.source_market_date) `
+                    -ApplicableTradingDate ([string]$Entry.applicable_trading_date)
             }
-            Invoke-GcloudCopy $PdfPath "gs://$Bucket/reports/v2/$PdfRelative" -NoClobber
+            if ($null -ne $RegressionPointer) {
+                if ($Type -ne 'post_close') {
+                    throw 'Regression report object is only allowed for post-close'
+                }
+                Publish-VerifiedReportObject `
+                    -Pointer $RegressionPointer `
+                    -Kind 'regression' `
+                    -SourceManifest $SourceManifest `
+                    -SourceManifestHash ([string]$Metadata.source_manifest_sha256) `
+                    -SourceMarketDate ([string]$Entry.source_market_date) `
+                    -ApplicableTradingDate ([string]$Entry.applicable_trading_date)
+            }
+            $ContentHash = [string]$Metadata.content_sha256
+            if ($ContentHash -notmatch '^[0-9a-f]{64}$' -or $ContentHash -ne [string]$Entry.content_sha256) {
+                throw 'Report v2 content hash mismatch'
+            }
+            $HasPdf = $null -ne $Metadata.pdf_path
+            if ($Type -eq 'pre_market' -and $HasPdf) { throw 'Pre-market report v2 must not contain PDF' }
+            if ($HasPdf) {
+                $PdfRelative = [string]$Metadata.pdf_path
+                if ($PdfRelative -notmatch '^objects/[0-9a-f]{64}\.pdf$' -or [long]$Metadata.pdf_size -le 0 -or [long]$Metadata.pdf_size -gt 15MB) {
+                    throw 'Invalid report v2 PDF metadata'
+                }
+                $PdfPath = Assert-V2Path (Join-Path $Resolved $PdfRelative)
+                $Pdf = Get-Item -LiteralPath $PdfPath
+                if ($Pdf.Length -ne [long]$Metadata.pdf_size) { throw 'Report v2 PDF size mismatch' }
+                $PdfHash = (Get-FileHash -LiteralPath $PdfPath -Algorithm SHA256).Hash.ToLowerInvariant()
+                if ($PdfHash -ne [string]$Metadata.pdf_sha256 -or $PdfRelative -ne "objects/$PdfHash.pdf") {
+                    throw 'Report v2 PDF hash mismatch'
+                }
+                Invoke-GcloudCopy $PdfPath "gs://$Bucket/reports/v2/$PdfRelative" -NoClobber
+                Assert-GcloudFileMatches `
+                    -Gcloud $Gcloud `
+                    -LocalPath $PdfPath `
+                    -Uri "gs://$Bucket/reports/v2/$PdfRelative"
+            }
+            Invoke-GcloudCopy $MetadataPath "gs://$Bucket/reports/v2/$MetadataRelative" -NoClobber
             Assert-GcloudFileMatches `
                 -Gcloud $Gcloud `
-                -LocalPath $PdfPath `
-                -Uri "gs://$Bucket/reports/v2/$PdfRelative"
+                -LocalPath $MetadataPath `
+                -Uri "gs://$Bucket/reports/v2/$MetadataRelative"
         }
-        Invoke-GcloudCopy $MetadataPath "gs://$Bucket/reports/v2/$MetadataRelative" -NoClobber
-        Assert-GcloudFileMatches `
-            -Gcloud $Gcloud `
-            -LocalPath $MetadataPath `
-            -Uri "gs://$Bucket/reports/v2/$MetadataRelative"
-    }
 
-    # All immutable objects and metadata are verified and uploaded before mutable pointers.
-    Assert-ObservationReportIndexPreservesLkg -LocalIndex $Index
-    if ((Get-FileHash -LiteralPath $IndexPath -Algorithm SHA256).Hash.ToLowerInvariant() -ne $IndexPointerHash) {
-        throw 'Report v2 index changed during validation'
-    }
-    Set-GcloudMutablePointer `
-        -Source $IndexPath `
-        -Destination "gs://$Bucket/reports/v2/index-TW.json" `
-        -ExpectedSha256 $IndexPointerHash | Out-Null
-    $RemoteIndex = Get-GcloudJson `
-        -Gcloud $Gcloud `
-        -Uri "gs://$Bucket/reports/v2/index-TW.json"
-    if ($RemoteIndex.schema_version -ne 2 -or $RemoteIndex.market -ne 'TW' -or @($RemoteIndex.reports).Count -ne $Reports.Count) {
-        throw 'Report v2 remote index read-back mismatch'
-    }
-    $Uploaded = New-Object System.Collections.Generic.List[string]
-    $ReportV2Types = @(
-        Get-ObservationReportV2Types -ObservationOnly:$ObservationOnly
-    )
-    foreach ($Type in $ReportV2Types) {
-        $LatestName = "latest-TW-$Type.json"
-        $LatestCandidate = Join-Path $Resolved $LatestName
-        if (-not (Test-Path -LiteralPath $LatestCandidate -PathType Leaf)) { continue }
-        $LatestPath = Assert-V2Path $LatestCandidate
-        $LatestPointerHash = (Get-FileHash -LiteralPath $LatestPath -Algorithm SHA256).Hash.ToLowerInvariant()
-        $Latest = Get-Content -LiteralPath $LatestPath -Raw -Encoding utf8 | ConvertFrom-Json
-        if ($Latest.schema_version -ne 2 -or $Latest.kind -notin @('absorb-report', 'stock-papi-report') -or $Latest.market -ne 'TW' -or [string]$Latest.report_type -ne $Type) {
-            throw 'Invalid report v2 latest pointer'
+        # All immutable objects and metadata are verified and uploaded before mutable pointers.
+        if ($ReportMarket -eq 'TW') {
+            Assert-ObservationReportIndexPreservesLkg -LocalIndex $Index
         }
-        if (
-            $ObservationOnly -and
-            (
-                [string]$Latest.product_mode -ne 'observation' -or
-                (
-                    $null -ne $Latest.model_versions -and
-                    @($Latest.model_versions.PSObject.Properties).Count -ne 0
-                )
-            )
-        ) {
-            throw 'Observation report latest pointer contains prediction state'
+        if ((Get-FileHash -LiteralPath $IndexPath -Algorithm SHA256).Hash.ToLowerInvariant() -ne $IndexPointerHash) {
+            throw "Report v2 index changed during validation for $ReportMarket"
         }
-        $Match = @($Reports | Where-Object {
-            [string]$_.report_type -eq $Type -and
-            [string]$_.metadata -eq [string]$Latest.metadata -and
-            [string]$_.metadata_sha256 -eq [string]$Latest.metadata_sha256
-        })
-        if ($Match.Count -ne 1) { throw 'Report v2 latest pointer is not present in index' }
-        if ((Get-FileHash -LiteralPath $LatestPath -Algorithm SHA256).Hash.ToLowerInvariant() -ne $LatestPointerHash) {
-            throw 'Report v2 latest pointer changed during validation'
+        $IndexDestination = if ($ReportMarket -eq 'TW') {
+            "gs://$Bucket/reports/v2/index-TW.json"
+        } else {
+            "gs://$Bucket/reports/v2/index-$ReportMarket.json"
         }
         Set-GcloudMutablePointer `
-            -Source $LatestPath `
-            -Destination "gs://$Bucket/reports/v2/$LatestName" `
-            -ExpectedSha256 $LatestPointerHash | Out-Null
-        $RemoteLatest = Get-GcloudJson `
+            -Source $IndexPath `
+            -Destination $IndexDestination `
+            -ExpectedSha256 $IndexPointerHash | Out-Null
+        $RemoteIndex = Get-GcloudJson `
             -Gcloud $Gcloud `
-            -Uri "gs://$Bucket/reports/v2/$LatestName"
-        if (
-            [string]$RemoteLatest.report_type -ne $Type -or
-            [string]$RemoteLatest.metadata -ne [string]$Latest.metadata -or
-            [string]$RemoteLatest.metadata_sha256 -ne [string]$Latest.metadata_sha256
-        ) { throw 'Report v2 remote latest read-back mismatch' }
-        $Uploaded.Add($Type) | Out-Null
+            -Uri $IndexDestination
+        if ($RemoteIndex.schema_version -ne 2 -or $RemoteIndex.market -ne $ReportMarket -or @($RemoteIndex.reports).Count -ne $Reports.Count) {
+            throw "Report v2 remote index read-back mismatch for $ReportMarket"
+        }
+        $ReportV2Types = @(
+            Get-ObservationReportV2Types -ObservationOnly:$ObservationOnly
+        )
+        foreach ($Type in $ReportV2Types) {
+            $LatestName = "latest-$ReportMarket-$Type.json"
+            $LatestCandidate = Join-Path $Resolved $LatestName
+            if (-not (Test-Path -LiteralPath $LatestCandidate -PathType Leaf)) { continue }
+            $LatestPath = Assert-V2Path $LatestCandidate
+            $LatestPointerHash = (Get-FileHash -LiteralPath $LatestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+            $Latest = Get-Content -LiteralPath $LatestPath -Raw -Encoding utf8 | ConvertFrom-Json
+            if ($Latest.schema_version -ne 2 -or $Latest.kind -notin @('absorb-report', 'stock-papi-report') -or $Latest.market -ne $ReportMarket -or [string]$Latest.report_type -ne $Type) {
+                throw "Invalid report v2 latest pointer for $ReportMarket"
+            }
+            if (
+                $ObservationOnly -and
+                (
+                    [string]$Latest.product_mode -ne 'observation' -or
+                    (
+                        $null -ne $Latest.model_versions -and
+                        @($Latest.model_versions.PSObject.Properties).Count -ne 0
+                    )
+                )
+            ) {
+                throw 'Observation report latest pointer contains prediction state'
+            }
+            $Match = @($Reports | Where-Object {
+                [string]$_.report_type -eq $Type -and
+                [string]$_.metadata -eq [string]$Latest.metadata -and
+                [string]$_.metadata_sha256 -eq [string]$Latest.metadata_sha256
+            })
+            if ($Match.Count -ne 1) { throw "Report v2 latest pointer is not present in index for $ReportMarket" }
+            if ((Get-FileHash -LiteralPath $LatestPath -Algorithm SHA256).Hash.ToLowerInvariant() -ne $LatestPointerHash) {
+                throw "Report v2 latest pointer changed during validation for $ReportMarket"
+            }
+            Set-GcloudMutablePointer `
+                -Source $LatestPath `
+                -Destination "gs://$Bucket/reports/v2/$LatestName" `
+                -ExpectedSha256 $LatestPointerHash | Out-Null
+            $RemoteLatest = Get-GcloudJson `
+                -Gcloud $Gcloud `
+                -Uri "gs://$Bucket/reports/v2/$LatestName"
+            if (
+                [string]$RemoteLatest.report_type -ne $Type -or
+                [string]$RemoteLatest.metadata -ne [string]$Latest.metadata -or
+                [string]$RemoteLatest.metadata_sha256 -ne [string]$Latest.metadata_sha256
+            ) { throw "Report v2 remote latest read-back mismatch for $ReportMarket" }
+            $Uploaded.Add("$ReportMarket-$Type") | Out-Null
+        }
     }
     return $Uploaded.ToArray()
 }
@@ -611,71 +628,78 @@ function Publish-DashboardV1 {
     if (-not (Test-Path -LiteralPath $Root -PathType Container)) { return $false }
     $Resolved = (Resolve-Path -LiteralPath $Root).Path
     if (((Get-Item -LiteralPath $Resolved).Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Dashboard root must not be a reparse point' }
-    $LatestPath = Assert-PathWithinRoot `
-        -Path (Join-Path $Resolved 'latest-TW.json') `
-        -Root $Resolved
-    $LatestPointerHash = (Get-FileHash -LiteralPath $LatestPath -Algorithm SHA256).Hash.ToLowerInvariant()
-    $Latest = Get-Content -LiteralPath $LatestPath -Raw -Encoding utf8 | ConvertFrom-Json
-    $Relative = [string]$Latest.path
-    if (
-        $Latest.schema_version -ne 2 -or
-        $Latest.kind -ne 'absorb-observation-dashboard' -or
-        $Latest.product_mode -ne 'observation' -or
-        $Latest.market -ne 'TW' -or $Relative -notmatch '^objects/[0-9a-f]{64}\.json$' -or
-        [string]$Latest.sha256 -notmatch '^[0-9a-f]{64}$' -or [long]$Latest.size -le 0 -or [long]$Latest.size -gt 5MB
-    ) { throw 'Invalid dashboard latest pointer' }
-    $ObjectPath = Assert-PathWithinRoot `
-        -Path (Join-Path $Resolved $Relative) `
-        -Root $Resolved
-    $Object = Get-Item -LiteralPath $ObjectPath
-    if (($Object.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or $Object.Length -ne [long]$Latest.size) { throw 'Invalid dashboard object' }
-    $Digest = (Get-FileHash -LiteralPath $ObjectPath -Algorithm SHA256).Hash.ToLowerInvariant()
-    if ($Digest -ne [string]$Latest.sha256 -or $Relative -ne "objects/$Digest.json") { throw 'Dashboard object hash mismatch' }
-    $Document = Get-Content -LiteralPath $ObjectPath -Raw -Encoding utf8 | ConvertFrom-Json
-    if (
-        $Document.schema_version -ne 2 -or
-        $Document.kind -ne 'absorb-observation-dashboard' -or
-        $Document.product_mode -ne 'observation' -or
-        $Document.market -ne 'TW' -or
-        [string]$Document.observation_as_of -ne [string]$Latest.observation_as_of -or
-        $Document.prediction_capability.mode -ne 'research' -or
-        $Document.prediction_capability.probability_allowed -ne $false -or
-        $Document.prediction_capability.ranking_allowed -ne $false -or
-        $Document.prediction_capability.strong_action_allowed -ne $false -or
-        $Document.prediction_capability.performance_endorsement_allowed -ne $false -or
-        $null -eq $Document.market_observation -or
-        $null -eq $Document.industry_observations -or
-        $null -eq $Document.heatmap -or
-        $null -eq $Document.daily_focus -or
-        $null -eq $Document.stock_events -or
-        $null -eq $Document.etf_observations
-    ) { throw 'Dashboard object schema mismatch' }
-    $SourceManifest = [string]$Document.source_manifest
-    if ($SourceManifest -notmatch '^quant/v1/manifests/TW-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}\.json$') { throw 'Invalid dashboard source manifest' }
-    $SourcePath = Assert-AllowlistedPath (Join-Path $ResolvedRoot $SourceManifest.Substring('quant/v1/'.Length))
-    if ((Get-FileHash -LiteralPath $SourcePath -Algorithm SHA256).Hash.ToLowerInvariant() -ne [string]$Document.source_manifest_sha256) { throw 'Dashboard source manifest hash mismatch' }
-    Invoke-GcloudCopy $ObjectPath "gs://$Bucket/dashboard/v1/$Relative" -NoClobber
-    Assert-GcloudFileMatches `
-        -Gcloud $Gcloud `
-        -LocalPath $ObjectPath `
-        -Uri "gs://$Bucket/dashboard/v1/$Relative"
-    if ((Get-FileHash -LiteralPath $LatestPath -Algorithm SHA256).Hash.ToLowerInvariant() -ne $LatestPointerHash) {
-        throw 'Dashboard latest pointer changed during validation'
+    $DashboardMarkets = @('TW', 'US')
+    $PublishedAny = $false
+    foreach ($DashboardMarket in $DashboardMarkets) {
+        $LatestCandidate = Join-Path $Resolved "latest-$DashboardMarket.json"
+        if (-not (Test-Path -LiteralPath $LatestCandidate -PathType Leaf)) { continue }
+        $LatestPath = Assert-PathWithinRoot `
+            -Path $LatestCandidate `
+            -Root $Resolved
+        $LatestPointerHash = (Get-FileHash -LiteralPath $LatestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        $Latest = Get-Content -LiteralPath $LatestPath -Raw -Encoding utf8 | ConvertFrom-Json
+        $Relative = [string]$Latest.path
+        if (
+            $Latest.schema_version -ne 2 -or
+            $Latest.kind -ne 'absorb-observation-dashboard' -or
+            $Latest.product_mode -ne 'observation' -or
+            $Latest.market -ne $DashboardMarket -or $Relative -notmatch '^objects/[0-9a-f]{64}\.json$' -or
+            [string]$Latest.sha256 -notmatch '^[0-9a-f]{64}$' -or [long]$Latest.size -le 0 -or [long]$Latest.size -gt 5MB
+        ) { throw "Invalid dashboard latest pointer for $DashboardMarket" }
+        $ObjectPath = Assert-PathWithinRoot `
+            -Path (Join-Path $Resolved $Relative) `
+            -Root $Resolved
+        $Object = Get-Item -LiteralPath $ObjectPath
+        if (($Object.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or $Object.Length -ne [long]$Latest.size) { throw "Invalid dashboard object for $DashboardMarket" }
+        $Digest = (Get-FileHash -LiteralPath $ObjectPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($Digest -ne [string]$Latest.sha256 -or $Relative -ne "objects/$Digest.json") { throw "Dashboard object hash mismatch for $DashboardMarket" }
+        $Document = Get-Content -LiteralPath $ObjectPath -Raw -Encoding utf8 | ConvertFrom-Json
+        if (
+            $Document.schema_version -ne 2 -or
+            $Document.kind -ne 'absorb-observation-dashboard' -or
+            $Document.product_mode -ne 'observation' -or
+            $Document.market -ne $DashboardMarket -or
+            [string]$Document.observation_as_of -ne [string]$Latest.observation_as_of -or
+            $Document.prediction_capability.mode -ne 'research' -or
+            $Document.prediction_capability.probability_allowed -ne $false -or
+            $Document.prediction_capability.ranking_allowed -ne $false -or
+            $Document.prediction_capability.strong_action_allowed -ne $false -or
+            $Document.prediction_capability.performance_endorsement_allowed -ne $false -or
+            $null -eq $Document.market_observation -or
+            $null -eq $Document.industry_observations -or
+            $null -eq $Document.heatmap -or
+            $null -eq $Document.daily_focus -or
+            $null -eq $Document.stock_events -or
+            $null -eq $Document.etf_observations
+        ) { throw "Dashboard object schema mismatch for $DashboardMarket" }
+        $SourceManifest = [string]$Document.source_manifest
+        if ($SourceManifest -notmatch '^quant/v1/manifests/(?:TW|US)-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}\.json$') { throw "Invalid dashboard source manifest for $DashboardMarket" }
+        $SourcePath = Assert-AllowlistedPath (Join-Path $ResolvedRoot $SourceManifest.Substring('quant/v1/'.Length))
+        if ((Get-FileHash -LiteralPath $SourcePath -Algorithm SHA256).Hash.ToLowerInvariant() -ne [string]$Document.source_manifest_sha256) { throw "Dashboard source manifest hash mismatch for $DashboardMarket" }
+        Invoke-GcloudCopy $ObjectPath "gs://$Bucket/dashboard/v1/$Relative" -NoClobber
+        Assert-GcloudFileMatches `
+            -Gcloud $Gcloud `
+            -LocalPath $ObjectPath `
+            -Uri "gs://$Bucket/dashboard/v1/$Relative"
+        if ((Get-FileHash -LiteralPath $LatestPath -Algorithm SHA256).Hash.ToLowerInvariant() -ne $LatestPointerHash) {
+            throw "Dashboard latest pointer changed during validation for $DashboardMarket"
+        }
+        Set-GcloudMutablePointer `
+            -Source $LatestPath `
+            -Destination "gs://$Bucket/dashboard/v1/latest-$DashboardMarket.json" `
+            -ExpectedSha256 $LatestPointerHash | Out-Null
+        $Remote = Get-GcloudJson `
+            -Gcloud $Gcloud `
+            -Uri "gs://$Bucket/dashboard/v1/latest-$DashboardMarket.json"
+        if (
+            [string]$Remote.sha256 -ne $Digest -or
+            [string]$Remote.observation_as_of -ne
+            [string]$Document.observation_as_of -or
+            [string]$Remote.product_mode -ne 'observation'
+        ) { throw "Dashboard remote read-back mismatch for $DashboardMarket" }
+        $PublishedAny = $true
     }
-    Set-GcloudMutablePointer `
-        -Source $LatestPath `
-        -Destination "gs://$Bucket/dashboard/v1/latest-TW.json" `
-        -ExpectedSha256 $LatestPointerHash | Out-Null
-    $Remote = Get-GcloudJson `
-        -Gcloud $Gcloud `
-        -Uri "gs://$Bucket/dashboard/v1/latest-TW.json"
-    if (
-        [string]$Remote.sha256 -ne $Digest -or
-        [string]$Remote.observation_as_of -ne
-        [string]$Document.observation_as_of -or
-        [string]$Remote.product_mode -ne 'observation'
-    ) { throw 'Dashboard remote read-back mismatch' }
-    return $true
+    return $PublishedAny
 }
 
 if ($ObservationOnly -and -not $LkgReceiptPath) {
@@ -805,8 +829,8 @@ try {
         if ($LatestSchema -notin @(2, 3, 4) -or $Latest.market -ne $Market) {
             throw "Invalid latest pointer for $Market"
         }
-        if ($LatestSchema -in @(3, 4) -and $Market -ne 'TW') {
-            throw 'Manifest v3/v4 is TW-only'
+        if ($LatestSchema -in @(3, 4) -and $Market -notin @('TW', 'US')) {
+            throw 'Manifest v3/v4 is TW or US only'
         }
         $ManifestRelative = [string]$Latest.manifest
         if ($ManifestRelative -notmatch '^manifests/[A-Z]+-[0-9TZ]+-[0-9a-f]{12}\.json$') {

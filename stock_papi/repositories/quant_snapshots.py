@@ -166,7 +166,7 @@ def published_quant_manifest(market, today=None, *, load_object, cache=QUANT_MAN
                 denominator,
             )
             if (
-                market != "TW"
+                market not in ("TW", "US")
                 or "market_as_of" in manifest
                 or target != market_date
                 or any(type(value) is not int or value < 0 for value in counts)
@@ -195,12 +195,15 @@ def published_quant_manifest(market, today=None, *, load_object, cache=QUANT_MAN
                 or observation_count * 100 <= universe_count * 95
             ):
                 return None
-        else:
-            return None
             for symbol, status in expected.items():
                 entry = symbols.get(symbol)
+                valid_symbol = (
+                    bool(re.fullmatch(r"[0-9]{4,6}", str(symbol)))
+                    if market == "TW"
+                    else (len(str(symbol)) <= 10 and bool(re.fullmatch(r"^[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)?$", str(symbol))))
+                )
                 if (
-                    re.fullmatch(r"[0-9]{4,6}", str(symbol)) is None
+                    not valid_symbol
                     or not isinstance(status, dict)
                     or not isinstance(entry, dict)
                     or status.get("status")
@@ -213,23 +216,38 @@ def published_quant_manifest(market, today=None, *, load_object, cache=QUANT_MAN
                     or entry.get("observation_kind") != status.get("status")
                 ):
                     return None
+        else:
+            return None
         age = (today or datetime.date.today()) - market_date
         if not 0 <= age.days <= 7:
             return None
     except (KeyError, TypeError, UnicodeError, ValueError):
         return None
-    cache[cache_key] = (manifest, now)
-    return manifest
+    result = dict(manifest)
+    result["symbols"] = dict(symbols)
+    cache[cache_key] = (result, now)
+    return result
 
 
 def fetch_quant_snapshot(
-    code, today=None, *, is_us_ticker_fn, load_manifest, load_object
+    market_or_code,
+    code=None,
+    today=None,
+    *,
+    is_us_ticker_fn=None,
+    load_manifest,
+    load_object,
 ):
-    market = "US" if is_us_ticker_fn(code) else "TW" if str(code).isdigit() else None
-    if market is None:
+    if code is not None:
+        market = market_or_code
+        symbol = code
+    else:
+        symbol = market_or_code
+        market = "US" if (is_us_ticker_fn and is_us_ticker_fn(symbol)) else "TW"
+    if market not in ("TW", "US"):
         return None
     manifest = load_manifest(market, today=today)
-    entry = (manifest or {}).get("symbols", {}).get(code)
+    entry = (manifest or {}).get("symbols", {}).get(symbol)
     if not isinstance(entry, dict):
         return None
     try:
@@ -261,7 +279,7 @@ def fetch_quant_snapshot(
                 return None
         elif manifest_schema in (3, 4):
             if (
-                market != "TW"
+                market not in ("TW", "US")
                 or entry.get("observation_as_of")
                 != manifest.get("observation_as_of")
                 or entry.get("latest_regular_price_date") != entry.get("as_of")
@@ -285,7 +303,7 @@ def fetch_quant_snapshot(
             not isinstance(document, dict)
             or document.get("schema_version") != (1 if manifest_schema == 2 else 2)
             or document.get("market") != market
-            or document.get("symbol") != code
+            or document.get("symbol") != symbol
             or document.get("as_of") != entry.get("as_of")
             or not isinstance(document.get("backtest"), dict)
             or not isinstance(document.get("daily"), list)
@@ -304,7 +322,7 @@ def fetch_quant_snapshot(
                 != entry.get("as_of")
             ):
                 return None
-            expected = manifest["expected_non_price_symbols"].get(code)
+            expected = manifest["expected_non_price_symbols"].get(symbol)
             status = document.get("trading_status_evidence")
             if (
                 document.get("target_market_date")
@@ -330,7 +348,7 @@ def fetch_quant_snapshot(
                 or status.get("schema_version") != 1
                 or status.get("status") != expected.get("status")
                 or status.get("market") != market
-                or status.get("symbol") != code
+                or status.get("symbol") != symbol
                 or status.get("target_market_date")
                 != manifest.get("target_market_date")
                 or status.get("evidence_sha256") != evidence_sha256(status)
@@ -340,7 +358,7 @@ def fetch_quant_snapshot(
                 != expected.get("evidence_sha256")
                 or validate_status_evidence(
                     status,
-                    symbol=code,
+                    symbol=symbol,
                     target_date=datetime.date.fromisoformat(
                         str(manifest["target_market_date"])
                     ),
@@ -364,3 +382,6 @@ def fetch_quant_snapshot(
         return document
     except (KeyError, OSError, TypeError, UnicodeError, ValueError):
         return None
+
+
+published_stock_artifact = fetch_quant_snapshot

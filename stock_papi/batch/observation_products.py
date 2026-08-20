@@ -157,7 +157,7 @@ def _validate_source(source, today):
     if (
         manifest is None
         or manifest.schema_version not in {2, 3, 4}
-        or manifest.market != "TW"
+        or manifest.market not in ("TW", "US")
         or not isinstance(manifest.market_as_of, datetime.date)
         or not isinstance(stocks, list)
         or not stocks
@@ -254,7 +254,7 @@ def _validate_source(source, today):
         raise ValueError("observation source is stale or from the future")
     if (
         re.fullmatch(
-            r"manifests/TW-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}\.json",
+            r"manifests/(?:TW|US)-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}\.json",
             str(manifest.manifest_path),
         )
         is None
@@ -267,7 +267,7 @@ def _validate_source(source, today):
     for stock in stocks:
         if (
             stock.sample_data
-            or stock.market != "TW"
+            or stock.market not in ("TW", "US")
             or stock.symbol in seen
             or not isinstance(stock.daily, list)
             or not stock.daily
@@ -717,11 +717,11 @@ def validate_observation_dashboard(document):
         document.get("schema_version") != 2
         or document.get("kind") != "absorb-observation-dashboard"
         or document.get("product_mode") != "observation"
-        or document.get("market") != "TW"
+        or document.get("market") not in ("TW", "US")
         or generated.tzinfo is None
         or generated.utcoffset() is None
         or re.fullmatch(
-            r"quant/v1/manifests/TW-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}\.json",
+            r"quant/v1/manifests/(?:TW|US)-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}\.json",
             str(document.get("source_manifest") or ""),
         )
         is None
@@ -863,7 +863,7 @@ def build_observation_dashboard(
         "schema_version": 2,
         "kind": "absorb-observation-dashboard",
         "product_mode": "observation",
-        "market": "TW",
+        "market": manifest.market,
         "observation_as_of": manifest.market_as_of.isoformat(),
         "generated_at": timestamp.astimezone(datetime.timezone.utc)
         .isoformat()
@@ -1052,11 +1052,12 @@ def _prepare_observation_dashboard(root, document):
     digest = hashlib.sha256(content).hexdigest()
     publish = Path(root) / "publish" / "dashboard" / "v1"
     _write_immutable(publish / "objects" / f"{digest}.json", content)
+    market = document["market"]
     latest = {
         "schema_version": 2,
         "kind": "absorb-observation-dashboard",
         "product_mode": "observation",
-        "market": "TW",
+        "market": market,
         "observation_as_of": document["observation_as_of"],
         "generated_at": document["generated_at"],
         "source_manifest": document["source_manifest"],
@@ -1065,7 +1066,7 @@ def _prepare_observation_dashboard(root, document):
         "sha256": digest,
         "size": len(content),
     }
-    return publish / "latest-TW.json", _canonical(latest)
+    return publish / f"latest-{market}.json", _canonical(latest)
 
 
 def _restore(path, previous):
@@ -1086,9 +1087,10 @@ def promote_observation_candidate(root, directory):
     dashboard_latest, dashboard_latest_bytes = _prepare_observation_dashboard(
         root, documents["dashboard-snapshot.json"]
     )
+    market = documents.get("dashboard-snapshot.json", {}).get("market") or documents.get("post-close-report-v2.json", {}).get("market") or "TW"
     report_publish = root / "publish" / "reports" / "v2"
-    report_index = report_publish / "index-TW.json"
-    report_latest = report_publish / "latest-TW-post_close.json"
+    report_index = report_publish / f"index-{market}.json"
+    report_latest = report_publish / f"latest-{market}-post_close.json"
     previous = {
         report_index: report_index.read_bytes() if report_index.exists() else None,
         report_latest: report_latest.read_bytes() if report_latest.exists() else None,

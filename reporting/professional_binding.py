@@ -42,21 +42,23 @@ def validate_professional_report_binding(
     # 1. Identity static field constraints
     if identity.report_type != "post_close":
         raise ValueError("report_type must be post_close")
-    if identity.market != "TW":
-        raise ValueError("market must be TW")
+    if identity.market not in ("TW", "US"):
+        raise ValueError("market must be TW or US")
     if identity.product_mode != "observation_with_research":
         raise ValueError("product_mode must be observation_with_research")
     if identity.product_tier != "institutional":
         raise ValueError("product_tier must be institutional")
 
-    expected_report_id = f"TW-{identity.source_market_date.strftime('%Y%m%d')}-post-close-institutional"
+    expected_report_id = f"{identity.market}-{identity.source_market_date.strftime('%Y%m%d')}-post-close-institutional"
     if identity.report_id != expected_report_id:
         raise ValueError(f"report_id '{identity.report_id}' does not match expected '{expected_report_id}'")
     # 2. Metadata cross-checks
     if meta_obj.report_type != "post_close":
         raise ValueError("metadata report_type must be post_close")
-    if meta_obj.market != "TW":
-        raise ValueError("metadata market must be TW")
+    if meta_obj.market not in ("TW", "US"):
+        raise ValueError("metadata market must be TW or US")
+    if identity.market != meta_obj.market:
+        raise ValueError("market mismatch between report identity and metadata")
     if identity.source_market_date != meta_obj.source_market_date:
         raise ValueError("source_market_date mismatch between report identity and metadata")
     if identity.applicable_trading_date != meta_obj.applicable_trading_date:

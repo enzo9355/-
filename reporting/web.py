@@ -101,7 +101,7 @@ def _validate_report_index_v2(document: dict, settings: ReportConfig) -> list[di
     if (
         document.get("schema_version") != 2
         or document.get("kind") not in {"absorb-report-index", "stock-papi-report-index"}
-        or document.get("market") != "TW"
+        or document.get("market") not in ("TW", "US")
         or not isinstance(reports, list)
         or len(reports) > settings.index_history_days * 3
     ):

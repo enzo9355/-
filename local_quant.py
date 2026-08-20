@@ -405,7 +405,7 @@ def write_stock_artifact(root, market, symbol, payload):
         raise TypeError("stock artifact payload must be a dictionary")
     document = dict(payload)
     schema_version = document.get("schema_version", 1)
-    if schema_version not in {1, 2} or (schema_version == 2 and market != "TW"):
+    if schema_version not in {1, 2} or (schema_version == 2 and market not in {"TW", "US"}):
         raise ValueError("stock artifact schema version is invalid")
     document.update(
         schema_version=schema_version, market=market, symbol=symbol
@@ -433,45 +433,55 @@ def _validated_artifact(
         with gzip.GzipFile(fileobj=io.BytesIO(compressed), mode="rb") as stream:
             decoded = stream.read(STOCK_ARTIFACT_MAX_UNCOMPRESSED_BYTES + 1)
         if len(decoded) > STOCK_ARTIFACT_MAX_UNCOMPRESSED_BYTES:
-            raise ValueError("artifact expands beyond limit")
+            raise RuntimeError(f"artifact is too large for {market}:{symbol}")
         document = json.loads(decoded.decode("utf-8"))
-        expected_schema = 2 if target_market_date is not None else 1
-        if (
-            not isinstance(document, dict)
-            or document.get("schema_version") != expected_schema
-            or document.get("market") != market
-            or document.get("symbol") != symbol
-        ):
-            raise ValueError("artifact schema mismatch")
-        _validate_json_value(document)
-        as_of = datetime.date.fromisoformat(str(document["as_of"]))
-        if as_of > generated_at.astimezone(TAIPEI).date():
-            raise ValueError("artifact date is in the future")
-        if target_market_date is None and any(
-            key in document
-            for key in (
-                "target_market_date",
-                "observation_as_of",
-                "latest_regular_price_date",
-                "observation_kind",
-                "trading_status_evidence",
-            )
-        ):
-            raise ValueError("schema v1 artifact carries observation status")
-        if target_market_date is not None:
+        schema_version = document.get("schema_version")
+        if target_market_date is None:
+            if (
+                schema_version != 1
+                or document.get("market") != market
+                or document.get("symbol") != symbol
+            ):
+                raise ValueError("artifact schema mismatch")
+            _validate_json_value(document)
+            as_of = datetime.date.fromisoformat(str(document["as_of"]))
+            if as_of > generated_at.astimezone(TAIPEI).date():
+                raise ValueError("artifact date is in the future")
+            if any(
+                key in document
+                for key in (
+                    "target_market_date",
+                    "observation_as_of",
+                    "latest_regular_price_date",
+                    "observation_kind",
+                    "trading_status_evidence",
+                )
+            ):
+                raise ValueError("schema v1 artifact carries observation status")
+        else:
+            if (
+                schema_version != 2
+                or document.get("market") != market
+                or document.get("symbol") != symbol
+                or not isinstance(document.get("daily"), list)
+                or not isinstance(document.get("backtest"), dict)
+            ):
+                raise ValueError("artifact schema mismatch")
+            _validate_json_value(document)
             from stock_papi.integrations.market_data.tw_trading_status import (
                 evidence_sha256,
                 validate_status_evidence,
             )
 
+            as_of = str(document.get("as_of") or "")
+            daily = document["daily"]
+            if not daily or not isinstance(daily[-1], dict):
+                raise ValueError("artifact daily rows are invalid")
+            latest_date = str(daily[-1].get("Date") or "").split("T", 1)[0]
             target_text = target_market_date.isoformat()
-            latest_date = datetime.date.fromisoformat(
-                str(document["latest_regular_price_date"])
-            )
             observation_kind = document.get("observation_kind")
+            lineage = document.get("lineage") or document.get("source_lineage")
             status = document.get("trading_status_evidence")
-            lineage = document.get("source_lineage")
-            daily = document.get("daily")
             latest = document.get("latest")
             latest_daily = (
                 str(daily[-1].get("Date") or "").split("T", 1)[0]
@@ -483,8 +493,15 @@ def _validated_artifact(
                 if isinstance(latest, dict)
                 else ""
             )
+            expected_lineage_version = (
+                "tw-official-historical-v3"
+                if market == "TW"
+                else lineage.get("source_schema_version")
+                if isinstance(lineage, dict)
+                else ""
+            )
             if (
-                market != "TW"
+                market not in ("TW", "US")
                 or target_market_date > generated_at.astimezone(TAIPEI).date()
                 or document.get("target_market_date") != target_text
                 or document.get("observation_as_of") != target_text
@@ -492,27 +509,26 @@ def _validated_artifact(
                 or latest_daily != document.get("as_of")
                 or latest_summary != document.get("as_of")
                 or not isinstance(lineage, dict)
-                or lineage.get("source_schema_version")
-                != "tw-official-historical-v3"
+                or lineage.get("source_schema_version") != expected_lineage_version
                 or lineage.get("observation_as_of") != target_text
                 or lineage.get("latest_regular_price_date")
                 != document.get("as_of")
                 or lineage.get("observation_kind") != observation_kind
             ):
-                raise ValueError("TW observation artifact mismatch")
+                raise ValueError("observation artifact mismatch")
             if observation_kind == "regular_price":
-                if as_of != target_market_date or status is not None:
+                if as_of != target_text or status is not None:
                     raise ValueError("regular price observation mismatch")
             elif observation_kind in {
                 "official_no_regular_trade",
                 "officially_suspended",
             }:
                 if (
-                    as_of >= target_market_date
+                    datetime.date.fromisoformat(as_of) >= target_market_date
                     or not isinstance(status, dict)
                     or status.get("schema_version") != 1
                     or status.get("status") != observation_kind
-                    or status.get("market") != "TW"
+                    or status.get("market") != market
                     or status.get("symbol") != symbol
                     or status.get("target_market_date") != target_text
                     or status.get("evidence_sha256") != evidence_sha256(status)
@@ -527,7 +543,7 @@ def _validated_artifact(
                 ):
                     raise ValueError("trading status observation mismatch")
             else:
-                raise ValueError("unknown TW observation kind")
+                raise ValueError(f"unknown {market} observation kind")
     except (KeyError, OSError, TypeError, UnicodeError, ValueError) as exc:
         raise RuntimeError(f"artifact is invalid for {market}:{symbol}") from exc
     return path, compressed, document, len(decoded)
@@ -546,8 +562,6 @@ def publish_market_snapshot(
     if market not in ("TW", "US"):
         raise ValueError("unsupported market")
     if target_market_date is not None:
-        if market != "TW":
-            raise ValueError("status-aware manifests are TW-only")
         if not isinstance(target_market_date, datetime.date):
             target_market_date = datetime.date.fromisoformat(
                 str(target_market_date)
@@ -596,7 +610,11 @@ def publish_market_snapshot(
             "size": len(compressed),
             "uncompressed_size": uncompressed_size,
             "as_of": document["as_of"],
-            "model_version": str(document.get("model_version") or "unknown"),
+            "model_version": (
+                str(document["model_version"])
+                if document.get("model_version") is not None
+                else None
+            ),
         }
         if target_market_date is not None:
             candidates[symbol].update(
@@ -629,7 +647,7 @@ def publish_market_snapshot(
     else:
         market_as_of = None
     failure_rate = len(excluded) / len(symbols)
-    threshold_percent = 5 if market == "TW" else 25
+    threshold_percent = 5
     if len(excluded) * 100 >= len(symbols) * threshold_percent or not candidates:
         detail = f"; {errors[0]}" if errors else ""
         raise RuntimeError(
@@ -1770,17 +1788,29 @@ def build_stock_snapshot(
         "backtest": backtest,
         "daily": daily,
     }
-    if market == "TW" and target_market_date is not None:
+    if market in ("TW", "US") and target_market_date is not None:
+        observation_kind = (
+            trading_status["status"]
+            if trading_status is not None
+            else "regular_price"
+        )
+        lineage_schema = (
+            "tw-official-historical-v3"
+            if market == "TW"
+            else "us-market-data-v1"
+        )
         result.update(
             schema_version=2,
             target_market_date=target_market_date.isoformat(),
             observation_as_of=target_market_date.isoformat(),
             latest_regular_price_date=as_of,
-            observation_kind=(
-                trading_status["status"]
-                if trading_status is not None
-                else "regular_price"
-            ),
+            observation_kind=observation_kind,
+            lineage={
+                "source_schema_version": lineage_schema,
+                "observation_as_of": target_market_date.isoformat(),
+                "latest_regular_price_date": as_of,
+                "observation_kind": observation_kind,
+            },
         )
         if trading_status is not None:
             result["trading_status_evidence"] = trading_status

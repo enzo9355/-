@@ -331,7 +331,8 @@ def _publish_report_v2_impl(
     metadata_bytes = _json_bytes(document)
     metadata_sha = hashlib.sha256(metadata_bytes).hexdigest()
     metadata_relative = f"metadata/{metadata_sha}.json"
-    index_path = publish / "index-TW.json"
+    market = document.get("market", "TW")
+    index_path = publish / f"index-{market}.json"
     previous_index = index_path.read_bytes() if index_path.exists() else None
     if previous_index is not None:
         try:
@@ -427,7 +428,7 @@ def _publish_report_v2_impl(
     index = {
         "schema_version": 2,
         "kind": "absorb-report-index",
-        "market": "TW",
+        "market": market,
         "updated_at": reports[0]["published_at"],
         "reports": reports[: settings.index_history_days * 3],
     }
@@ -437,7 +438,7 @@ def _publish_report_v2_impl(
     latest = {
         "schema_version": 2,
         "kind": "absorb-report",
-        "market": "TW",
+        "market": market,
         "report_type": document["report_type"],
         "source_market_date": document["source_market_date"],
         "applicable_trading_date": document["applicable_trading_date"],
@@ -447,7 +448,7 @@ def _publish_report_v2_impl(
     }
     if document.get("product_mode") is not None:
         latest["product_mode"] = document["product_mode"]
-    latest_path = publish / f"latest-TW-{document['report_type']}.json"
+    latest_path = publish / f"latest-{market}-{document['report_type']}.json"
     _write_atomic(index_path, index_bytes)
     _write_atomic(latest_path, _json_bytes(latest))
     return latest_path
@@ -467,8 +468,8 @@ def publish_report_v2(
     with report_v2_publish_lock(Path(root)):
         schema = ReportMetadataV2.from_document(metadata)
         publish = Path(root) / "publish" / "reports" / "v2"
-        index_path = publish / "index-TW.json"
-        latest_path = publish / f"latest-TW-{schema.report_type}.json"
+        index_path = publish / f"index-{schema.market}.json"
+        latest_path = publish / f"latest-{schema.market}-{schema.report_type}.json"
         previous_index = index_path.read_bytes() if index_path.exists() else None
         previous_latest = latest_path.read_bytes() if latest_path.exists() else None
         newly_created_paths: list[Path] = []
