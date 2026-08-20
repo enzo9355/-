@@ -72,17 +72,20 @@ function Invoke-Gcloud {
 
     $PreviousPythonPath = $env:PYTHONPATH
     $PreviousWhatIfPreference = $WhatIfPreference
+    $PreviousErrorAction = $ErrorActionPreference
     try {
         # gcloud.cmd invokes a PowerShell wrapper whose environment setup also
         # honors WhatIf. Read-only preflight must still execute so the outer
         # ShouldProcess decision can be made from real service state.
         $WhatIfPreference = $false
+        $ErrorActionPreference = 'Continue'
         $env:PYTHONPATH = $null
         $Output = & $Gcloud @Arguments 2>&1
         $ExitCode = $LASTEXITCODE
     } finally {
         $env:PYTHONPATH = $PreviousPythonPath
         $WhatIfPreference = $PreviousWhatIfPreference
+        $ErrorActionPreference = $PreviousErrorAction
     }
     if ($ExitCode -ne 0) {
         throw "gcloud command failed with exit code ${ExitCode}: $($Output | Out-String)"
