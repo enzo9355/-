@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet('TW-PostClose', 'TW-PreMarket', 'FullBacktest', 'US-Daily', 'WeeklyModel', 'ReportUploadRecovery')]
+    [ValidateSet('TW-PostClose', 'TW-PreMarket', 'US-PostClose', 'US-PreMarket', 'FullBacktest', 'US-Daily', 'WeeklyModel', 'ReportUploadRecovery')]
     [string]$Job,
     [string]$DataRoot = 'D:\AbsorbData'
 )
@@ -12,6 +12,8 @@ if ($DataRoot -ne 'D:\AbsorbData') { throw 'Data root is not allowlisted' }
 $Definitions = @{
     'TW-PostClose' = @{ Script = 'run_tw_post_close_pipeline.ps1'; Arguments = @('-PublishObservation') }
     'TW-PreMarket' = @{ Script = 'run_tw_pre_market_pipeline.ps1'; Arguments = @() }
+    'US-PostClose' = @{ Script = 'run_us_post_close_pipeline.ps1'; Arguments = @('-PublishObservation') }
+    'US-PreMarket' = @{ Script = 'run_us_pre_market_pipeline.ps1'; Arguments = @() }
     'FullBacktest' = @{ Script = 'run_full_backtest.ps1'; Arguments = @('-MaxItems', '500') }
     'US-Daily' = @{ Script = 'run_us_daily.ps1'; Arguments = @() }
     'WeeklyModel' = @{ Script = 'run_weekly_model.ps1'; Arguments = @() }
@@ -34,6 +36,8 @@ $Arguments = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-
 $ObservationWriterJobs = @(
     'TW-PostClose',
     'TW-PreMarket',
+    'US-PostClose',
+    'US-PreMarket',
     'WeeklyModel',
     'ReportUploadRecovery'
 )

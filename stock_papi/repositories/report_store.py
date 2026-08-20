@@ -10,9 +10,11 @@ def _version(value):
     return value
 
 
-def load_report_index(*, load_object, max_bytes, version="v1"):
+def load_report_index(*, load_object, max_bytes, version="v1", market="TW"):
     version = _version(version)
-    content = load_object(f"reports/{version}/index-TW.json", max_bytes)
+    if market not in ("TW", "US"):
+        raise ValueError("unsupported report store market")
+    content = load_object(f"reports/{version}/index-{market}.json", max_bytes)
     return (
         None
         if content is None

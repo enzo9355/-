@@ -139,7 +139,7 @@ def build_stock_observation(snapshot):
     if as_of != snapshot.get("as_of"):
         return None
     if schema_version == 2 and (
-        snapshot.get("market") != "TW"
+        snapshot.get("market") not in {"TW", "US"}
         or snapshot.get("observation_kind") != "regular_price"
         or snapshot.get("trading_status_evidence") is not None
         or _date_text(snapshot.get("target_market_date")) != as_of

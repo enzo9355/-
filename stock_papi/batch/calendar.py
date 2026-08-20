@@ -8,6 +8,11 @@ from dataclasses import dataclass
 TWSE_CALENDAR_URL = (
     "https://openapi.twse.com.tw/v1/holidaySchedule/holidaySchedule"
 )
+NYSE_CALENDAR_URL = "https://www.nyse.com/markets/hours-calendars"
+VALID_CALENDAR_URLS = {
+    "TW": {TWSE_CALENDAR_URL},
+    "US": {NYSE_CALENDAR_URL, "https://www.sec.gov/edgar/searchedgar/companysearch"},
+}
 
 
 class CalendarError(ValueError):
@@ -56,19 +61,22 @@ class TradingCalendar:
     valid_to: datetime.date
     closed_dates: frozenset[datetime.date]
     special_open_dates: frozenset[datetime.date]
+    early_closed_dates: frozenset[datetime.date] = frozenset()
 
     @classmethod
     def from_document(cls, document):
         if not isinstance(document, dict):
             raise CalendarError("calendar artifact 必須是 JSON object")
+        market = document.get("market")
         year = document.get("year")
+        source_url = document.get("source_url")
         source_sha256 = str(document.get("source_sha256") or "")
         if (
             document.get("schema_version") != 1
-            or document.get("market") != "TW"
+            or market not in ("TW", "US")
             or type(year) is not int
             or not 2000 <= year <= 2200
-            or document.get("source_url") != TWSE_CALENDAR_URL
+            or source_url not in VALID_CALENDAR_URLS.get(market, set())
             or re.fullmatch(r"[0-9a-f]{64}", source_sha256) is None
         ):
             raise CalendarError("calendar artifact schema 不合法")
@@ -81,20 +89,26 @@ class TradingCalendar:
             raise CalendarError("calendar artifact 未涵蓋完整年度")
         closed_dates = _date_set(document.get("closed_dates"), year, "closed_dates")
         special_open_dates = _date_set(
-            document.get("special_open_dates"), year, "special_open_dates"
+            document.get("special_open_dates", []), year, "special_open_dates"
+        )
+        early_closed_dates = _date_set(
+            document.get("early_closed_dates", []), year, "early_closed_dates"
         )
         if closed_dates & special_open_dates:
             raise CalendarError("開市與休市日期不可重疊")
+        if closed_dates & early_closed_dates:
+            raise CalendarError("休市與提前收市日期不可重疊")
         return cls(
-            market="TW",
+            market=market,
             year=year,
-            source_url=TWSE_CALENDAR_URL,
+            source_url=source_url,
             fetched_at=_aware_datetime(document.get("fetched_at"), "fetched_at"),
             source_sha256=source_sha256,
             valid_from=valid_from,
             valid_to=valid_to,
             closed_dates=closed_dates,
             special_open_dates=special_open_dates,
+            early_closed_dates=early_closed_dates,
         )
 
     def is_session(self, value):
@@ -103,6 +117,11 @@ class TradingCalendar:
         if value in self.special_open_dates:
             return True
         return value.weekday() < 5 and value not in self.closed_dates
+
+    def is_early_close(self, value):
+        if not self.valid_from <= value <= self.valid_to:
+            raise CalendarError("日期超出 calendar artifact 範圍")
+        return value in self.early_closed_dates
 
 
 class TradingCalendarSet:

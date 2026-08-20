@@ -260,9 +260,18 @@ def _validate_manifest_v4(document: dict[str, Any], market: str) -> None:
         operational_count,
         denominator,
     )
+    symbol_pattern = (
+        re.compile(r"^[0-9]{4,6}$")
+        if market == "TW"
+        else re.compile(r"^[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)?$")
+    )
+    def _valid_sym(item):
+        s = str(item)
+        return (len(s) <= 10 if market == "US" else True) and bool(symbol_pattern.fullmatch(s))
+
     if (
         document.get("schema_version") != 4
-        or market != "TW"
+        or market not in ("TW", "US")
         or document.get("market") != market
         or "market_as_of" in document
         or observation != target
@@ -275,9 +284,9 @@ def _validate_manifest_v4(document: dict[str, Any], market: str) -> None:
         or not isinstance(unavailable, list)
         or not isinstance(operational, list)
         or len(set(unavailable)) != len(unavailable)
-        or any(re.fullmatch(r"[0-9]{4,6}", str(item)) is None for item in unavailable)
+        or any(not _valid_sym(item) for item in unavailable)
         or len(set(operational)) != len(operational)
-        or any(re.fullmatch(r"[0-9]{4,6}", str(item)) is None for item in operational)
+        or any(not _valid_sym(item) for item in operational)
         or len(symbols) != observation_count
         or len(expected) != status_count
         or len(unavailable) != unavailable_count
@@ -302,7 +311,7 @@ def _validate_manifest_v4(document: dict[str, Any], market: str) -> None:
         raise ReportSourceError("manifest v4 consistency check failed")
     for symbol, status in expected.items():
         if (
-            re.fullmatch(r"[0-9]{4,6}", str(symbol)) is None
+            not _valid_sym(symbol)
             or not isinstance(status, dict)
             or status.get("status")
             not in {"official_no_regular_trade", "officially_suspended"}
@@ -390,7 +399,12 @@ def _load_manifest_source(
     stocks = []
     for symbol in sorted(manifest["symbols"]):
         entry = manifest["symbols"][symbol]
-        if not isinstance(entry, dict) or re.fullmatch(r"[0-9]{4,6}", str(symbol)) is None:
+        valid_sym = (
+            bool(re.fullmatch(r"[0-9]{4,6}", str(symbol)))
+            if market == "TW"
+            else (len(str(symbol)) <= 10 and bool(re.fullmatch(r"^[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)?$", str(symbol))))
+        )
+        if not isinstance(entry, dict) or not valid_sym:
             raise ReportSourceError("manifest symbol entry is invalid")
         relative = str(entry.get("path") or "")
         digest = str(entry.get("sha256") or "")
@@ -633,17 +647,17 @@ def load_report_source(
 ) -> LoadedReportSource:
     """從 latest 指標安全載入 manifest 所列的台股快照。"""
     settings = config or ReportConfig(root=Path(root), market=market)
-    if market != "TW":
-        raise ReportSourceError("第一階段只支援 TW 日報")
+    if market not in ("TW", "US"):
+        raise ReportSourceError(f"unsupported market {market}")
     publish = Path(root) / "publish" / "quant" / "v1"
-    latest = _json_object(_read_limited(publish / "latest-TW.json", 100_000, "latest"), "latest")
+    latest = _json_object(_read_limited(publish / f"latest-{market}.json", 100_000, "latest"), "latest")
     manifest_relative = str(latest.get("manifest") or "")
     manifest_sha = str(latest.get("manifest_sha256") or "")
     latest_schema = latest.get("schema_version")
     if (
         latest_schema not in {2, 3, 4}
         or latest.get("market") != market
-        or re.fullmatch(r"manifests/TW-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}\.json", manifest_relative) is None
+        or re.fullmatch(r"manifests/(?:TW|US)-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}\.json", manifest_relative) is None
         or re.fullmatch(r"[0-9a-f]{64}", manifest_sha) is None
     ):
         raise ReportSourceError("latest pointer is invalid")

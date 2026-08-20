@@ -57,6 +57,7 @@ class ReportMetadataV2:
         except (KeyError, TypeError, ValueError) as exc:
             raise ValueError("report metadata v2 日期不合法") from exc
         report_type = document.get("report_type")
+        market = str(document.get("market") or "TW")
         product_mode = document.get("product_mode")
         manifest = str(document.get("source_manifest") or "")
         manifest_sha = str(document.get("source_manifest_sha256") or "")
@@ -155,7 +156,7 @@ class ReportMetadataV2:
         if (
             report_type not in REPORT_TYPES
             or product_mode not in {None, "observation"}
-            or document.get("market") != "TW"
+            or document.get("market") not in {"TW", "US"}
             or published.tzinfo is None
             or published.utcoffset() is None
             or source > applicable
@@ -164,7 +165,7 @@ class ReportMetadataV2:
             or (backtest_as_of is not None and backtest_as_of > source)
             or data_as_of > source
             or re.fullmatch(
-                r"quant/v1/manifests/TW-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}\.json",
+                r"quant/v1/manifests/(?:TW|US)-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}\.json",
                 manifest,
             )
             is None
@@ -217,7 +218,7 @@ class ReportMetadataV2:
             raise ValueError("report metadata v2 content 不合法") from exc
         return cls(
             report_type=report_type,
-            market="TW",
+            market=market,
             source_market_date=source,
             applicable_trading_date=applicable,
             published_at=published,

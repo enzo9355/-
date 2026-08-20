@@ -68,8 +68,8 @@ class ReportConfig:
     index_history_days: int = 365
 
     def __post_init__(self) -> None:
-        if self.market != "TW":
-            raise ValueError("第一階段只支援 TW 日報")
+        if self.market not in ("TW", "US"):
+            raise ValueError("只支援 TW 與 US 日報")
         if (
             self.prediction_horizon != 5
             or self.entry_threshold != 60.0
