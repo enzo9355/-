@@ -296,10 +296,14 @@ function Invoke-ObservationSmoke {
             -UseBasicParsing `
             -MaximumRedirection 0 `
             -TimeoutSec 45
-        $Body = [string]$Response.Content
+        $HasExpectedContent = if ($ReportType -eq 'post-close') {
+            $Body -like '*market-actuals-title*' -or $Body -like '*professional-report*' -or $Body -like '*report-masthead*'
+        } else {
+            $Body -like "*$($CanonicalReportPaths[$ReportType])*"
+        }
         if (
             [int]$Response.StatusCode -ne 200 -or
-            $Body -notlike "*$($CanonicalReportPaths[$ReportType])*" -or
+            -not $HasExpectedContent -or
             $Body -match 'forecast_probability|ranking_score|model_version|backtest_version'
         ) {
             throw "Observation report smoke failed: $ReportType"
