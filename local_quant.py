@@ -468,10 +468,16 @@ def _validated_artifact(
             ):
                 raise ValueError("artifact schema mismatch")
             _validate_json_value(document)
-            from stock_papi.integrations.market_data.tw_trading_status import (
-                evidence_sha256,
-                validate_status_evidence,
-            )
+            if market == "TW":
+                from stock_papi.integrations.market_data.tw_trading_status import (
+                    evidence_sha256,
+                    validate_status_evidence,
+                )
+            else:
+                from stock_papi.integrations.market_data.us_trading_status import (
+                    evidence_sha256,
+                    validate_us_status_evidence as validate_status_evidence,
+                )
 
             as_of = str(document.get("as_of") or "")
             daily = document["daily"]
