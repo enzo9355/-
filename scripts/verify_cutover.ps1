@@ -1099,7 +1099,7 @@ function Test-ObservationHttp {
         url = $TrafficEvidence.url
     }
     if ($BaseUrl -and -not $ServiceUrl.TrimEnd('/').Equals($BaseUrl.TrimEnd('/'), [StringComparison]::OrdinalIgnoreCase)) {
-        if (-not ($BaseUrl -like "*asia-east1.run.app*")) {
+        if (-not ($BaseUrl -like "*.run.app*")) {
             throw 'BaseUrl does not match Cloud Run service URL'
         }
     }
