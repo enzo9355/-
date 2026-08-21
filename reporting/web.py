@@ -243,10 +243,11 @@ def validate_report_metadata(
         return _validate_report_metadata_v2(document, item)
     if version != 1:
         raise ReportWebError("報告 metadata schema 不支援")
+    market = item.get("market") or document.get("market") or "TW"
     expected = {
         "schema_version": 1,
         "kind": "daily-industry-report",
-        "market": item.get("market", "TW"),
+        "market": market,
         "report_date": item["report_date"],
         "data_as_of": item["data_as_of"],
         "pdf_path": item["pdf_path"],
@@ -271,9 +272,10 @@ def validate_report_metadata(
 
 
 def _validate_report_metadata_v2(document: dict, item: dict) -> dict:
+    market = item.get("market") or document.get("market") or "TW"
     expected = {
         "schema_version": 2,
-        "market": item.get("market", "TW"),
+        "market": market,
         "report_type": item["report_type"],
         "source_market_date": item["source_market_date"],
         "applicable_trading_date": item["applicable_trading_date"],
