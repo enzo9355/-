@@ -81,7 +81,7 @@ def fetch_us_stock_history(
         raw_df = yf_ticker.history(period=period_str, auto_adjust=False)
 
     if raw_df is None or raw_df.empty:
-        raise ValueError(f"US price history is unavailable for {symbol}")
+        return pd.DataFrame()
 
     # Standardize column names
     required_cols = {"Open", "High", "Low", "Close", "Volume"}
@@ -105,18 +105,24 @@ def fetch_us_stock_history(
 
     # Filter out invalid numbers
     df = df.dropna(subset=["Close", "Open", "High", "Low"])
-    df = df[(df["Close"] > 0) & (df["High"] > 0) & (df["Low"] > 0) & (df["Open"] > 0)]
+    if df.empty:
+        return pd.DataFrame()
 
-    # Sanity checks
-    df["High"] = df[["High", "Close", "Open"]].max(axis=1)
-    df["Low"] = df[["Low", "Close", "Open"]].min(axis=1)
+    # Integrity validations (fail-closed, no silent mutation of market facts)
+    if ((df["Close"] <= 0) | (df["High"] <= 0) | (df["Low"] <= 0) | (df["Open"] <= 0)).any():
+        raise ValueError(f"US price bar integrity violation for {symbol}: non-positive price values")
+    if (df["Volume"] < 0).any():
+        raise ValueError(f"US price bar integrity violation for {symbol}: negative volume")
+
+    invalid_high = df["High"] < df[["Open", "Close", "Low"]].max(axis=1)
+    invalid_low = df["Low"] > df[["Open", "Close", "High"]].min(axis=1)
+    if invalid_high.any() or invalid_low.any():
+        raise ValueError(f"US price bar integrity violation for {symbol}: High/Low outside Open/Close range")
 
     if target_market_date is not None:
         df = df[df.index <= target_market_date]
         if df.empty:
-            raise ValueError(
-                f"point-in-time US price history is unavailable for {symbol} at {target_market_date}"
-            )
+            return pd.DataFrame()
 
     # Compute technical indicators
     df = compute_us_technical_indicators(df)
