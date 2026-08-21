@@ -19,6 +19,8 @@ $Definitions = @(
   @{ Name='ABSORB-TW-PreMarket'; Job='TW-PreMarket'; Time='07:30' },
   @{ Name='ABSORB-FullBacktest'; Job='FullBacktest'; Time='22:30'; RepeatMinutes=1 },
   @{ Name='ABSORB-US-Daily'; Job='US-Daily'; Time='05:30' },
+  @{ Name='ABSORB-US-PostClose'; Job='US-PostClose'; Time='05:00'; RepetitionInterval='PT20M'; RepetitionDuration='PT4H00M' },
+  @{ Name='ABSORB-US-PreMarket'; Job='US-PreMarket'; Time='20:30' },
   @{ Name='ABSORB-WeeklyModel'; Job='WeeklyModel'; Time='18:00'; Days=$WeeklyDay },
   @{ Name='ABSORB-ReportUploadRecovery'; Job='ReportUploadRecovery'; Time='09:35' }
 )
