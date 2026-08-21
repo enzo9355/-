@@ -246,7 +246,7 @@ def validate_report_metadata(
     expected = {
         "schema_version": 1,
         "kind": "daily-industry-report",
-        "market": "TW",
+        "market": item.get("market", "TW"),
         "report_date": item["report_date"],
         "data_as_of": item["data_as_of"],
         "pdf_path": item["pdf_path"],
@@ -273,7 +273,7 @@ def validate_report_metadata(
 def _validate_report_metadata_v2(document: dict, item: dict) -> dict:
     expected = {
         "schema_version": 2,
-        "market": "TW",
+        "market": item.get("market", "TW"),
         "report_type": item["report_type"],
         "source_market_date": item["source_market_date"],
         "applicable_trading_date": item["applicable_trading_date"],

@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import datetime
+import hashlib
 import json
 from pathlib import Path
 import sys
@@ -174,6 +175,25 @@ def run_us_post_close(
         source, US_INDUSTRY_MAP, pred_cap, generated_at=now, today=target_market_date
     )
 
+    dashboard_bytes = json.dumps(
+        dashboard, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False
+    ).encode("utf-8")
+    content = {
+        "dashboard_sha256": hashlib.sha256(dashboard_bytes).hexdigest(),
+        "market_observation": dashboard["market_observation"],
+        "industry_observations": dashboard["industry_observations"],
+        "heatmap": dashboard.get("heatmap", []),
+        "stock_events": dashboard["stock_events"],
+        "trading_status_observations": dashboard.get("trading_status_observations", []),
+        "etf_observations": dashboard["etf_observations"],
+        "daily_focus": dashboard["daily_focus"],
+        "data_quality": dashboard["data_quality"],
+    }
+    content_bytes = json.dumps(
+        content, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False
+    ).encode("utf-8")
+    content_sha256 = hashlib.sha256(content_bytes).hexdigest()
+
     report_metadata = {
         "schema_version": 2,
         "kind": "absorb-report",
@@ -194,17 +214,8 @@ def run_us_post_close(
         "title": f"ABSORB 美股盤後市場觀察報告 ({target_market_date})",
         "summary": [f"美股 {target_market_date} 交易日收盤觀察與市場結構概況。"],
         "warnings": [],
-        "content": {
-            "market_observation": dashboard["market_observation"],
-            "industry_observations": dashboard["industry_observations"],
-            "heatmap": dashboard.get("heatmap", []),
-            "data_quality": dashboard["data_quality"],
-            "stock_events": dashboard["stock_events"],
-            "trading_status_observations": dashboard.get("trading_status_observations", []),
-            "etf_observations": dashboard["etf_observations"],
-            "daily_focus": dashboard["daily_focus"],
-        },
-        "content_sha256": source.manifest.manifest_sha256,
+        "content": content,
+        "content_sha256": content_sha256,
         "prediction_capability": pred_cap.to_document(),
     }
 
