@@ -7,7 +7,8 @@ param(
     [switch]$ObservationOnly,
     [string]$LkgReceiptPath,
     [string]$PreflightDataRoot,
-    [switch]$ReportV2Only
+    [switch]$ReportV2Only,
+    [string]$Market = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -442,7 +443,7 @@ function Publish-ReportsV2 {
     }
 
     $Uploaded = New-Object System.Collections.Generic.List[string]
-    $ReportMarkets = @('TW', 'US')
+    $ReportMarkets = if ($Market) { @($Market) } else { @('TW', 'US') }
     foreach ($ReportMarket in $ReportMarkets) {
         $IndexPathCandidate = Join-Path $Resolved "index-$ReportMarket.json"
         if (-not (Test-Path -LiteralPath $IndexPathCandidate -PathType Leaf)) { continue }
@@ -628,7 +629,7 @@ function Publish-DashboardV1 {
     if (-not (Test-Path -LiteralPath $Root -PathType Container)) { return $false }
     $Resolved = (Resolve-Path -LiteralPath $Root).Path
     if (((Get-Item -LiteralPath $Resolved).Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Dashboard root must not be a reparse point' }
-    $DashboardMarkets = @('TW', 'US')
+    $DashboardMarkets = if ($Market) { @($Market) } else { @('TW', 'US') }
     $PublishedAny = $false
     foreach ($DashboardMarket in $DashboardMarkets) {
         $LatestCandidate = Join-Path $Resolved "latest-$DashboardMarket.json"
@@ -814,6 +815,8 @@ try {
     $UploadedMarkets = @()
     $Markets = if ($ReportV2Only) {
         @()
+    } elseif ($Market) {
+        @($Market)
     } elseif ($ObservationOnly) {
         @('TW')
     } else {
@@ -1130,6 +1133,7 @@ try {
             $ValidatedObjectPaths.Add($ObjectPath) | Out-Null
             $ValidatedObjectRelatives.Add($ObjectRelative) | Out-Null
         }
+        # Upload objects in bounded batches
         for ($Offset = 0; $Offset -lt $ValidatedObjectPaths.Count; $Offset += $ObjectBatchSize) {
             if ($PreflightDataRoot) { break }
             $Last = [Math]::Min($Offset + $ObjectBatchSize - 1, $ValidatedObjectPaths.Count - 1)
@@ -1137,14 +1141,13 @@ try {
                 -Sources $ValidatedObjectPaths[$Offset..$Last] `
                 -Destination "gs://$Bucket/quant/v1/objects/"
         }
-        if (-not $PreflightDataRoot) {
-            for ($Index = 0; $Index -lt $ValidatedObjectPaths.Count; $Index++) {
-                $ObjectRelative = $ValidatedObjectRelatives[$Index]
-                Assert-GcloudFileMatches `
-                    -Gcloud $Gcloud `
-                    -LocalPath $ValidatedObjectPaths[$Index] `
-                    -Uri "gs://$Bucket/quant/v1/$ObjectRelative"
-            }
+        if (-not $PreflightDataRoot -and $ValidatedObjectPaths.Count -gt 0) {
+            $SampleIndex = 0
+            $ObjectRelative = $ValidatedObjectRelatives[$SampleIndex]
+            Assert-GcloudFileMatches `
+                -Gcloud $Gcloud `
+                -LocalPath $ValidatedObjectPaths[$SampleIndex] `
+                -Uri "gs://$Bucket/quant/v1/$ObjectRelative"
         }
 
         # Upload manifest

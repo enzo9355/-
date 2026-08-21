@@ -211,6 +211,12 @@ def register_report_routes(
                 )
             elif report_type == "post_close":
                 canonical_ptr = metadata.get("professional_report")
+                if canonical_ptr is None and metadata.get("product_mode") == "observation":
+                    report = build_observation_report_view(metadata)
+                    response = make_response(
+                        render_template("report_observation.html", report=report)
+                    )
+                    return _secure_response(response)
                 if not isinstance(canonical_ptr, dict):
                     raise ReportWebError("報告 Canonical Object 指標遺失")
 

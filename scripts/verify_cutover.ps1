@@ -1098,6 +1098,11 @@ function Test-ObservationHttp {
         percent = $TrafficEvidence.percent
         url = $TrafficEvidence.url
     }
+    if ($BaseUrl -and -not $ServiceUrl.TrimEnd('/').Equals($BaseUrl.TrimEnd('/'), [StringComparison]::OrdinalIgnoreCase)) {
+        if (-not ($BaseUrl -like "*asia-east1.run.app*")) {
+            throw 'BaseUrl does not match Cloud Run service URL'
+        }
+    }
     $Target = if ($BaseUrl) { $BaseUrl } else { $ServiceUrl }
     if (-not $Target) { throw 'Observation HTTP base URL is unavailable' }
     foreach ($Path in @(
