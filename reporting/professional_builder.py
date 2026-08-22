@@ -164,7 +164,16 @@ def _validate_flow_value(val: Any) -> tuple[bool, float | None]:
     return True, f
 
 
-def _build_capital_flows(data: Any, source_date: str) -> dict[str, Any]:
+def _build_capital_flows(
+    data: Any, source_date: str, *, market: str = "TW"
+) -> dict[str, Any]:
+    if market == "US":
+        return {
+            "status": "unavailable",
+            "reason": "美國市場機構資金流向尚未納入目前的已驗證 Observation Artifact",
+            "data": {},
+        }
+
     if not isinstance(data, dict) or not data:
         return {
             "status": "unavailable",
@@ -378,7 +387,9 @@ def build_professional_post_close_artifact(
             "data_as_of": source_date,
             "data": copy.deepcopy(dict(market)),
         },
-        "capital_flows": _build_capital_flows(content.get("capital_flows"), source_date),
+        "capital_flows": _build_capital_flows(
+            content.get("capital_flows"), source_date, market=report_market
+        ),
         "industries": {
             "status": "available",
             "data_as_of": source_date,
