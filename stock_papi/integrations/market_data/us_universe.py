@@ -5,6 +5,7 @@ import hashlib
 import json
 import re
 import urllib.request
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -27,8 +28,11 @@ NASDAQ_SYMBOL_DIRECTORY_URLS = (
         "nasdaqtrader:otherlisted",
     ),
 )
+NYSE_SYMBOL_MAPPING_INDEX_URL = "https://ftp.nyse.com/NYSESymbolMapping/"
 SEC_US_UNIVERSE_MAX_BYTES = 15 * 1024 * 1024
 NASDAQ_SYMBOL_DIRECTORY_MAX_BYTES = 8 * 1024 * 1024
+NYSE_SYMBOL_MAPPING_INDEX_MAX_BYTES = 2 * 1024 * 1024
+NYSE_SYMBOL_MAPPING_MAX_BYTES = 12 * 1024 * 1024
 US_ACCEPTED_EXCHANGES = frozenset(
     {"NASDAQ", "NYSE", "CBOE", "BATS", "NYS", "ASE", "AMEX"}
 )
@@ -82,6 +86,17 @@ SUPPORTED_SECURITY_TYPES = frozenset(
 )
 DERIVATIVE_SECURITY_TYPES = frozenset({"WARRANT", "RIGHT", "UNIT", "PREFERRED"})
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+NYSE_SECURITY_TYPE_CODES = {
+    "C": "COMMON_EQUITY",
+    "E": "ETF",
+    "H": "ADR",
+    "I": "UNIT",
+    "M": "PREFERRED",
+    "O": "COMMON_EQUITY",
+    "P": "PREFERRED",
+    "R": "RIGHT",
+    "W": "WARRANT",
+}
 
 
 def _canonical_bytes(value: Any) -> bytes:
@@ -134,6 +149,105 @@ def _directory_as_of(text: str) -> str | None:
         return None
 
 
+def _official_security_type_from_name(name: str, *, etf: str | None = None) -> str:
+    """Classify only from fields published by an exchange directory."""
+    name_lower = str(name or "").strip().lower()
+    if re.search(r"\bunit(?:s)?\b", name_lower):
+        return "UNIT"
+    if re.search(r"\bwarrant(?:s)?\b", name_lower):
+        return "WARRANT"
+    if re.search(r"\bright(?:s)?(?:\s*,|\s*$|\s+each|\s+entitl)", name_lower):
+        return "RIGHT"
+    if str(etf or "").strip().upper() == "Y":
+        return "ETF"
+    if re.search(r"american depositary|\badr(?:s)?\b|\bads\b", name_lower):
+        return "ADR"
+    if "preferred" in name_lower or "preference" in name_lower:
+        return "PREFERRED"
+    if re.search(r"\b(?:common stock|common shares?|ordinary shares?)\b", name_lower):
+        return "COMMON_EQUITY"
+    return "UNKNOWN"
+
+
+def _official_symbol_aliases(
+    value: str,
+    *,
+    security_type: str | None = None,
+) -> set[str]:
+    """Return conservative SEC-ticker aliases for exchange-native symbols."""
+    raw = str(value or "").strip()
+    if not raw:
+        return set()
+    upper = raw.upper()
+    aliases: set[str] = set()
+    p_marker = re.fullmatch(r"^(.+)[p]([A-Z])$", raw) is not None
+
+    def add(candidate: str) -> None:
+        candidate = re.sub(r"\s+", "-", str(candidate or "").strip().upper())
+        if not candidate:
+            return
+        try:
+            aliases.add(validate_us_ticker(candidate))
+        except ValueError:
+            return
+
+    if not p_marker:
+        add(upper)
+
+    if "$" in upper:
+        root, suffix = upper.split("$", 1)
+        if suffix:
+            add(f"{root}-P{suffix}")
+        else:
+            add(f"{root}-P")
+
+    if raw and re.fullmatch(r"^(.+)[p]([A-Z])$", raw):
+        match = re.fullmatch(r"^(.+)[p]([A-Z])$", raw)
+        assert match is not None
+        add(f"{match.group(1)}-P{match.group(2)}")
+
+    if upper.endswith("="):
+        add(upper[:-1] + "-UN")
+    elif upper.endswith("+"):
+        add(upper[:-1] + "-WT")
+    elif upper.endswith("^"):
+        add(upper[:-1] + "-RI")
+
+    if "." in upper:
+        root, suffix = upper.rsplit(".", 1)
+        if suffix == "U":
+            add(f"{root}-UN")
+        elif suffix in {"W", "WS", "WT"}:
+            add(f"{root}-WT")
+        elif suffix in {"R", "RT"}:
+            add(f"{root}-RI")
+        elif security_type == "WARRANT" and re.fullmatch(r"[A-Z]", suffix):
+            add(f"{root}-WT{suffix}")
+        elif security_type == "RIGHT" and re.fullmatch(r"[A-Z]", suffix):
+            add(f"{root}-RI{suffix}")
+        elif security_type == "UNIT" and re.fullmatch(r"[A-Z]", suffix):
+            add(f"{root}-UN{suffix}")
+        else:
+            add(f"{root}-{suffix}")
+
+    if re.fullmatch(r"^(.+)\s+PR[A-Z]$", upper):
+        match = re.fullmatch(r"^(.+)\s+PR([A-Z])$", upper)
+        assert match is not None
+        add(f"{match.group(1)}-P{match.group(2)}")
+    elif re.fullmatch(r"^(.+)\s+P[A-Z]$", upper):
+        match = re.fullmatch(r"^(.+)\s+P([A-Z])$", upper)
+        assert match is not None
+        add(f"{match.group(1)}-P{match.group(2)}")
+    elif re.fullmatch(r"^(.+)\s+U$", upper):
+        add(upper[:-2] + "-UN")
+    elif re.fullmatch(r"^(.+)\s+(?:WS|W)$", upper):
+        add(upper.rsplit(" ", 1)[0] + "-WT")
+    elif re.fullmatch(r"^(.+)\s+(?:RT|R)$", upper):
+        add(upper.rsplit(" ", 1)[0] + "-RI")
+
+    return aliases
+
+
 def parse_nasdaq_security_directory(
     text: str,
     *,
@@ -168,33 +282,45 @@ def parse_nasdaq_security_directory(
         values = line.split("|")
         if len(values) < len(headers):
             raise ValueError("Nasdaq security directory row is incomplete")
-        raw_symbol = values[positions[symbol_field]].strip().upper()
+        raw_symbol = values[positions[symbol_field]].strip()
         if not raw_symbol:
             continue
-        symbol = raw_symbol.replace(".", "-")
-        try:
-            symbol = validate_us_ticker(symbol)
-        except ValueError:
-            continue
+        security_name = values[positions["Security Name"]].strip()
+        etf = values[positions["ETF"]].strip().upper() if "ETF" in positions else None
+        security_type = _official_security_type_from_name(security_name, etf=etf)
+        aliases = _official_symbol_aliases(raw_symbol, security_type=security_type)
+        for field_name in ("CQS Symbol", "NASDAQ Symbol"):
+            if field_name in positions:
+                aliases.update(
+                    _official_symbol_aliases(
+                        values[positions[field_name]].strip(),
+                        security_type=security_type,
+                    )
+                )
+        if not aliases:
+            raise ValueError("Nasdaq security directory row has no valid symbol alias")
         record = {
-            "symbol": symbol,
-            "security_name": values[positions["Security Name"]].strip(),
+            "security_name": security_name,
             "exchange_code": values[positions["Exchange"]].strip() if "Exchange" in positions else None,
-            "etf": values[positions["ETF"]].strip().upper() if "ETF" in positions else None,
+            "etf": etf,
             "test_issue": values[positions["Test Issue"]].strip().upper() if "Test Issue" in positions else None,
             "financial_status": values[positions["Financial Status"]].strip().upper() if "Financial Status" in positions else None,
+            "security_type": security_type,
+            "source_symbol": raw_symbol.upper(),
+            "cqs_symbol": values[positions["CQS Symbol"]].strip() if "CQS Symbol" in positions else None,
         }
-        enriched = _metadata_source_record(
-            source_id=source_id,
-            source_url=source_url,
-            payload_sha256=payload_sha256,
-            as_of=effective_as_of,
-            record=record,
-        )
-        previous = records.get(symbol)
-        if previous is not None and previous != enriched:
-            raise ValueError(f"Nasdaq security directory contains conflicting {symbol}")
-        records[symbol] = enriched
+        for symbol in sorted(aliases):
+            enriched = _metadata_source_record(
+                source_id=source_id,
+                source_url=source_url,
+                payload_sha256=payload_sha256,
+                as_of=effective_as_of,
+                record={"symbol": symbol, **record},
+            )
+            previous = records.get(symbol)
+            if previous is not None and previous != enriched:
+                raise ValueError(f"Nasdaq security directory contains conflicting {symbol}")
+            records[symbol] = enriched
     if not records:
         raise ValueError("Nasdaq security directory contains no symbols")
     return {
@@ -204,6 +330,138 @@ def parse_nasdaq_security_directory(
         "payload_sha256": payload_sha256,
         "as_of": effective_as_of,
         "records": records,
+    }
+
+
+def _xml_child_text(element: ET.Element, field_name: str) -> str:
+    for child in list(element):
+        if child.tag.rsplit("}", 1)[-1] == field_name:
+            return str(child.text or "").strip()
+    return ""
+
+
+def parse_nyse_security_mapping(
+    text: str,
+    *,
+    source_id: str,
+    source_url: str = "",
+    as_of: str | None = None,
+) -> dict[str, Any]:
+    """Parse NYSE's first-party XML symbol mapping with typed security codes."""
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError("NYSE security mapping is empty")
+    try:
+        root = ET.fromstring(text)
+    except ET.ParseError as exc:
+        raise ValueError("NYSE security mapping XML is invalid") from exc
+    rows = [
+        element
+        for element in root.iter()
+        if element.tag.rsplit("}", 1)[-1] == "SymbolMap"
+    ]
+    if not rows:
+        raise ValueError("NYSE security mapping contains no SymbolMap rows")
+    payload_sha256 = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    effective_as_of = as_of
+    if effective_as_of is None:
+        match = re.search(r"(\d{8})", source_url)
+        if match:
+            try:
+                effective_as_of = datetime.datetime.strptime(match.group(1), "%Y%m%d").date().isoformat()
+            except ValueError:
+                effective_as_of = None
+
+    records: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        raw_symbol = _xml_child_text(row, "Symbol")
+        cqs_symbol = _xml_child_text(row, "CQS_Symbol")
+        listed_market = _xml_child_text(row, "ListedMarket")
+        security_type_code = _xml_child_text(row, "Security_Type").upper()
+        if not raw_symbol or not listed_market or not security_type_code:
+            raise ValueError("NYSE security mapping row is incomplete")
+        security_type = NYSE_SECURITY_TYPE_CODES.get(security_type_code, "UNKNOWN")
+        aliases = _official_symbol_aliases(raw_symbol, security_type=security_type)
+        aliases.update(_official_symbol_aliases(cqs_symbol, security_type=security_type))
+        if not aliases:
+            raise ValueError("NYSE security mapping row has no valid symbol alias")
+        record = {
+            "exchange_code": listed_market,
+            "etf": "Y" if security_type == "ETF" else None,
+            "security_type": security_type,
+            "security_type_code": security_type_code,
+            "source_symbol": raw_symbol,
+            "cqs_symbol": cqs_symbol or None,
+        }
+        for symbol in sorted(aliases):
+            enriched = _metadata_source_record(
+                source_id=source_id,
+                source_url=source_url,
+                payload_sha256=payload_sha256,
+                as_of=effective_as_of,
+                record={"symbol": symbol, **record},
+            )
+            previous = records.get(symbol)
+            if previous is not None and previous != enriched:
+                raise ValueError(f"NYSE security mapping contains conflicting {symbol}")
+            records[symbol] = enriched
+    if not records:
+        raise ValueError("NYSE security mapping contains no symbols")
+    return {
+        "source_id": source_id,
+        "source_url": source_url,
+        "source_identity": f"{source_id}:{payload_sha256}",
+        "payload_sha256": payload_sha256,
+        "as_of": effective_as_of,
+        "records": records,
+    }
+
+
+def fetch_nyse_security_mapping(*, timeout: int = 15) -> dict[str, Any]:
+    """Fetch the latest dated NYSE first-party XML symbol mapping."""
+    index_request = urllib.request.Request(
+        NYSE_SYMBOL_MAPPING_INDEX_URL,
+        headers={"User-Agent": "ABSORB-Research/1.0 (contact@absorb.local)"},
+    )
+    with urllib.request.urlopen(index_request, timeout=timeout) as resp:
+        index_content = resp.read(NYSE_SYMBOL_MAPPING_INDEX_MAX_BYTES + 1)
+    if len(index_content) > NYSE_SYMBOL_MAPPING_INDEX_MAX_BYTES:
+        raise RuntimeError("NYSE security mapping index response is too large")
+    index_text = index_content.decode("utf-8", errors="strict")
+    filenames = sorted(
+        set(re.findall(r"NYSESymbolMapping_(\d{8})\.xml", index_text, flags=re.I)),
+        reverse=True,
+    )
+    if not filenames:
+        raise RuntimeError("NYSE security mapping index contains no dated XML")
+    filename = f"NYSESymbolMapping_{filenames[0]}.xml"
+    source_url = NYSE_SYMBOL_MAPPING_INDEX_URL + filename
+    request = urllib.request.Request(
+        source_url,
+        headers={"User-Agent": "ABSORB-Research/1.0 (contact@absorb.local)"},
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as resp:
+        content = resp.read(NYSE_SYMBOL_MAPPING_MAX_BYTES + 1)
+    if len(content) > NYSE_SYMBOL_MAPPING_MAX_BYTES:
+        raise RuntimeError("NYSE security mapping response is too large")
+    document = parse_nyse_security_mapping(
+        content.decode("utf-8-sig"),
+        source_id="nyse:security_mapping",
+        source_url=source_url,
+        as_of=datetime.datetime.strptime(filenames[0], "%Y%m%d").date().isoformat(),
+    )
+    return {
+        "records": document["records"],
+        "sources": [
+            {
+                "source_id": document["source_id"],
+                "source_url": document["source_url"],
+                "source_identity": document["source_identity"],
+                "payload_sha256": document["payload_sha256"],
+                "as_of": document["as_of"],
+                "status": "healthy",
+            }
+        ],
+        "status": "healthy",
     }
 
 
@@ -240,6 +498,7 @@ def fetch_nasdaq_security_directory(*, timeout: int = 15) -> dict[str, Any]:
             if previous is not None and (
                 previous.get("security_name") != record.get("security_name")
                 or previous.get("etf") != record.get("etf")
+                or previous.get("security_type") != record.get("security_type")
             ):
                 conflicts.add(symbol)
                 continue
@@ -261,6 +520,69 @@ def fetch_nasdaq_security_directory(*, timeout: int = 15) -> dict[str, Any]:
         ]
         + errors,
         "status": "healthy" if not errors else "partial",
+        "conflicted_symbols": sorted(conflicts),
+    }
+
+
+def fetch_official_us_security_metadata(*, timeout: int = 15) -> dict[str, Any]:
+    """Combine first-party Nasdaq and NYSE metadata without weakening conflicts."""
+    documents: list[dict[str, Any]] = []
+    sources: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+    partial_source = False
+    fetchers = (
+        (fetch_nasdaq_security_directory, "nasdaqtrader:symbol_directory", "https://www.nasdaqtrader.com/"),
+        (fetch_nyse_security_mapping, "nyse:security_mapping", NYSE_SYMBOL_MAPPING_INDEX_URL),
+    )
+    for fetcher, source_id, source_url in fetchers:
+        try:
+            document = fetcher(timeout=timeout)
+            documents.append(document)
+            sources.extend(dict(item) for item in (document.get("sources") or []))
+            partial_source = partial_source or document.get("status") != "healthy"
+        except Exception as exc:
+            error = {
+                "source_id": source_id,
+                "source_url": source_url,
+                "status": "unavailable",
+                "error_type": type(exc).__name__,
+            }
+            errors.append(error)
+            sources.append(error)
+    if not documents:
+        raise RuntimeError("all first-party US security metadata sources are unavailable")
+
+    records: dict[str, dict[str, Any]] = {}
+    conflicts: set[str] = set()
+    for document in documents:
+        for symbol, record in (document.get("records") or {}).items():
+            previous = records.get(symbol)
+            if previous is None:
+                records[symbol] = record
+                continue
+            previous_type = str(previous.get("security_type") or "UNKNOWN").upper()
+            current_type = str(record.get("security_type") or "UNKNOWN").upper()
+            if (
+                previous_type != "UNKNOWN"
+                and current_type != "UNKNOWN"
+                and previous_type != current_type
+            ):
+                if previous_type in DERIVATIVE_SECURITY_TYPES and current_type in DERIVATIVE_SECURITY_TYPES:
+                    # Both official records prove the instrument is outside the
+                    # equity-observation scope; retain the later typed exchange
+                    # record without inventing a common-equity classification.
+                    records[symbol] = record
+                    continue
+                conflicts.add(symbol)
+                continue
+            if previous_type == "UNKNOWN" and current_type != "UNKNOWN":
+                records[symbol] = record
+    for symbol in conflicts:
+        records.pop(symbol, None)
+    return {
+        "records": records,
+        "sources": sources,
+        "status": "healthy" if not errors and not partial_source else "partial",
         "conflicted_symbols": sorted(conflicts),
     }
 
@@ -642,7 +964,7 @@ def get_us_universe_breakdown(
         try:
             cached_doc = json.loads(cache_path.read_text(encoding="utf-8"))
             if (
-                cached_doc.get("contract_version") == 2
+                cached_doc.get("contract_version") == 3
                 and cached_doc.get("as_of") == checked_at.date().isoformat()
                 and isinstance(cached_doc.get("symbols"), list)
                 and cached_doc.get("active_universe_count")
@@ -693,18 +1015,17 @@ def get_us_universe_breakdown(
             metadata_document = doc.get("security_metadata")
         else:
             try:
-                metadata_document = fetch_nasdaq_security_directory()
+                metadata_document = fetch_official_us_security_metadata()
             except Exception as exc:
                 metadata_document = {
                     "records": {},
                     "sources": [
                         {
-                            "source_id": source_id,
-                            "source_url": url,
+                            "source_id": "us:first_party_security_metadata",
+                            "source_url": "https://www.nasdaqtrader.com/;https://ftp.nyse.com/NYSESymbolMapping/",
                             "status": "unavailable",
                             "error_type": type(exc).__name__,
                         }
-                        for url, source_id in NASDAQ_SYMBOL_DIRECTORY_URLS
                     ],
                     "status": "unavailable",
                 }
@@ -749,7 +1070,7 @@ def get_us_universe_breakdown(
 
     payload = {
         "schema_version": 2,
-        "contract_version": 2,
+        "contract_version": 3,
         "market": "US",
         "scope": scope,
         "as_of": checked_at.date().isoformat(),

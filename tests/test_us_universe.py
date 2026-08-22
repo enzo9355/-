@@ -216,3 +216,43 @@ class USUniverseTests(unittest.TestCase):
         self.assertEqual(breakdown.security_eligibility_by_symbol["ACP-PA"]["security_type"], "PREFERRED")
         self.assertNotIn("AACIW", breakdown.symbols)
         self.assertEqual(breakdown.exclusions_by_symbol["AACIW"]["source_id"] if "source_id" in breakdown.exclusions_by_symbol["AACIW"] else breakdown.exclusions_by_symbol["AACIW"]["source"], "nasdaqtrader:nasdaqlisted")
+
+    def test_first_party_directory_normalizes_official_security_aliases(self):
+        from stock_papi.integrations.market_data.us_universe import parse_nasdaq_security_directory
+
+        directory = parse_nasdaq_security_directory(
+            "\n".join(
+                [
+                    "ACT Symbol|Security Name|Exchange|CQS Symbol|ETF|Round Lot Size|Test Issue|NASDAQ Symbol",
+                    "ABR$D|Example Corp Preferred Stock|N|ABRpD|N|100|N|ABR-D",
+                    "AAC.U|Example Acquisition Units|N|AAC.U|N|100|N|AAC=",
+                    "ACHR.W|Example Acquisition Warrants|N|ACHR.WS|N|100|N|ACHR+",
+                    "NE.A|Example Tranche 2 Warrants|N|NE.A|N|100|N|NE^",
+                    "File Creation Time: 0820202616:00|||||||",
+                ]
+            ),
+            source_id="nasdaqtrader:otherlisted",
+            source_url="https://example.test/otherlisted.txt",
+        )
+        self.assertEqual(directory["records"]["ABR-PD"]["security_type"], "PREFERRED")
+        self.assertEqual(directory["records"]["AAC-UN"]["security_type"], "UNIT")
+        self.assertEqual(directory["records"]["ACHR-WT"]["security_type"], "WARRANT")
+        self.assertEqual(directory["records"]["NE-WTA"]["security_type"], "WARRANT")
+
+    def test_nyse_security_mapping_uses_typed_codes_and_aliases(self):
+        from stock_papi.integrations.market_data.us_universe import parse_nyse_security_mapping
+
+        directory = parse_nyse_security_mapping(
+            """<NYSESymbolMap>
+              <SymbolMap><Symbol>ABR PRF</Symbol><CQS_Symbol>ABRpF</CQS_Symbol><ListedMarket>N</ListedMarket><Security_Type>P</Security_Type></SymbolMap>
+              <SymbolMap><Symbol>AAC U</Symbol><CQS_Symbol>AAC.U</CQS_Symbol><ListedMarket>N</ListedMarket><Security_Type>I</Security_Type></SymbolMap>
+              <SymbolMap><Symbol>ACHR WS</Symbol><CQS_Symbol>ACHR.WS</CQS_Symbol><ListedMarket>N</ListedMarket><Security_Type>W</Security_Type></SymbolMap>
+              <SymbolMap><Symbol>AAPL</Symbol><CQS_Symbol>AAPL</CQS_Symbol><ListedMarket>Q</ListedMarket><Security_Type>C</Security_Type></SymbolMap>
+            </NYSESymbolMap>""",
+            source_id="nyse:security_mapping",
+            source_url="https://example.test/NYSESymbolMapping_20260820.xml",
+        )
+        self.assertEqual(directory["records"]["ABR-PF"]["security_type"], "PREFERRED")
+        self.assertEqual(directory["records"]["AAC-UN"]["security_type"], "UNIT")
+        self.assertEqual(directory["records"]["ACHR-WT"]["security_type"], "WARRANT")
+        self.assertEqual(directory["records"]["AAPL"]["security_type"], "COMMON_EQUITY")
