@@ -70,3 +70,30 @@ class USUniverseTests(unittest.TestCase):
                 now=datetime.datetime(2026, 8, 20, tzinfo=datetime.timezone.utc),
             )
             self.assertEqual(symbols2, ["AAPL", "MSFT"])
+
+    def test_derivative_security_type_exclusions(self):
+        from stock_papi.integrations.market_data.us_universe import parse_sec_us_universe_with_metadata
+        doc = {
+            "fields": ["cik", "name", "ticker", "exchange"],
+            "data": [
+                [1, "Apple Inc.", "AAPL", "Nasdaq"],
+                [2, "SPDR S&P 500 ETF Trust", "SPY", "NYSE"],
+                [3, "Some Acquisition Warrant", "AACIW", "Nasdaq"],
+                [4, "Some SPAC Unit", "AAC-UN", "Nasdaq"],
+                [5, "Some Company Preferred Stock", "ACP-PA", "NYSE"],
+                [6, "Some Subscription Right", "AESPR", "Nasdaq"],
+            ],
+        }
+        # Equity observation scope excludes derivative instruments
+        equity_bd = parse_sec_us_universe_with_metadata(doc, scope="EQUITY_OBSERVATION")
+        self.assertEqual(equity_bd.symbols, ["AAPL", "SPY"])
+        self.assertEqual(equity_bd.excluded_derivative_count, 4)
+        self.assertEqual(equity_bd.derivative_breakdown["WARRANT"], 1)
+        self.assertEqual(equity_bd.derivative_breakdown["UNIT"], 1)
+        self.assertEqual(equity_bd.derivative_breakdown["PREFERRED"], 1)
+        self.assertEqual(equity_bd.derivative_breakdown["RIGHT"], 1)
+
+        # ALL_LISTED scope includes derivatives
+        all_bd = parse_sec_us_universe_with_metadata(doc, scope="ALL_LISTED")
+        self.assertEqual(len(all_bd.symbols), 6)
+        self.assertEqual(all_bd.excluded_derivative_count, 0)

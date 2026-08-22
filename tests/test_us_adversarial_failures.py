@@ -58,7 +58,8 @@ class TestUSAdversarialFailures(unittest.TestCase):
         return df
 
     def test_ohlc_integrity_rejection_no_silent_repair(self):
-        """High < Open or Low > High must raise ValueError (OP_FAIL) rather than silent repair."""
+        """High < Open or Low > High must raise USIntegrityError (OP_FAIL) rather than silent repair."""
+        from stock_papi.integrations.market_data.us_market_data import USIntegrityError
         dates = pd.date_range(end=self.target_date, periods=10, freq="B")
         # Corrupt High < Open
         bad_df = pd.DataFrame(
@@ -71,7 +72,7 @@ class TestUSAdversarialFailures(unittest.TestCase):
             },
             index=dates,
         )
-        with self.assertRaises(ValueError) as ctx:
+        with self.assertRaises(USIntegrityError) as ctx:
             fetch_us_stock_history("BAD", mock_df=bad_df)
         self.assertIn("integrity violation", str(ctx.exception).lower())
 
@@ -80,13 +81,17 @@ class TestUSAdversarialFailures(unittest.TestCase):
         symbols = [f"SYM{i:03d}" for i in range(100)]
         breakdown = USUniverseBreakdown(
             configured_listed_count=100,
+            eligible_listed_count=100,
             active_universe_count=100,
             excluded_exchange_count=0,
             excluded_crypto_count=0,
             excluded_invalid_count=0,
+            excluded_derivative_count=0,
+            derivative_breakdown={},
             terminated_delisted_count=0,
             exchange_counts={"NASDAQ": 100},
             symbols=symbols,
+            exclusions_by_symbol={},
         )
 
         def mock_fetch(sym, target_market_date=None, mock_df=None):
@@ -104,13 +109,17 @@ class TestUSAdversarialFailures(unittest.TestCase):
         symbols = [f"SYM{i:03d}" for i in range(100)]
         breakdown = USUniverseBreakdown(
             configured_listed_count=100,
+            eligible_listed_count=100,
             active_universe_count=100,
             excluded_exchange_count=0,
             excluded_crypto_count=0,
             excluded_invalid_count=0,
+            excluded_derivative_count=0,
+            derivative_breakdown={},
             terminated_delisted_count=0,
             exchange_counts={"NASDAQ": 100},
             symbols=symbols,
+            exclusions_by_symbol={},
         )
 
         def mock_fetch(sym, target_market_date=None, mock_df=None):
@@ -128,13 +137,17 @@ class TestUSAdversarialFailures(unittest.TestCase):
         symbols = [f"SYM{i:03d}" for i in range(100)]
         breakdown = USUniverseBreakdown(
             configured_listed_count=100,
+            eligible_listed_count=100,
             active_universe_count=100,
             excluded_exchange_count=0,
             excluded_crypto_count=0,
             excluded_invalid_count=0,
+            excluded_derivative_count=0,
+            derivative_breakdown={},
             terminated_delisted_count=0,
             exchange_counts={"NASDAQ": 100},
             symbols=symbols,
+            exclusions_by_symbol={},
         )
 
         def mock_fetch(sym, target_market_date=None, mock_df=None):
@@ -165,13 +178,17 @@ class TestUSAdversarialFailures(unittest.TestCase):
         symbols = [f"SYM{i:03d}" for i in range(100)]
         breakdown = USUniverseBreakdown(
             configured_listed_count=100,
+            eligible_listed_count=100,
             active_universe_count=100,
             excluded_exchange_count=0,
             excluded_crypto_count=0,
             excluded_invalid_count=0,
+            excluded_derivative_count=0,
+            derivative_breakdown={},
             terminated_delisted_count=0,
             exchange_counts={"NASDAQ": 100},
             symbols=symbols,
+            exclusions_by_symbol={},
         )
 
         def mock_fetch(sym, target_market_date=None, mock_df=None):
@@ -184,6 +201,50 @@ class TestUSAdversarialFailures(unittest.TestCase):
             with self.assertRaises(RuntimeError) as ctx:
                 run_us_post_close(self.root, self.target_date)
             self.assertIn("fails strict >95% publishable threshold", str(ctx.exception).lower())
+
+    def test_typed_exceptions_error_classification(self):
+        """Typed exceptions must classify strictly into OP_FAIL vs M without broad ValueError fallback."""
+        from stock_papi.integrations.market_data.us_market_data import (
+            USObservationUnavailable,
+            USProviderOperationalError,
+            USRateLimitError,
+            USSchemaError,
+            USIntegrityError,
+        )
+
+        # 1. USObservationUnavailable -> M
+        with patch("stock_papi.batch.us_official_post_close_cli.fetch_us_stock_history", side_effect=USObservationUnavailable("no data")):
+            res = _fetch_and_classify_symbol(self.root, "TEST", self.target_date)
+            self.assertEqual(res.kind, "M")
+
+        # 2. USProviderOperationalError -> OP_FAIL
+        with patch("stock_papi.batch.us_official_post_close_cli.fetch_us_stock_history", side_effect=USProviderOperationalError("timeout")):
+            res = _fetch_and_classify_symbol(self.root, "TEST", self.target_date)
+            self.assertEqual(res.kind, "OP_FAIL")
+            self.assertEqual(res.error_type, "USProviderOperationalError")
+
+        # 3. USRateLimitError -> OP_FAIL
+        with patch("stock_papi.batch.us_official_post_close_cli.fetch_us_stock_history", side_effect=USRateLimitError("429")):
+            res = _fetch_and_classify_symbol(self.root, "TEST", self.target_date)
+            self.assertEqual(res.kind, "OP_FAIL")
+            self.assertEqual(res.error_type, "USRateLimitError")
+
+        # 4. USSchemaError -> OP_FAIL
+        with patch("stock_papi.batch.us_official_post_close_cli.fetch_us_stock_history", side_effect=USSchemaError("missing cols")):
+            res = _fetch_and_classify_symbol(self.root, "TEST", self.target_date)
+            self.assertEqual(res.kind, "OP_FAIL")
+            self.assertEqual(res.error_type, "USSchemaError")
+
+        # 5. USIntegrityError -> OP_FAIL
+        with patch("stock_papi.batch.us_official_post_close_cli.fetch_us_stock_history", side_effect=USIntegrityError("High < Open")):
+            res = _fetch_and_classify_symbol(self.root, "TEST", self.target_date)
+            self.assertEqual(res.kind, "OP_FAIL")
+            self.assertEqual(res.error_type, "USIntegrityError")
+
+        # 6. Unknown ValueError / KeyError / OSError -> OP_FAIL
+        with patch("stock_papi.batch.us_official_post_close_cli.fetch_us_stock_history", side_effect=ValueError("unknown format error")):
+            res = _fetch_and_classify_symbol(self.root, "TEST", self.target_date)
+            self.assertEqual(res.kind, "OP_FAIL")
 
 
 if __name__ == "__main__":

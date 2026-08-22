@@ -66,13 +66,17 @@ class TestUSDateSemantics(unittest.TestCase):
         symbols = ["AAPL", "MSFT"]
         breakdown = USUniverseBreakdown(
             configured_listed_count=2,
+            eligible_listed_count=2,
             active_universe_count=2,
             excluded_exchange_count=0,
             excluded_crypto_count=0,
             excluded_invalid_count=0,
+            excluded_derivative_count=0,
+            derivative_breakdown={},
             terminated_delisted_count=0,
             exchange_counts={"NASDAQ": 2},
             symbols=symbols,
+            exclusions_by_symbol={},
         )
 
         with patch("stock_papi.batch.us_official_post_close_cli.get_us_universe_breakdown", return_value=breakdown),              patch("stock_papi.batch.us_official_post_close_cli.fetch_us_stock_history", side_effect=lambda s, target_market_date=None, mock_df=None: self._make_valid_df(s, target_market_date)):

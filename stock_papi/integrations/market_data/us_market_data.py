@@ -10,6 +10,34 @@ import yfinance as yf
 NEW_YORK = zoneinfo.ZoneInfo("America/New_York")
 
 
+class USObservationError(Exception):
+    """Base class for all US market data observation exceptions."""
+
+
+class USObservationUnavailable(USObservationError):
+    """Legitimate absence of observation data (M partition). Provider healthy, symbol valid, but no trades."""
+
+
+class USProviderOperationalError(USObservationError):
+    """Operational failure communicating with market data provider (network, timeout, transport)."""
+
+
+class USRateLimitError(USProviderOperationalError):
+    """Provider capacity limit / HTTP 429 encountered."""
+
+
+class USSchemaError(USObservationError):
+    """Malformed provider response schema or missing required columns."""
+
+
+class USIntegrityError(USObservationError):
+    """OHLC price bar integrity violation (e.g. High < Open/Close or Low > Open/Close)."""
+
+
+class USCalendarError(USObservationError):
+    """Invalid session or calendar date resolution error."""
+
+
 def compute_us_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
     """Compute standard technical indicators for US stock daily history."""
     df = df.copy()
@@ -84,7 +112,11 @@ def fetch_direct_yahoo_chart(symbol: str, range_str: str = "2y") -> pd.DataFrame
     except urllib.error.HTTPError as e:
         if e.code in (404, 400):
             return pd.DataFrame()
-        raise
+        if e.code == 429:
+            raise USRateLimitError(f"HTTP 429 rate limited for {symbol}") from e
+        raise USProviderOperationalError(f"HTTP {e.code} operational error for {symbol}") from e
+    except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as e:
+        raise USProviderOperationalError(f"Network transport error for {symbol}: {e}") from e
 
     res = doc.get("chart", {}).get("result")
     if not res:
@@ -154,10 +186,15 @@ def fetch_us_stock_history(
         range_str = "2y" if days >= 500 else "1y" if days >= 250 else "3mo"
         try:
             raw_df = fetch_direct_yahoo_chart(symbol, range_str=range_str)
-        except Exception:
-            # Fallback to yfinance if direct chart endpoint fails
-            yf_ticker = yf.Ticker(symbol)
-            raw_df = yf_ticker.history(period=range_str, auto_adjust=False)
+        except USObservationError:
+            raise
+        except Exception as e:
+            # Fallback to yfinance if direct chart endpoint encounters unexpected error
+            try:
+                yf_ticker = yf.Ticker(symbol)
+                raw_df = yf_ticker.history(period=range_str, auto_adjust=False)
+            except Exception as yf_err:
+                raise USProviderOperationalError(f"Provider failure for {symbol}: {yf_err}") from yf_err
 
     if raw_df is None or raw_df.empty:
         return pd.DataFrame()
@@ -165,7 +202,7 @@ def fetch_us_stock_history(
     # Standardize column names
     required_cols = {"Open", "High", "Low", "Close", "Volume"}
     if not required_cols.issubset(set(raw_df.columns)):
-        raise ValueError(f"US price schema is incomplete for {symbol}")
+        raise USSchemaError(f"US price schema is incomplete for {symbol}")
 
     df = raw_df.copy()
 
@@ -196,14 +233,14 @@ def fetch_us_stock_history(
 
     # Integrity validations (fail-closed, no silent mutation of market facts)
     if ((df["Close"] <= 0) | (df["High"] <= 0) | (df["Low"] <= 0) | (df["Open"] <= 0)).any():
-        raise ValueError(f"US price bar integrity violation for {symbol}: non-positive price values")
+        raise USIntegrityError(f"US price bar integrity violation for {symbol}: non-positive price values")
     if (df["Volume"] < 0).any():
-        raise ValueError(f"US price bar integrity violation for {symbol}: negative volume")
+        raise USIntegrityError(f"US price bar integrity violation for {symbol}: negative volume")
 
     invalid_high = df["High"] < (df[["Open", "Close", "Low"]].max(axis=1) - 1e-4)
     invalid_low = df["Low"] > (df[["Open", "Close", "High"]].min(axis=1) + 1e-4)
     if invalid_high.any() or invalid_low.any():
-        raise ValueError(f"US price bar integrity violation for {symbol}: High/Low outside Open/Close range")
+        raise USIntegrityError(f"US price bar integrity violation for {symbol}: High/Low outside Open/Close range")
 
     if target_market_date is not None:
         df = df[df.index <= target_market_date]

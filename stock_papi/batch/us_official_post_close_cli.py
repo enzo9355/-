@@ -26,7 +26,18 @@ from stock_papi.integrations.market_data.us_calendar import (
     generate_us_calendar_document,
     get_us_calendar_documents,
 )
-from stock_papi.integrations.market_data.us_market_data import fetch_us_stock_history
+from stock_papi.integrations.market_data.us_market_data import (
+    fetch_us_stock_history,
+    USObservationError,
+    USObservationUnavailable,
+    USProviderOperationalError,
+    USSchemaError,
+    USIntegrityError,
+    USRateLimitError,
+)
+from stock_papi.integrations.market_data.us_trading_status import (
+    get_us_trading_status_snapshot,
+)
 from stock_papi.integrations.market_data.us_universe import (
     get_us_universe_breakdown,
     USUniverseBreakdown,
@@ -66,6 +77,7 @@ class ObservationResult:
     kind: str  # "R" (regular price), "N" (verified non-price), "M" (unavailable), "OP_FAIL" (operational failure)
     detail: Any = None
     error_type: str | None = None
+    reason_code: str = ""
 
 
 def _fetch_and_classify_symbol(
@@ -74,12 +86,12 @@ def _fetch_and_classify_symbol(
     target_market_date: datetime.date,
     halt_evidence_by_symbol: dict[str, dict[str, Any]] | None = None,
 ) -> ObservationResult:
-    """Fetch and classify a single symbol into R, N, M, or OP_FAIL."""
+    """Fetch and classify a single symbol into R, N, M, or OP_FAIL using typed exception semantics."""
     target_iso = target_market_date.isoformat()
     try:
         df = fetch_us_stock_history(symbol, target_market_date=target_market_date)
         if df.empty:
-            # Empty dataframe from provider: check if halt evidence exists (N) or unavailable (M)
+            # Empty dataframe from provider: check if authoritative halt evidence exists (N) or unavailable (M)
             if halt_evidence_by_symbol and symbol in halt_evidence_by_symbol:
                 halt_doc = halt_evidence_by_symbol[symbol]
                 payload = {
@@ -105,14 +117,14 @@ def _fetch_and_classify_symbol(
                     "daily": [],
                 }
                 write_stock_artifact(root, "US", symbol, payload)
-                return ObservationResult(symbol=symbol, kind="N", detail=halt_doc)
-            return ObservationResult(symbol=symbol, kind="M", detail="no_regular_trades_and_no_halt")
+                return ObservationResult(symbol=symbol, kind="N", detail=halt_doc, reason_code="verified_halt")
+            return ObservationResult(symbol=symbol, kind="M", detail="no_regular_trades_and_no_halt", reason_code="verified_no_regular_trade")
 
         daily = json.loads(
             df.reset_index().to_json(orient="records", date_format="iso", date_unit="ms")
         )
         if not daily:
-            return ObservationResult(symbol=symbol, kind="M", detail="empty_daily_records")
+            return ObservationResult(symbol=symbol, kind="M", detail="empty_daily_records", reason_code="provider_success_no_target_observation")
 
         latest = daily[-1]
         as_of = str(latest.get("Date", "")).split("T", 1)[0]
@@ -139,7 +151,7 @@ def _fetch_and_classify_symbol(
                 "daily": daily,
             }
             write_stock_artifact(root, "US", symbol, payload)
-            return ObservationResult(symbol=symbol, kind="R", detail=latest)
+            return ObservationResult(symbol=symbol, kind="R", detail=latest, reason_code="regular_price_observed")
         elif as_of < target_iso:
             # History exists but no trade on target date
             if halt_evidence_by_symbol and symbol in halt_evidence_by_symbol:
@@ -167,30 +179,41 @@ def _fetch_and_classify_symbol(
                     "daily": daily,
                 }
                 write_stock_artifact(root, "US", symbol, payload)
-                return ObservationResult(symbol=symbol, kind="N", detail=halt_doc)
-            return ObservationResult(symbol=symbol, kind="M", detail=f"no_trade_on_target_date_last_trade_{as_of}")
+                return ObservationResult(symbol=symbol, kind="N", detail=halt_doc, reason_code="verified_halt")
+            return ObservationResult(
+                symbol=symbol,
+                kind="M",
+                detail=f"no_trade_on_target_date_last_trade_{as_of}",
+                reason_code="provider_success_no_target_observation",
+            )
         else:
             return ObservationResult(
                 symbol=symbol,
                 kind="OP_FAIL",
                 detail=f"future date bar in history: {as_of} > {target_iso}",
                 error_type="FutureDateError",
+                reason_code="future_date_violation",
             )
-    except ValueError as exc:
-        # Check if ValueError is an OHLC integrity violation or schema error (OP_FAIL) vs data absence
-        msg = str(exc)
-        if "integrity violation" in msg.lower() or "schema is incomplete" in msg.lower():
-            return ObservationResult(
-                symbol=symbol, kind="OP_FAIL", detail=msg, error_type=type(exc).__name__
-            )
-        # Genuine data absence
-        return ObservationResult(symbol=symbol, kind="M", detail=msg)
-    except Exception as exc:
+    except USObservationUnavailable as exc:
+        # Explicit legitimate observation absence class
+        return ObservationResult(symbol=symbol, kind="M", detail=str(exc), reason_code="other_legitimate_unavailable")
+    except USObservationError as exc:
+        # Typed operational errors (USProviderOperationalError, USSchemaError, USIntegrityError, USRateLimitError)
         return ObservationResult(
             symbol=symbol,
             kind="OP_FAIL",
             detail=str(exc),
             error_type=type(exc).__name__,
+            reason_code=type(exc).__name__,
+        )
+    except Exception as exc:
+        # Any unexpected error is strictly classified as OP_FAIL (Fail-Closed)
+        return ObservationResult(
+            symbol=symbol,
+            kind="OP_FAIL",
+            detail=str(exc),
+            error_type=type(exc).__name__,
+            reason_code="unexpected_exception",
         )
 
 
@@ -201,6 +224,7 @@ def run_us_post_close(
     now: datetime.datetime | None = None,
     coverage_threshold: float = 0.95,
     max_workers: int = 24,
+    scope: str = "EQUITY_OBSERVATION",
 ) -> Path:
     root = Path(root)
     if now is None:
@@ -233,30 +257,37 @@ def run_us_post_close(
         doc = generate_us_calendar_document(target_market_date.year)
         cal_file.write_text(json.dumps(doc, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    # 2. Authoritative US Active Universe
-    breakdown: USUniverseBreakdown = get_us_universe_breakdown(root)
+    # 2. Authoritative US Active Universe & Breakdown
+    breakdown: USUniverseBreakdown = get_us_universe_breakdown(root, scope=scope)
     symbols = breakdown.symbols
     print("==================================================")
     print("US ACTIVE UNIVERSE AUDIT")
     print("==================================================")
     print(f"* Configured/Listed SEC rows: {breakdown.configured_listed_count}")
+    print(f"* Eligible Listed Securities: {breakdown.eligible_listed_count}")
     print(f"* Excluded non-major exchange: {breakdown.excluded_exchange_count}")
     print(f"* Excluded crypto terms:       {breakdown.excluded_crypto_count}")
     print(f"* Excluded invalid tickers:    {breakdown.excluded_invalid_count}")
+    print(f"* Excluded derivative types:   {breakdown.excluded_derivative_count} ({breakdown.derivative_breakdown})")
     print(f"* Terminated / delisted count: {breakdown.terminated_delisted_count}")
     print(f"* Active Universe A Count:     {breakdown.active_universe_count}")
     print(f"* Exchange Breakdown:          {breakdown.exchange_counts}")
     print("==================================================")
 
-    # 3. Collect observations concurrently with error classification
+    # 3. Ingest Authoritative US Trading Status Snapshot (N Partition)
+    halt_evidence = get_us_trading_status_snapshot(target_market_date, symbols)
+    print(f"Authoritative US Trading Halt Evidence Ingested: {len(halt_evidence)} symbols")
+
+    # 4. Collect observations concurrently with error classification
     r_symbols: list[str] = []
     n_symbols: list[str] = []
     m_symbols: list[str] = []
+    m_reasons: dict[str, str] = {}
     op_failures: list[ObservationResult] = []
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {
-            executor.submit(_fetch_and_classify_symbol, root, sym, target_market_date): sym
+            executor.submit(_fetch_and_classify_symbol, root, sym, target_market_date, halt_evidence): sym
             for sym in symbols
         }
         for fut in concurrent.futures.as_completed(futures):
@@ -267,6 +298,7 @@ def run_us_post_close(
                 n_symbols.append(res.symbol)
             elif res.kind == "M":
                 m_symbols.append(res.symbol)
+                m_reasons[res.symbol] = res.reason_code
             else:
                 op_failures.append(res)
 
@@ -291,6 +323,48 @@ def run_us_post_close(
     print(f"* Operational Failures:     {len(op_failures)}")
     print(f"* Observation Coverage:     {coverage:.4%}")
     print("==================================================")
+
+    # 5. Save Machine-Readable Data Quality Audit Evidence
+    dq_dir = root / "release" / "data-quality"
+    dq_dir.mkdir(parents=True, exist_ok=True)
+    audit_file = dq_dir / f"us-universe-audit-{target_market_date.strftime('%Y%m%d')}.json"
+
+    # Aggregate M reasons
+    m_reason_counts: dict[str, int] = {}
+    for r in m_reasons.values():
+        m_reason_counts[r] = m_reason_counts.get(r, 0) + 1
+
+    audit_payload = {
+        "schema_version": 1,
+        "market": "US",
+        "scope": scope,
+        "target_market_date": target_market_date.isoformat(),
+        "source_market_date": target_market_date.isoformat(),
+        "applicable_trading_date": applicable_trading_date.isoformat(),
+        "configured_listed_count": breakdown.configured_listed_count,
+        "eligible_listed_count": breakdown.eligible_listed_count,
+        "active_universe_count": breakdown.active_universe_count,
+        "excluded_exchange_count": breakdown.excluded_exchange_count,
+        "excluded_crypto_count": breakdown.excluded_crypto_count,
+        "excluded_invalid_count": breakdown.excluded_invalid_count,
+        "excluded_derivative_count": breakdown.excluded_derivative_count,
+        "derivative_breakdown": breakdown.derivative_breakdown,
+        "terminated_delisted_count": breakdown.terminated_delisted_count,
+        "exchange_counts": breakdown.exchange_counts,
+        "r_count": len(r_symbols),
+        "n_count": len(n_symbols),
+        "m_count": len(m_symbols),
+        "f_count": len(op_failures),
+        "observation_coverage": coverage,
+        "m_reason_counts": m_reason_counts,
+        "m_symbols": m_reasons,
+        "operational_failures": [
+            {"symbol": f.symbol, "error_type": f.error_type, "detail": str(f.detail)}
+            for f in op_failures
+        ],
+    }
+    audit_file.write_text(json.dumps(audit_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"Saved machine-readable audit evidence: {audit_file}")
 
     # 4. Strict Contract Invariant & Gate Checks
     # Invariant: R, N, M are mutually disjoint
@@ -392,10 +466,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Run US official post-close observation batch pipeline")
     parser.add_argument("--root", required=True, help="Data root path")
     parser.add_argument("--target-market-date", required=True, help="Target date YYYY-MM-DD")
+    parser.add_argument("--scope", default="EQUITY_OBSERVATION", choices=["EQUITY_OBSERVATION", "ALL_LISTED"], help="Universe product scope")
+    parser.add_argument("--max-workers", type=int, default=24, help="Max concurrent workers")
     args = parser.parse_args()
 
     target_date = datetime.date.fromisoformat(args.target_market_date)
-    run_us_post_close(Path(args.root), target_date)
+    run_us_post_close(Path(args.root), target_date, scope=args.scope, max_workers=args.max_workers)
 
 
 if __name__ == "__main__":
