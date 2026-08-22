@@ -109,6 +109,20 @@ class ProfessionalReportBuilderTests(unittest.TestCase):
         self.assertEqual(report.capital_flows.status, "available")
         self.assertEqual(report.capital_flows.data["foreign_net"], 100)
 
+    def test_us_capital_flows_remain_unavailable_and_market_specific(self):
+        metadata = self._metadata()
+        metadata["market"] = "US"
+        metadata["content"]["capital_flows"] = {
+            "as_of": "2026-07-17",
+            "unit": "TWD_million",
+            "foreign_net": 100,
+        }
+        report = build_professional_post_close_artifact(
+            metadata, code_commit_sha="b" * 40
+        )
+        self.assertEqual(report.capital_flows.status, "unavailable")
+        self.assertIn("美國市場機構資金流向尚未納入", report.capital_flows.reason)
+
     def test_capital_flows_invalid_type_is_unavailable(self):
         metadata = self._metadata()
         metadata["content"]["capital_flows"] = "some text"

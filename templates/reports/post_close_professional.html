@@ -4,6 +4,18 @@
 {% block content %}
 {% set ident = report.identity if (report is defined and report.identity is defined and report.identity) else {} %}
 {% set market_code = ident.market or 'TW' %}
+{% set market_index_label = '市場指數表現' if market_code == 'US' else '加權指數表現' %}
+{% set flow_heading = '資金流向與市場資料' if market_code == 'US' else '資金與三大法人籌碼流向' %}
+{% set flow_unit = '百萬美元' if market_code == 'US' else '新台幣百萬元' %}
+{% set flow_primary_label = '機構資金買賣超' if market_code == 'US' else '外資及陸資買賣超' %}
+{% set flow_primary_sub = '機構資金動向 (百萬美元)' if market_code == 'US' else '外資籌碼動向 (百萬元)' %}
+{% set flow_secondary_label = '資產管理資金買賣超' if market_code == 'US' else '投信買賣超' %}
+{% set flow_secondary_sub = '資產管理資金動向 (百萬美元)' if market_code == 'US' else '本土法人動向 (百萬元)' %}
+{% set flow_dealer_label = '交易商資金買賣超' if market_code == 'US' else '自營商買賣超' %}
+{% set flow_dealer_sub = '交易商資金動向 (百萬美元)' if market_code == 'US' else '自營商整體動向 (百萬元)' %}
+{% set flow_total_label = '機構資金合計買賣超' if market_code == 'US' else '三大法人合計買賣超' %}
+{% set flow_total_sub = '市場主力合計 (百萬美元)' if market_code == 'US' else '市場主力合計 (百萬元)' %}
+{% set flow_fallback = '機構資金流向尚未納入。' if market_code == 'US' else '法人流向尚未納入。' %}
 {% set exec_summary = report.executive_summary if (report is defined and report.executive_summary is defined and report.executive_summary) else {} %}
 {% set market_sec = report.market if (report is defined and report.market is defined and report.market) else {} %}
 {% set flows_sec = report.capital_flows if (report is defined and report.capital_flows is defined and report.capital_flows) else {} %}
@@ -164,7 +176,7 @@
           <strong class="kpi-value {{ 'positive' if market.return_1d_pct and market.return_1d_pct >= 0 else 'negative' }}">
             {{ '%+.2f%%'|format(market.return_1d_pct) if market.return_1d_pct is not none else '資料不足' }}
           </strong>
-          <span class="kpi-sub">加權指數表現</span>
+          <span class="kpi-sub">{{ market_index_label }}</span>
         </div>
         <div class="kpi-card">
           <span class="kpi-label">上漲／下跌家數</span>
@@ -200,45 +212,45 @@
     <div class="section-heading">
       <div>
         <p class="eyebrow">SECTION 03 ｜ CAPITAL FLOWS</p>
-        <h2>資金與三大法人籌碼流向</h2>
+        <h2>{{ flow_heading }}</h2>
       </div>
-      <span class="muted small">單位：新台幣百萬元</span>
+      <span class="muted small">單位：{{ flow_unit }}</span>
     </div>
 
     {% if flows_sec.status == 'available' %}
       {% set flows = flows_sec.data %}
       <div class="report-kpi-grid">
         <div class="kpi-card">
-          <span class="kpi-label">外資及陸資買賣超</span>
+          <span class="kpi-label">{{ flow_primary_label }}</span>
           <strong class="kpi-value {{ 'positive' if flows.foreign_net and flows.foreign_net >= 0 else ('negative' if flows.foreign_net and flows.foreign_net < 0 else '') }}">
             {{ '%+,.1f'|format(flows.foreign_net) if flows.foreign_net is not none else '—' }}
           </strong>
-          <span class="kpi-sub">外資籌碼動向 (百萬元)</span>
+          <span class="kpi-sub">{{ flow_primary_sub }}</span>
         </div>
         <div class="kpi-card">
-          <span class="kpi-label">投信買賣超</span>
+          <span class="kpi-label">{{ flow_secondary_label }}</span>
           <strong class="kpi-value {{ 'positive' if flows.investment_trust_net and flows.investment_trust_net >= 0 else ('negative' if flows.investment_trust_net and flows.investment_trust_net < 0 else '') }}">
             {{ '%+,.1f'|format(flows.investment_trust_net) if flows.investment_trust_net is not none else '—' }}
           </strong>
-          <span class="kpi-sub">本土法人動向 (百萬元)</span>
+          <span class="kpi-sub">{{ flow_secondary_sub }}</span>
         </div>
         <div class="kpi-card">
-          <span class="kpi-label">自營商買賣超</span>
+          <span class="kpi-label">{{ flow_dealer_label }}</span>
           <strong class="kpi-value {{ 'positive' if flows.dealer_net and flows.dealer_net >= 0 else ('negative' if flows.dealer_net and flows.dealer_net < 0 else '') }}">
             {{ '%+,.1f'|format(flows.dealer_net) if flows.dealer_net is not none else '—' }}
           </strong>
-          <span class="kpi-sub">自營商整體動向 (百萬元)</span>
+          <span class="kpi-sub">{{ flow_dealer_sub }}</span>
         </div>
         <div class="kpi-card">
-          <span class="kpi-label">三大法人合計買賣超</span>
+          <span class="kpi-label">{{ flow_total_label }}</span>
           <strong class="kpi-value {{ 'positive' if flows.total_institutional_net and flows.total_institutional_net >= 0 else ('negative' if flows.total_institutional_net and flows.total_institutional_net < 0 else '') }}">
             {{ '%+,.1f'|format(flows.total_institutional_net) if flows.total_institutional_net is not none else '—' }}
           </strong>
-          <span class="kpi-sub">市場主力合計 (百萬元)</span>
+          <span class="kpi-sub">{{ flow_total_sub }}</span>
         </div>
       </div>
     {% else %}
-      <div class="empty-state">{{ flows_sec.reason or '法人流向尚未納入。' }}</div>
+      <div class="empty-state">{{ flows_sec.reason or flow_fallback }}</div>
     {% endif %}
   </section>
 
