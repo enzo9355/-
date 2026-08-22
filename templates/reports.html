@@ -2,12 +2,17 @@
 {% block title %}每日報告｜ABSORB{% endblock %}
 {% block nav_reports %}active{% endblock %}
 {% block content %}
+{% set selected_market = market or 'TW' %}
+{% set is_us = selected_market == 'US' %}
+{% set market_label = '美股' if is_us else '台股' %}
+{% set post_close_endpoint = 'us_post_close_report_page' if is_us else 'post_close_report_page' %}
+{% set pre_market_endpoint = 'us_pre_market_report_page' if is_us else 'pre_market_report_page' %}
 <div class="page reports-page">
   <header class="page-header">
     <div>
       <p class="eyebrow">VERIFIED MARKET OBSERVATIONS</p>
       <h1>每日報告</h1>
-      <p class="page-intro">已完成內容雜湊與發布鏈驗證的台股市場觀察日報。</p>
+      <p class="page-intro">已完成內容雜湊與發布鏈驗證的{{ market_label }}市場觀察日報。</p>
       <p class="muted small">AI 預測研究中；正式報告只呈現已發生的市場資料。</p>
     </div>
   </header>
@@ -15,7 +20,7 @@
   <section class="panel" aria-labelledby="report-history-title">
     <div class="section-heading">
       <div>
-        <p class="eyebrow">TW INDUSTRY</p>
+        <p class="eyebrow">{{ 'US MARKET' if is_us else 'TW INDUSTRY' }}</p>
         <h2 id="report-history-title">歷史報告</h2>
       </div>
     </div>
@@ -33,9 +38,9 @@
               {% if report.report_type == 'weekly_model' %}
                 <a class="button" href="{{ url_for('weekly_report_page', week_id=report.week_id) }}">閱讀週報</a>
               {% elif report.report_type == 'post_close' %}
-                <a class="button" href="{{ url_for('post_close_report_page', trading_date=report.source_market_date) }}">閱讀盤後觀察</a>
+                <a class="button" href="{{ url_for(post_close_endpoint, trading_date=report.source_market_date) }}">閱讀盤後觀察</a>
               {% else %}
-                <a class="button" href="{{ url_for('pre_market_report_page', trading_date=report.applicable_trading_date) }}">閱讀盤前更新</a>
+                <a class="button" href="{{ url_for(pre_market_endpoint, trading_date=report.applicable_trading_date) }}">閱讀盤前更新</a>
               {% endif %}
             </div>
           </article>

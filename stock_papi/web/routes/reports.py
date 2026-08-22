@@ -333,7 +333,8 @@ def register_report_routes(
             reports_v2 = None
         response = make_response(render_template(
             "reports.html", reports=reports or [], reports_v2=reports_v2 or [],
-            unavailable=reports is None and reports_v2 is None
+            unavailable=reports is None and reports_v2 is None,
+            market="TW",
         ))
         return _secure_response(response)
 
@@ -412,7 +413,8 @@ def register_report_routes(
             reports_v2 = None
         response = make_response(render_template(
             "reports.html", reports=[], reports_v2=reports_v2 or [],
-            unavailable=reports_v2 is None
+            unavailable=reports_v2 is None,
+            market="US",
         ))
         return _secure_response(response)
 
