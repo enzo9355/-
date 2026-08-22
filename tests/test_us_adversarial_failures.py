@@ -126,6 +126,21 @@ class TestUSAdversarialFailures(unittest.TestCase):
         self.assertEqual(result.provider_result["latest_regular_price_date"], self.target_date.replace(day=18).isoformat())
         self.assertEqual(result.security_evidence["security_type"], "COMMON_EQUITY")
 
+    def test_placeholder_drop_count_is_carried_into_observation_result(self):
+        history = self._make_valid_df()
+        history.attrs["dropped_non_observation_placeholder_count"] = 3
+        with patch(
+            "stock_papi.batch.us_official_post_close_cli.fetch_us_stock_history",
+            return_value=history,
+        ):
+            result = _fetch_and_classify_symbol(self.root, "COUNTED", self.target_date)
+
+        self.assertEqual(result.kind, "R")
+        self.assertEqual(
+            result.provider_result["dropped_non_observation_placeholder_count"],
+            3,
+        )
+
     def test_target_row_with_null_ohlc_is_schema_failure(self):
         dates = pd.date_range(end=self.target_date, periods=10, freq="B")
         bad = self._make_valid_df(date=self.target_date).loc[:, ["Open", "High", "Low", "Close", "Volume"]]

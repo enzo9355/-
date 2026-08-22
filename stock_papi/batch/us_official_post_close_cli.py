@@ -96,6 +96,12 @@ def _fetch_and_classify_symbol(
     target_iso = target_market_date.isoformat()
     try:
         df = fetch_us_stock_history(symbol, target_market_date=target_market_date)
+        dropped_placeholder_count = int(
+            getattr(df, "attrs", {}).get(
+                "dropped_non_observation_placeholder_count", 0
+            )
+            or 0
+        )
         if df.empty:
             # Empty dataframe from provider: check if authoritative halt evidence exists (N) or unavailable (M)
             if halt_evidence_by_symbol and symbol in halt_evidence_by_symbol:
@@ -129,7 +135,11 @@ def _fetch_and_classify_symbol(
                     detail=halt_doc,
                     reason_code="verified_halt",
                     security_evidence=(security_evidence_by_symbol or {}).get(symbol),
-                    provider_result={"status": "healthy", "target_observation": "absent"},
+                    provider_result={
+                        "status": "healthy",
+                        "target_observation": "absent",
+                        "dropped_non_observation_placeholder_count": dropped_placeholder_count,
+                    },
                     official_status_evidence=halt_doc,
                 )
             return ObservationResult(
@@ -138,7 +148,11 @@ def _fetch_and_classify_symbol(
                 detail="provider_healthy_no_target_observation",
                 reason_code="provider_healthy_no_target_observation",
                 security_evidence=(security_evidence_by_symbol or {}).get(symbol),
-                provider_result={"status": "healthy", "target_observation": "absent"},
+                provider_result={
+                    "status": "healthy",
+                    "target_observation": "absent",
+                    "dropped_non_observation_placeholder_count": dropped_placeholder_count,
+                },
             )
 
         daily = json.loads(
@@ -155,6 +169,7 @@ def _fetch_and_classify_symbol(
                     "status": "healthy",
                     "target_observation": "absent",
                     "latest_regular_price_date": None,
+                    "dropped_non_observation_placeholder_count": dropped_placeholder_count,
                 },
             )
 
@@ -184,7 +199,18 @@ def _fetch_and_classify_symbol(
                 "daily": daily,
             }
             write_stock_artifact(root, "US", symbol, payload)
-            return ObservationResult(symbol=symbol, kind="R", detail=latest, reason_code="regular_price_observed")
+            return ObservationResult(
+                symbol=symbol,
+                kind="R",
+                detail=latest,
+                reason_code="regular_price_observed",
+                provider_result={
+                    "status": "healthy",
+                    "target_observation": "present",
+                    "latest_regular_price_date": as_of,
+                    "dropped_non_observation_placeholder_count": dropped_placeholder_count,
+                },
+            )
         elif as_of < target_iso:
             # History exists but no trade on target date
             if halt_evidence_by_symbol and symbol in halt_evidence_by_symbol:
@@ -212,7 +238,18 @@ def _fetch_and_classify_symbol(
                     "daily": daily,
                 }
                 write_stock_artifact(root, "US", symbol, payload)
-                return ObservationResult(symbol=symbol, kind="N", detail=halt_doc, reason_code="verified_halt")
+                return ObservationResult(
+                    symbol=symbol,
+                    kind="N",
+                    detail=halt_doc,
+                    reason_code="verified_halt",
+                    provider_result={
+                        "status": "healthy",
+                        "target_observation": "absent",
+                        "latest_regular_price_date": as_of,
+                        "dropped_non_observation_placeholder_count": dropped_placeholder_count,
+                    },
+                )
             return ObservationResult(
                 symbol=symbol,
                 kind="M",
@@ -223,6 +260,7 @@ def _fetch_and_classify_symbol(
                     "status": "healthy",
                     "target_observation": "absent",
                     "latest_regular_price_date": as_of,
+                    "dropped_non_observation_placeholder_count": dropped_placeholder_count,
                 },
             )
         else:
@@ -350,6 +388,8 @@ def run_us_post_close(
     m_reasons: dict[str, str] = {}
     m_details: dict[str, dict[str, Any]] = {}
     op_failures: list[ObservationResult] = []
+    dropped_placeholder_total = 0
+    dropped_placeholder_by_symbol: dict[str, int] = {}
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {
@@ -365,6 +405,16 @@ def run_us_post_close(
         }
         for fut in concurrent.futures.as_completed(futures):
             res = fut.result()
+            provider_result = res.provider_result or {}
+            dropped_count = int(
+                provider_result.get(
+                    "dropped_non_observation_placeholder_count", 0
+                )
+                or 0
+            )
+            if dropped_count:
+                dropped_placeholder_total += dropped_count
+                dropped_placeholder_by_symbol[res.symbol] = dropped_count
             if res.kind == "R":
                 r_symbols.append(res.symbol)
             elif res.kind == "N":
@@ -449,6 +499,8 @@ def run_us_post_close(
         "lifecycle_evidence_status": breakdown.lifecycle_evidence_status,
         "lifecycle_evidence_sources": breakdown.lifecycle_evidence_sources,
         "lifecycle_events_by_symbol": breakdown.lifecycle_events_by_symbol,
+        "dropped_non_observation_placeholder_count": dropped_placeholder_total,
+        "dropped_non_observation_placeholder_by_symbol": dropped_placeholder_by_symbol,
         "official_status_source": {
             "source_id": "nasdaq_tradehalts_rss",
             "parser_version": STATUS_PARSER_VERSION,
