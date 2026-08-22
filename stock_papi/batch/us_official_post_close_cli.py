@@ -36,6 +36,8 @@ from stock_papi.integrations.market_data.us_market_data import (
     USRateLimitError,
 )
 from stock_papi.integrations.market_data.us_trading_status import (
+    STATUS_PARSER_VERSION,
+    USStatusSourceError,
     get_us_trading_status_snapshot,
 )
 from stock_papi.integrations.market_data.us_universe import (
@@ -78,6 +80,9 @@ class ObservationResult:
     detail: Any = None
     error_type: str | None = None
     reason_code: str = ""
+    security_evidence: dict[str, Any] | None = None
+    provider_result: dict[str, Any] | None = None
+    official_status_evidence: dict[str, Any] | None = None
 
 
 def _fetch_and_classify_symbol(
@@ -85,6 +90,7 @@ def _fetch_and_classify_symbol(
     symbol: str,
     target_market_date: datetime.date,
     halt_evidence_by_symbol: dict[str, dict[str, Any]] | None = None,
+    security_evidence_by_symbol: dict[str, dict[str, Any]] | None = None,
 ) -> ObservationResult:
     """Fetch and classify a single symbol into R, N, M, or OP_FAIL using typed exception semantics."""
     target_iso = target_market_date.isoformat()
@@ -117,17 +123,44 @@ def _fetch_and_classify_symbol(
                     "daily": [],
                 }
                 write_stock_artifact(root, "US", symbol, payload)
-                return ObservationResult(symbol=symbol, kind="N", detail=halt_doc, reason_code="verified_halt")
-            return ObservationResult(symbol=symbol, kind="M", detail="no_regular_trades_and_no_halt", reason_code="verified_no_regular_trade")
+                return ObservationResult(
+                    symbol=symbol,
+                    kind="N",
+                    detail=halt_doc,
+                    reason_code="verified_halt",
+                    security_evidence=(security_evidence_by_symbol or {}).get(symbol),
+                    provider_result={"status": "healthy", "target_observation": "absent"},
+                    official_status_evidence=halt_doc,
+                )
+            return ObservationResult(
+                symbol=symbol,
+                kind="M",
+                detail="provider_healthy_no_target_observation",
+                reason_code="provider_healthy_no_target_observation",
+                security_evidence=(security_evidence_by_symbol or {}).get(symbol),
+                provider_result={"status": "healthy", "target_observation": "absent"},
+            )
 
         daily = json.loads(
             df.reset_index().to_json(orient="records", date_format="iso", date_unit="ms")
         )
         if not daily:
-            return ObservationResult(symbol=symbol, kind="M", detail="empty_daily_records", reason_code="provider_success_no_target_observation")
+            return ObservationResult(
+                symbol=symbol,
+                kind="M",
+                detail="provider_healthy_no_target_observation",
+                reason_code="provider_healthy_no_target_observation",
+                security_evidence=(security_evidence_by_symbol or {}).get(symbol),
+                provider_result={
+                    "status": "healthy",
+                    "target_observation": "absent",
+                    "latest_regular_price_date": None,
+                },
+            )
 
         latest = daily[-1]
-        as_of = str(latest.get("Date", "")).split("T", 1)[0]
+        latest_date_value = latest.get("Date", latest.get("index", ""))
+        as_of = str(latest_date_value).split("T", 1)[0]
         if as_of == target_iso:
             # Valid regular price observation on target date (R)
             payload = {
@@ -184,7 +217,13 @@ def _fetch_and_classify_symbol(
                 symbol=symbol,
                 kind="M",
                 detail=f"no_trade_on_target_date_last_trade_{as_of}",
-                reason_code="provider_success_no_target_observation",
+                reason_code="provider_healthy_no_target_observation",
+                security_evidence=(security_evidence_by_symbol or {}).get(symbol),
+                provider_result={
+                    "status": "healthy",
+                    "target_observation": "absent",
+                    "latest_regular_price_date": as_of,
+                },
             )
         else:
             return ObservationResult(
@@ -193,10 +232,18 @@ def _fetch_and_classify_symbol(
                 detail=f"future date bar in history: {as_of} > {target_iso}",
                 error_type="FutureDateError",
                 reason_code="future_date_violation",
+                security_evidence=(security_evidence_by_symbol or {}).get(symbol),
             )
     except USObservationUnavailable as exc:
         # Explicit legitimate observation absence class
-        return ObservationResult(symbol=symbol, kind="M", detail=str(exc), reason_code="other_legitimate_unavailable")
+        return ObservationResult(
+            symbol=symbol,
+            kind="M",
+            detail=str(exc),
+            reason_code="other_legitimate_unavailable",
+            security_evidence=(security_evidence_by_symbol or {}).get(symbol),
+            provider_result={"status": "healthy", "target_observation": "absent"},
+        )
     except USObservationError as exc:
         # Typed operational errors (USProviderOperationalError, USSchemaError, USIntegrityError, USRateLimitError)
         return ObservationResult(
@@ -205,6 +252,7 @@ def _fetch_and_classify_symbol(
             detail=str(exc),
             error_type=type(exc).__name__,
             reason_code=type(exc).__name__,
+            security_evidence=(security_evidence_by_symbol or {}).get(symbol),
         )
     except Exception as exc:
         # Any unexpected error is strictly classified as OP_FAIL (Fail-Closed)
@@ -214,6 +262,7 @@ def _fetch_and_classify_symbol(
             detail=str(exc),
             error_type=type(exc).__name__,
             reason_code="unexpected_exception",
+            security_evidence=(security_evidence_by_symbol or {}).get(symbol),
         )
 
 
@@ -258,7 +307,11 @@ def run_us_post_close(
         cal_file.write_text(json.dumps(doc, ensure_ascii=False, indent=2), encoding="utf-8")
 
     # 2. Authoritative US Active Universe & Breakdown
-    breakdown: USUniverseBreakdown = get_us_universe_breakdown(root, scope=scope)
+    breakdown: USUniverseBreakdown = get_us_universe_breakdown(
+        root,
+        scope=scope,
+        target_market_date=target_market_date,
+    )
     symbols = breakdown.symbols
     print("==================================================")
     print("US ACTIVE UNIVERSE AUDIT")
@@ -269,13 +322,25 @@ def run_us_post_close(
     print(f"* Excluded crypto terms:       {breakdown.excluded_crypto_count}")
     print(f"* Excluded invalid tickers:    {breakdown.excluded_invalid_count}")
     print(f"* Excluded derivative types:   {breakdown.excluded_derivative_count} ({breakdown.derivative_breakdown})")
-    print(f"* Terminated / delisted count: {breakdown.terminated_delisted_count}")
+    lifecycle_count = (
+        breakdown.terminated_delisted_count
+        if breakdown.terminated_delisted_count is not None
+        else "unavailable"
+    )
+    print(f"* Terminated / delisted count: {lifecycle_count}")
+    print(f"* Lifecycle evidence status:    {breakdown.lifecycle_evidence_status}")
+    print(f"* Security metadata status:      {breakdown.security_metadata_status}")
     print(f"* Active Universe A Count:     {breakdown.active_universe_count}")
     print(f"* Exchange Breakdown:          {breakdown.exchange_counts}")
     print("==================================================")
 
     # 3. Ingest Authoritative US Trading Status Snapshot (N Partition)
-    halt_evidence = get_us_trading_status_snapshot(target_market_date, symbols)
+    try:
+        halt_evidence = get_us_trading_status_snapshot(target_market_date, symbols)
+    except USStatusSourceError as exc:
+        raise RuntimeError(
+            "US official trading-status source failed; publication is blocked fail-closed"
+        ) from exc
     print(f"Authoritative US Trading Halt Evidence Ingested: {len(halt_evidence)} symbols")
 
     # 4. Collect observations concurrently with error classification
@@ -283,11 +348,19 @@ def run_us_post_close(
     n_symbols: list[str] = []
     m_symbols: list[str] = []
     m_reasons: dict[str, str] = {}
+    m_details: dict[str, dict[str, Any]] = {}
     op_failures: list[ObservationResult] = []
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {
-            executor.submit(_fetch_and_classify_symbol, root, sym, target_market_date, halt_evidence): sym
+            executor.submit(
+                _fetch_and_classify_symbol,
+                root,
+                sym,
+                target_market_date,
+                halt_evidence,
+                breakdown.security_eligibility_by_symbol,
+            ): sym
             for sym in symbols
         }
         for fut in concurrent.futures.as_completed(futures):
@@ -299,6 +372,16 @@ def run_us_post_close(
             elif res.kind == "M":
                 m_symbols.append(res.symbol)
                 m_reasons[res.symbol] = res.reason_code
+                security_evidence = res.security_evidence or {}
+                m_details[res.symbol] = {
+                    "symbol": res.symbol,
+                    "product_security_type": security_evidence.get("security_type", "UNKNOWN"),
+                    "eligibility_evidence": security_evidence,
+                    "target_date_provider_result": res.provider_result,
+                    "official_status_evidence": res.official_status_evidence,
+                    "final_classification": "M",
+                    "reason": res.reason_code,
+                }
             else:
                 op_failures.append(res)
 
@@ -358,6 +441,20 @@ def run_us_post_close(
         "observation_coverage": coverage,
         "m_reason_counts": m_reason_counts,
         "m_symbols": m_reasons,
+        "m_classification_details": m_details,
+        "security_metadata_status": breakdown.security_metadata_status,
+        "security_metadata_sources": breakdown.security_metadata_sources,
+        "security_type_counts": breakdown.security_type_counts,
+        "security_eligibility_by_symbol": breakdown.security_eligibility_by_symbol,
+        "lifecycle_evidence_status": breakdown.lifecycle_evidence_status,
+        "lifecycle_evidence_sources": breakdown.lifecycle_evidence_sources,
+        "lifecycle_events_by_symbol": breakdown.lifecycle_events_by_symbol,
+        "official_status_source": {
+            "source_id": "nasdaq_tradehalts_rss",
+            "parser_version": STATUS_PARSER_VERSION,
+            "health": "healthy",
+            "target_session_semantics": "full_regular_session_effective_interval",
+        },
         "operational_failures": [
             {"symbol": f.symbol, "error_type": f.error_type, "detail": str(f.detail)}
             for f in op_failures

@@ -96,7 +96,133 @@ import urllib.request
 import urllib.error
 
 
-def fetch_direct_yahoo_chart(symbol: str, range_str: str = "2y", max_retries: int = 3) -> pd.DataFrame:
+_US_REQUIRED_PRICE_COLUMNS = ("Open", "High", "Low", "Close", "Volume")
+
+
+def _scalar_is_missing(value) -> bool:
+    missing = pd.isna(value)
+    return isinstance(missing, (bool, np.bool_)) and bool(missing)
+
+
+def _normalise_us_date(value, symbol: str) -> datetime.date:
+    try:
+        if isinstance(value, pd.Timestamp):
+            if value.tzinfo is not None:
+                value = value.tz_convert(NEW_YORK)
+            return value.date()
+        if isinstance(value, datetime.datetime):
+            if value.tzinfo is not None:
+                value = value.astimezone(NEW_YORK)
+            return value.date()
+        if isinstance(value, datetime.date):
+            return value
+        return datetime.date.fromisoformat(str(value).split("T", 1)[0])
+    except (TypeError, ValueError, OverflowError, OSError) as exc:
+        raise USSchemaError(f"US price row date is invalid for {symbol}: {value!r}") from exc
+
+
+def _coerce_us_number(value, *, symbol: str, field: str, date: datetime.date) -> float:
+    if isinstance(value, (bool, np.bool_)) or value is None or _scalar_is_missing(value):
+        raise USSchemaError(
+            f"US price row has missing {field} for {symbol} on {date.isoformat()}"
+        )
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as exc:
+        raise USSchemaError(
+            f"US price row has non-numeric {field} for {symbol} on {date.isoformat()}"
+        ) from exc
+    if not math.isfinite(number):
+        raise USSchemaError(
+            f"US price row has non-finite {field} for {symbol} on {date.isoformat()}"
+        )
+    return number
+
+
+def _validate_us_price_values(
+    *, symbol: str, date: datetime.date, values: dict[str, float]
+) -> None:
+    o, h, l, c, v = (values[column] for column in _US_REQUIRED_PRICE_COLUMNS)
+    if o <= 0 or h <= 0 or l <= 0 or c <= 0:
+        raise USIntegrityError(
+            f"US price bar integrity violation for {symbol} on {date.isoformat()}: "
+            "non-positive price values"
+        )
+    if v < 0:
+        raise USIntegrityError(
+            f"US price bar integrity violation for {symbol} on {date.isoformat()}: "
+            "negative volume"
+        )
+    if h < max(o, c, l) - 1e-4 or l > min(o, c, h) + 1e-4:
+        raise USIntegrityError(
+            f"US price bar integrity violation for {symbol} on {date.isoformat()}: "
+            "High/Low outside Open/Close range"
+        )
+
+
+def _prepare_us_history_frame(raw_df: pd.DataFrame, symbol: str) -> pd.DataFrame:
+    """Normalize and validate every provider row before any filtering or deduplication."""
+    if raw_df is None or raw_df.empty:
+        return pd.DataFrame()
+    if not isinstance(raw_df, pd.DataFrame):
+        raise USSchemaError(f"US price payload is not tabular for {symbol}")
+    if not set(_US_REQUIRED_PRICE_COLUMNS).issubset(raw_df.columns):
+        raise USSchemaError(f"US price schema is incomplete for {symbol}")
+
+    df = raw_df.copy()
+    if isinstance(df.index, pd.DatetimeIndex):
+        date_values = list(df.index)
+    elif "Date" in df.columns:
+        date_values = list(df["Date"])
+    elif len(df.index) and all(
+        isinstance(value, (datetime.date, datetime.datetime, pd.Timestamp))
+        for value in df.index
+    ):
+        date_values = list(df.index)
+    else:
+        raise USSchemaError(f"US price payload has no date column for {symbol}")
+
+    if len(date_values) != len(df):
+        raise USSchemaError(f"US price date column length is invalid for {symbol}")
+
+    df = df.reset_index(drop=True)
+    normalized_dates = [_normalise_us_date(value, symbol) for value in date_values]
+    df["Date"] = normalized_dates
+
+    for row_number in range(len(df)):
+        date = normalized_dates[row_number]
+        values = {}
+        for field in _US_REQUIRED_PRICE_COLUMNS:
+            number = _coerce_us_number(
+                df.at[row_number, field],
+                symbol=symbol,
+                field=field,
+                date=date,
+            )
+            values[field] = number
+            df.at[row_number, field] = number
+        _validate_us_price_values(symbol=symbol, date=date, values=values)
+
+    duplicate_dates = df[df.duplicated(subset=["Date"], keep=False)]
+    if not duplicate_dates.empty:
+        for date, group in duplicate_dates.groupby("Date", sort=False):
+            if group[list(_US_REQUIRED_PRICE_COLUMNS)].drop_duplicates().shape[0] > 1:
+                raise USIntegrityError(
+                    f"US price payload contains conflicting duplicate rows for "
+                    f"{symbol} on {date.isoformat()}"
+                )
+        df = df.drop_duplicates(subset=["Date"], keep="first")
+
+    return df.set_index("Date").sort_index()
+
+
+def fetch_direct_yahoo_chart(
+    symbol: str,
+    range_str: str = "2y",
+    max_retries: int = 3,
+    *,
+    target_market_date: datetime.date | None = None,
+) -> pd.DataFrame:
     """Fetch daily chart history directly from Yahoo chart API with zero crumb rate limits and retry backoff."""
     import time
     url = f"https://query2.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1d&range={range_str}"
@@ -138,57 +264,71 @@ def fetch_direct_yahoo_chart(symbol: str, range_str: str = "2y", max_retries: in
             raise USProviderOperationalError(f"Network transport error for {symbol}: {last_exc}") from last_exc
         return pd.DataFrame()
 
-    res = doc.get("chart", {}).get("result")
+    if not isinstance(doc, dict) or not isinstance(doc.get("chart"), dict):
+        raise USSchemaError(f"Yahoo chart payload schema is invalid for {symbol}")
+    res = doc["chart"].get("result")
     if not res:
         return pd.DataFrame()
+    if not isinstance(res, list) or len(res) != 1 or not isinstance(res[0], dict):
+        raise USSchemaError(f"Yahoo chart result schema is invalid for {symbol}")
 
     entry = res[0]
     timestamps = entry.get("timestamp")
     if not timestamps:
         return pd.DataFrame()
+    if not isinstance(timestamps, list):
+        raise USSchemaError(f"Yahoo chart timestamps are invalid for {symbol}")
 
-    quote = entry.get("indicators", {}).get("quote", [{}])[0]
-    opens = quote.get("open", [])
-    highs = quote.get("high", [])
-    lows = quote.get("low", [])
-    closes = quote.get("close", [])
-    volumes = quote.get("volume", [])
+    indicators = entry.get("indicators")
+    quote_list = indicators.get("quote") if isinstance(indicators, dict) else None
+    quote = quote_list[0] if isinstance(quote_list, list) and quote_list else None
+    if not isinstance(quote, dict):
+        raise USSchemaError(f"Yahoo chart quote schema is invalid for {symbol}")
+    quote_fields = {
+        "Open": "open",
+        "High": "high",
+        "Low": "low",
+        "Close": "close",
+        "Volume": "volume",
+    }
+    arrays = {field: quote.get(source_field) for field, source_field in quote_fields.items()}
+    for field, values in arrays.items():
+        if not isinstance(values, list) or len(values) < len(timestamps):
+            raise USSchemaError(
+                f"Yahoo chart {field} array is incomplete for {symbol}"
+            )
 
     n = len(timestamps)
     records = []
     for i in range(n):
-        o = opens[i] if i < len(opens) else None
-        h = highs[i] if i < len(highs) else None
-        l = lows[i] if i < len(lows) else None
-        c = closes[i] if i < len(closes) else None
-        v = volumes[i] if i < len(volumes) else 0.0
-        if o is None or h is None or l is None or c is None:
-            continue
         try:
-            o, h, l, c, v = float(o), float(h), float(l), float(c), float(v or 0.0)
-        except (TypeError, ValueError):
-            continue
-        if o <= 0 or h <= 0 or l <= 0 or c <= 0 or v < 0:
-            continue
-        if h < max(o, c, l) - 1e-4 or l > min(o, c, h) + 1e-4:
-            continue
-        dt = datetime.datetime.fromtimestamp(timestamps[i], tz=datetime.timezone.utc).astimezone(NEW_YORK).date()
+            dt = datetime.datetime.fromtimestamp(
+                timestamps[i], tz=datetime.timezone.utc
+            ).astimezone(NEW_YORK).date()
+        except (TypeError, ValueError, OverflowError, OSError) as exc:
+            raise USSchemaError(
+                f"Yahoo chart timestamp is invalid for {symbol} at row {i}"
+            ) from exc
+        values = {
+            field: arrays[field][i]
+            for field in _US_REQUIRED_PRICE_COLUMNS
+        }
+        numeric = {
+            field: _coerce_us_number(
+                value,
+                symbol=symbol,
+                field=field,
+                date=dt,
+            )
+            for field, value in values.items()
+        }
+        _validate_us_price_values(symbol=symbol, date=dt, values=numeric)
         records.append({
             "Date": dt,
-            "Open": o,
-            "High": h,
-            "Low": l,
-            "Close": c,
-            "Volume": v,
+            **numeric,
         })
 
-    if not records:
-        return pd.DataFrame()
-
-    df = pd.DataFrame.from_records(records)
-    df = df.drop_duplicates(subset=["Date"], keep="last")
-    df = df.set_index("Date").sort_index()
-    return df
+    return _prepare_us_history_frame(pd.DataFrame.from_records(records), symbol)
 
 
 def fetch_us_stock_history(
@@ -205,7 +345,11 @@ def fetch_us_stock_history(
     else:
         range_str = "2y" if days >= 500 else "1y" if days >= 250 else "3mo"
         try:
-            raw_df = fetch_direct_yahoo_chart(symbol, range_str=range_str)
+            raw_df = fetch_direct_yahoo_chart(
+                symbol,
+                range_str=range_str,
+                target_market_date=target_market_date,
+            )
         except USObservationError:
             raise
         except Exception as e:
@@ -219,48 +363,9 @@ def fetch_us_stock_history(
     if raw_df is None or raw_df.empty:
         return pd.DataFrame()
 
-    # Standardize column names
-    required_cols = {"Open", "High", "Low", "Close", "Volume"}
-    if not required_cols.issubset(set(raw_df.columns)):
-        raise USSchemaError(f"US price schema is incomplete for {symbol}")
-
-    df = raw_df.copy()
-
-    # Normalize index to America/New_York date if needed
-    if not isinstance(df.index, pd.DatetimeIndex) and "Date" in df.columns:
-        dates = [
-            val.date() if isinstance(val, (pd.Timestamp, datetime.datetime)) else val
-            for val in df["Date"]
-        ]
-        df["Date"] = dates
-        df = df.drop_duplicates(subset=["Date"], keep="last")
-        df = df.set_index("Date").sort_index()
-    elif isinstance(df.index, pd.DatetimeIndex):
-        if df.index.tz is not None:
-            df.index = df.index.tz_convert(NEW_YORK)
-        dates = [
-            val.date() if isinstance(val, (pd.Timestamp, datetime.datetime)) else val
-            for val in df.index
-        ]
-        df["Date"] = dates
-        df = df.drop_duplicates(subset=["Date"], keep="last")
-        df = df.set_index("Date").sort_index()
-
-    # Filter out invalid numbers
-    df = df.dropna(subset=["Close", "Open", "High", "Low"])
+    df = _prepare_us_history_frame(raw_df, symbol)
     if df.empty:
         return pd.DataFrame()
-
-    # Integrity validations (fail-closed, no silent mutation of market facts)
-    if ((df["Close"] <= 0) | (df["High"] <= 0) | (df["Low"] <= 0) | (df["Open"] <= 0)).any():
-        raise USIntegrityError(f"US price bar integrity violation for {symbol}: non-positive price values")
-    if (df["Volume"] < 0).any():
-        raise USIntegrityError(f"US price bar integrity violation for {symbol}: negative volume")
-
-    invalid_high = df["High"] < (df[["Open", "Close", "Low"]].max(axis=1) - 1e-4)
-    invalid_low = df["Low"] > (df[["Open", "Close", "High"]].min(axis=1) + 1e-4)
-    if invalid_high.any() or invalid_low.any():
-        raise USIntegrityError(f"US price bar integrity violation for {symbol}: High/Low outside Open/Close range")
 
     if target_market_date is not None:
         df = df[df.index <= target_market_date]

@@ -84,8 +84,16 @@ class USUniverseTests(unittest.TestCase):
                 [6, "Some Subscription Right", "AESPR", "Nasdaq"],
             ],
         }
+        security_metadata = {
+            "AACIW": {"security_type": "WARRANT", "source_id": "nasdaqtrader:nasdaqlisted", "as_of": "2026-08-20", "evidence_sha256": "a" * 64},
+            "AAC-UN": {"security_type": "UNIT", "source_id": "nasdaqtrader:nasdaqlisted", "as_of": "2026-08-20", "evidence_sha256": "b" * 64},
+            "ACP-PA": {"security_type": "PREFERRED", "source_id": "nasdaqtrader:otherlisted", "as_of": "2026-08-20", "evidence_sha256": "c" * 64},
+            "AESPR": {"security_type": "RIGHT", "source_id": "nasdaqtrader:nasdaqlisted", "as_of": "2026-08-20", "evidence_sha256": "d" * 64},
+        }
         # Equity observation scope excludes derivative instruments
-        equity_bd = parse_sec_us_universe_with_metadata(doc, scope="EQUITY_OBSERVATION")
+        equity_bd = parse_sec_us_universe_with_metadata(
+            doc, scope="EQUITY_OBSERVATION", security_metadata=security_metadata
+        )
         self.assertEqual(equity_bd.symbols, ["AAPL", "SPY"])
         self.assertEqual(equity_bd.excluded_derivative_count, 4)
         self.assertEqual(equity_bd.derivative_breakdown["WARRANT"], 1)
@@ -97,3 +105,114 @@ class USUniverseTests(unittest.TestCase):
         all_bd = parse_sec_us_universe_with_metadata(doc, scope="ALL_LISTED")
         self.assertEqual(len(all_bd.symbols), 6)
         self.assertEqual(all_bd.excluded_derivative_count, 0)
+
+    def test_suffix_only_signals_do_not_remove_symbols_from_denominator(self):
+        from stock_papi.integrations.market_data.us_universe import parse_sec_us_universe_with_metadata
+        doc = {
+            "fields": ["cik", "name", "ticker", "exchange"],
+            "data": [
+                [1, "Looks Like A Warrant", "AACIW", "Nasdaq"],
+                [2, "Looks Like A Right", "AESPR", "Nasdaq"],
+                [3, "Looks Like A Unit", "AACIU", "Nasdaq"],
+                [4, "Looks Like Preferred", "ACP-PA", "NYSE"],
+            ],
+        }
+        breakdown = parse_sec_us_universe_with_metadata(doc, scope="EQUITY_OBSERVATION")
+        self.assertEqual(breakdown.symbols, ["AACIU", "AACIW", "ACP-PA", "AESPR"])
+        self.assertEqual(breakdown.excluded_derivative_count, 0)
+        self.assertEqual(breakdown.security_metadata_status, "unavailable")
+        self.assertEqual(
+            breakdown.security_eligibility_by_symbol["AACIW"]["heuristic_signal"],
+            "WARRANT",
+        )
+
+    def test_lifecycle_evidence_excludes_only_effective_events(self):
+        from stock_papi.integrations.market_data.us_universe import parse_sec_us_universe_with_metadata
+        doc = {
+            "fields": ["cik", "name", "ticker", "exchange"],
+            "data": [
+                [1, "Old Corp - Common Stock", "OLD", "Nasdaq"],
+                [2, "Live Corp - Common Stock", "LIVE", "Nasdaq"],
+            ],
+        }
+        events = [
+            {
+                "symbol": "OLD",
+                "event": "delisted",
+                "effective_date": "2026-08-18",
+                "source": "exchange-daily-list",
+                "source_identity": "exchange-daily-list:2026-08-18",
+                "evidence_sha256": "e" * 64,
+            },
+            {
+                "symbol": "LIVE",
+                "event": "delisted",
+                "effective_date": "2026-08-22",
+                "source": "exchange-daily-list",
+                "source_identity": "exchange-daily-list:2026-08-22",
+                "evidence_sha256": "f" * 64,
+            },
+        ]
+        breakdown = parse_sec_us_universe_with_metadata(
+            doc,
+            target_market_date=datetime.date(2026, 8, 20),
+            lifecycle_events=events,
+        )
+        self.assertEqual(breakdown.symbols, ["LIVE"])
+        self.assertEqual(breakdown.terminated_delisted_count, 1)
+        self.assertEqual(breakdown.lifecycle_evidence_status, "available")
+        self.assertEqual(breakdown.lifecycle_events_by_symbol["OLD"]["event"], "delisted")
+        self.assertEqual(breakdown.exclusions_by_symbol["OLD"]["source_identity"], "exchange-daily-list:2026-08-18")
+
+    def test_lifecycle_count_is_not_fabricated_when_source_is_unavailable(self):
+        from stock_papi.integrations.market_data.us_universe import parse_sec_us_universe_with_metadata
+        doc = {
+            "fields": ["cik", "name", "ticker", "exchange"],
+            "data": [[1, "Live Corp - Common Stock", "LIVE", "Nasdaq"]],
+        }
+        breakdown = parse_sec_us_universe_with_metadata(doc)
+        self.assertIsNone(breakdown.terminated_delisted_count)
+        self.assertEqual(breakdown.lifecycle_evidence_status, "lifecycle_evidence_unavailable")
+
+    def test_first_party_directory_metadata_classifies_supported_security_types(self):
+        from stock_papi.integrations.market_data.us_universe import (
+            parse_nasdaq_security_directory,
+            parse_sec_us_universe_with_metadata,
+        )
+        directory = parse_nasdaq_security_directory(
+            "\n".join(
+                [
+                    "Symbol|Security Name|Market Category|Test Issue|Financial Status|Round Lot Size|ETF|NextShares",
+                    "AAPL|Apple Inc. - Common Stock|Q|N|N|100|N|N",
+                    "AADR|AdvisorShares Dorsey Wright ADR ETF|G|N|N|100|Y|N",
+                    "AACIW|Example Acquisition - Warrant|G|N|N|100|N|N",
+                    "ACP-PA|Example Corp - Preferred Stock|Q|N|N|100|N|N",
+                    "File Creation Time: 0820202616:00|||||||",
+                ]
+            ),
+            source_id="nasdaqtrader:nasdaqlisted",
+            source_url="https://example.test/nasdaqlisted.txt",
+        )
+        self.assertEqual(directory["as_of"], "2026-08-20")
+        self.assertEqual(directory["records"]["AADR"]["etf"], "Y")
+        self.assertEqual(directory["records"]["AAPL"]["source_id"], "nasdaqtrader:nasdaqlisted")
+
+        sec_doc = {
+            "fields": ["cik", "name", "ticker", "exchange"],
+            "data": [
+                [1, "Apple Inc.", "AAPL", "Nasdaq"],
+                [2, "AdvisorShares", "AADR", "Nasdaq"],
+                [3, "Example Acquisition", "AACIW", "Nasdaq"],
+                [4, "Example Corp", "ACP-PA", "Nasdaq"],
+            ],
+        }
+        breakdown = parse_sec_us_universe_with_metadata(
+            sec_doc,
+            security_metadata=directory["records"],
+        )
+        self.assertEqual(breakdown.security_eligibility_by_symbol["AAPL"]["security_type"], "COMMON_EQUITY")
+        self.assertEqual(breakdown.security_eligibility_by_symbol["AADR"]["security_type"], "ETF")
+        self.assertEqual(breakdown.security_eligibility_by_symbol["AACIW"]["security_type"], "WARRANT")
+        self.assertEqual(breakdown.security_eligibility_by_symbol["ACP-PA"]["security_type"], "PREFERRED")
+        self.assertNotIn("AACIW", breakdown.symbols)
+        self.assertEqual(breakdown.exclusions_by_symbol["AACIW"]["source_id"] if "source_id" in breakdown.exclusions_by_symbol["AACIW"] else breakdown.exclusions_by_symbol["AACIW"]["source"], "nasdaqtrader:nasdaqlisted")
