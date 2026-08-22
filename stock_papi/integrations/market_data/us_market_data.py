@@ -3,6 +3,8 @@
 import datetime
 import math
 import zoneinfo
+from collections.abc import Mapping
+
 import numpy as np
 import pandas as pd
 import yfinance as yf
@@ -104,6 +106,32 @@ def _scalar_is_missing(value) -> bool:
     return isinstance(missing, (bool, np.bool_)) and bool(missing)
 
 
+def is_explicit_non_observation_placeholder(row: Mapping[str, object]) -> bool:
+    """Return whether a provider row explicitly contains no market observation.
+
+    This predicate is deliberately narrower than generic null handling: every
+    OHLC field must be scalar-missing, and Volume must be scalar-missing or a
+    numeric zero.  Partial rows, non-numeric values, and positive-volume rows
+    are never treated as placeholders.
+    """
+    if not isinstance(row, Mapping) or not all(
+        field in row for field in _US_REQUIRED_PRICE_COLUMNS
+    ):
+        return False
+    if not all(_scalar_is_missing(row[field]) for field in _US_REQUIRED_PRICE_COLUMNS[:4]):
+        return False
+    volume = row["Volume"]
+    if _scalar_is_missing(volume):
+        return True
+    if isinstance(volume, (bool, np.bool_)):
+        return False
+    try:
+        volume_number = float(volume)
+    except (TypeError, ValueError):
+        return False
+    return math.isfinite(volume_number) and volume_number == 0.0
+
+
 def _normalise_us_date(value, symbol: str) -> datetime.date:
     try:
         if isinstance(value, pd.Timestamp):
@@ -163,7 +191,9 @@ def _validate_us_price_values(
 def _prepare_us_history_frame(raw_df: pd.DataFrame, symbol: str) -> pd.DataFrame:
     """Normalize and validate every provider row before any filtering or deduplication."""
     if raw_df is None or raw_df.empty:
-        return pd.DataFrame()
+        empty = pd.DataFrame()
+        empty.attrs["dropped_non_observation_placeholder_count"] = 0
+        return empty
     if not isinstance(raw_df, pd.DataFrame):
         raise USSchemaError(f"US price payload is not tabular for {symbol}")
     if not set(_US_REQUIRED_PRICE_COLUMNS).issubset(raw_df.columns):
@@ -189,8 +219,18 @@ def _prepare_us_history_frame(raw_df: pd.DataFrame, symbol: str) -> pd.DataFrame
     normalized_dates = [_normalise_us_date(value, symbol) for value in date_values]
     df["Date"] = normalized_dates
 
+    dropped_placeholder_rows = 0
+    dropped_row_numbers: list[int] = []
     for row_number in range(len(df)):
         date = normalized_dates[row_number]
+        raw_values = {
+            field: df.at[row_number, field]
+            for field in _US_REQUIRED_PRICE_COLUMNS
+        }
+        if is_explicit_non_observation_placeholder(raw_values):
+            dropped_placeholder_rows += 1
+            dropped_row_numbers.append(row_number)
+            continue
         values = {}
         for field in _US_REQUIRED_PRICE_COLUMNS:
             number = _coerce_us_number(
@@ -203,6 +243,9 @@ def _prepare_us_history_frame(raw_df: pd.DataFrame, symbol: str) -> pd.DataFrame
             df.at[row_number, field] = number
         _validate_us_price_values(symbol=symbol, date=date, values=values)
 
+    if dropped_row_numbers:
+        df = df.drop(index=dropped_row_numbers)
+
     duplicate_dates = df[df.duplicated(subset=["Date"], keep=False)]
     if not duplicate_dates.empty:
         for date, group in duplicate_dates.groupby("Date", sort=False):
@@ -213,7 +256,9 @@ def _prepare_us_history_frame(raw_df: pd.DataFrame, symbol: str) -> pd.DataFrame
                 )
         df = df.drop_duplicates(subset=["Date"], keep="first")
 
-    return df.set_index("Date").sort_index()
+    prepared = df.set_index("Date").sort_index()
+    prepared.attrs["dropped_non_observation_placeholder_count"] = dropped_placeholder_rows
+    return prepared
 
 
 def fetch_direct_yahoo_chart(
@@ -275,7 +320,9 @@ def fetch_direct_yahoo_chart(
     entry = res[0]
     timestamps = entry.get("timestamp")
     if not timestamps:
-        return pd.DataFrame()
+        empty = pd.DataFrame()
+        empty.attrs["dropped_non_observation_placeholder_count"] = 0
+        return empty
     if not isinstance(timestamps, list):
         raise USSchemaError(f"Yahoo chart timestamps are invalid for {symbol}")
 
@@ -300,6 +347,7 @@ def fetch_direct_yahoo_chart(
 
     n = len(timestamps)
     records = []
+    dropped_placeholder_count = 0
     for i in range(n):
         try:
             dt = datetime.datetime.fromtimestamp(
@@ -313,6 +361,9 @@ def fetch_direct_yahoo_chart(
             field: arrays[field][i]
             for field in _US_REQUIRED_PRICE_COLUMNS
         }
+        if is_explicit_non_observation_placeholder(values):
+            dropped_placeholder_count += 1
+            continue
         numeric = {
             field: _coerce_us_number(
                 value,
@@ -328,7 +379,12 @@ def fetch_direct_yahoo_chart(
             **numeric,
         })
 
-    return _prepare_us_history_frame(pd.DataFrame.from_records(records), symbol)
+    prepared = _prepare_us_history_frame(pd.DataFrame.from_records(records), symbol)
+    prepared.attrs["dropped_non_observation_placeholder_count"] = (
+        prepared.attrs.get("dropped_non_observation_placeholder_count", 0)
+        + dropped_placeholder_count
+    )
+    return prepared
 
 
 def fetch_us_stock_history(
@@ -361,17 +417,25 @@ def fetch_us_stock_history(
                 raise USProviderOperationalError(f"Provider failure for {symbol}: {yf_err}") from yf_err
 
     if raw_df is None or raw_df.empty:
-        return pd.DataFrame()
+        empty = pd.DataFrame()
+        empty.attrs["dropped_non_observation_placeholder_count"] = 0
+        return empty
 
     df = _prepare_us_history_frame(raw_df, symbol)
+    dropped_placeholder_count = int(
+        df.attrs.get("dropped_non_observation_placeholder_count", 0)
+    )
     if df.empty:
-        return pd.DataFrame()
+        df.attrs["dropped_non_observation_placeholder_count"] = dropped_placeholder_count
+        return df
 
     if target_market_date is not None:
-        df = df[df.index <= target_market_date]
+        df = df[df.index <= target_market_date].copy()
+        df.attrs["dropped_non_observation_placeholder_count"] = dropped_placeholder_count
         if df.empty:
-            return pd.DataFrame()
+            return df
 
     # Compute technical indicators
     df = compute_us_technical_indicators(df)
+    df.attrs["dropped_non_observation_placeholder_count"] = dropped_placeholder_count
     return df
