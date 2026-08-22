@@ -385,7 +385,20 @@ def _publish_report_v2_impl(
         == logical_key
     ]
     if existing and existing != [entry]:
-        raise ReportPublishError("conflicting report v2 content")
+        if document.get("product_mode") == "observation":
+            reports = [
+                item
+                for item in reports
+                if (
+                    item["report_type"],
+                    item["source_market_date"],
+                    item["applicable_trading_date"],
+                )
+                != logical_key
+            ]
+            reports.append(entry)
+        else:
+            raise ReportPublishError("conflicting report v2 content")
 
     if pdf_bytes is not None:
         object_path = publish / document["pdf_path"]
