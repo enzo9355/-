@@ -101,9 +101,13 @@ def build_professional_report_view(
             flows["total_institutional_net"] = sum(valid_items)
 
     return {
-        "title": "ABSORB 台股市場、產業與量化研究日報",
+        "title": (
+            "ABSORB "
+            f"{'美股' if identity.market == 'US' else '台股'}市場、產業與量化研究日報"
+        ),
         "identity": {
             "report_id": identity.report_id,
+            "market": identity.market,
             "source_market_date": identity.source_market_date.isoformat(),
             "applicable_trading_date": identity.applicable_trading_date.isoformat(),
             "published_at": identity.published_at.isoformat(),

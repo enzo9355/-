@@ -3,6 +3,7 @@
 {% block nav_reports %}active{% endblock %}
 {% block content %}
 {% set ident = report.identity if (report is defined and report.identity is defined and report.identity) else {} %}
+{% set market_code = ident.market or 'TW' %}
 {% set exec_summary = report.executive_summary if (report is defined and report.executive_summary is defined and report.executive_summary) else {} %}
 {% set market_sec = report.market if (report is defined and report.market is defined and report.market) else {} %}
 {% set flows_sec = report.capital_flows if (report is defined and report.capital_flows is defined and report.capital_flows) else {} %}
@@ -684,7 +685,12 @@
     <div class="legal-disclaimer">
       <p>
         <strong>免責聲明：</strong>
-        本報告內容由 Google Gemini 根據 ABSORB 可取得之台灣證券交易所 (TWSE)、證券櫃檯買賣中心 (TPEx) 公開市場資料、已驗證產業架構及量化回歸研究模型分析生成。本報告僅供學術量化研究與市場觀察參考，不構成任何證券、金融商品之買賣推薦、要約或投資顧問服務。投資人應獨立評估投資風險，並就投資決策自行承擔盈虧責任。
+        {% if market_code == 'US' %}
+          本報告內容由 Google Gemini 根據 ABSORB 可取得之美國公開市場資料、已驗證產業架構及量化回歸研究模型分析生成。
+        {% else %}
+          本報告內容由 Google Gemini 根據 ABSORB 可取得之台灣證券交易所 (TWSE)、證券櫃檯買賣中心 (TPEx) 公開市場資料、已驗證產業架構及量化回歸研究模型分析生成。
+        {% endif %}
+        本報告僅供學術量化研究與市場觀察參考，不構成任何證券、金融商品之買賣推薦、要約或投資顧問服務。投資人應獨立評估投資風險，並就投資決策自行承擔盈虧責任。
       </p>
     </div>
   </section>
