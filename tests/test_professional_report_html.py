@@ -129,6 +129,9 @@ class ProfessionalReportHtmlTests(unittest.TestCase):
             metadata, code_commit_sha="b" * 40
         )
         view = build_professional_report_view(report)
+        # Existing production artifacts can carry the legacy TW fallback reason;
+        # the US reader must normalize that copy without rebuilding the artifact.
+        view["capital_flows"]["reason"] = "法人流向尚未納入目前的已驗證 Observation Artifact"
         output = env.get_template("reports/post_close_professional.html").render(
             report=view
         )
@@ -139,12 +142,15 @@ class ProfessionalReportHtmlTests(unittest.TestCase):
         self.assertIn("市場指數表現", output)
         self.assertIn("資金流向與市場資料", output)
         self.assertIn("單位：百萬美元", output)
-        self.assertIn("美國市場機構資金流向尚未納入", output)
+        self.assertIn("機構資金流向尚未納入", output)
+        self.assertIn("官方交易狀態觀察（停牌、終止上市等）", output)
         self.assertNotIn("ABSORB 台股市場、產業與量化研究日報", output)
         self.assertNotIn("加權指數表現", output)
         self.assertNotIn("新台幣", output)
         self.assertNotIn("三大法人", output)
         self.assertNotIn("法人流向", output)
+        self.assertNotIn("減資", output)
+        self.assertNotIn("處置", output)
         self.assertNotIn("TWSE", output)
         self.assertNotIn("TPEx", output)
 
