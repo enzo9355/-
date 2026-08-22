@@ -191,6 +191,42 @@ class ReportWebTests(unittest.TestCase):
             response.get_data(as_text=True),
         )
 
+    def test_us_report_listing_uses_us_routes_and_market_copy(self):
+        us_reports = [
+            {
+                "product_mode": "observation",
+                "report_type": "post_close",
+                "title": "ABSORB 美股盤後市場觀察報告 (2026-07-15)",
+                "summary": ["美股 2026-07-15 交易日收盤觀察"],
+                "source_market_date": "2026-07-15",
+                "applicable_trading_date": "2026-07-15",
+            },
+            {
+                "product_mode": "observation",
+                "report_type": "pre_market",
+                "title": "ABSORB 美股盤前市場觀察報告 (2026-07-16)",
+                "summary": ["美股 2026-07-16 開盤前觀察"],
+                "source_market_date": "2026-07-15",
+                "applicable_trading_date": "2026-07-16",
+            },
+        ]
+
+        def load_index_v2(market="TW"):
+            return us_reports if market == "US" else []
+
+        with patch.object(
+            stock_app, "_published_report_index_v2", side_effect=load_index_v2
+        ):
+            response = stock_app.app.test_client().get("/reports/us")
+
+        html = response.get_data(as_text=True)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("美股市場觀察日報", html)
+        self.assertIn("/reports/us/2026-07-15/post-close", html)
+        self.assertIn("/reports/us/2026-07-16/pre-market", html)
+        self.assertNotIn("/reports/2026-07-15/post-close", html)
+        self.assertNotIn("/reports/2026-07-16/pre-market", html)
+
     def test_missing_report_index_has_dedicated_503_state(self):
         with patch.object(
             stock_app, "_gcs_get_report_v2_object", return_value=None, create=True
