@@ -991,18 +991,20 @@ try {
                 [long]$Manifest.observation_count * 100 -le
                     ([long]$Manifest.active_universe_count * 95)
             ) { throw 'Invalid manifest v4 arithmetic' }
+            $SymbolPattern = if ($Market -eq 'US') { '^[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)?$' } else { '^\d{4,6}$' }
             foreach ($Symbol in $UnavailableSymbols) {
-                if ([string]$Symbol -notmatch '^\d{4,6}$') {
+                if ([string]$Symbol -notmatch $SymbolPattern) {
                     throw 'Invalid unavailable_symbols entry'
                 }
             }
         }
+            $SymbolPattern = if ($Market -eq 'US') { '^[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)?$' } else { '^\d{4,6}$' }
             $ExpectedBySymbol = @{}
             foreach ($Property in $ExpectedProperties) {
                 $Symbol = [string]$Property.Name
                 $Status = $Property.Value
                 if (
-                    $Symbol -notmatch '^\d{4,6}$' -or
+                    $Symbol -notmatch $SymbolPattern -or
                     $ExpectedBySymbol.ContainsKey($Symbol) -or
                     [string]$Status.status -notin @(
                         'official_no_regular_trade',
@@ -1017,14 +1019,14 @@ try {
             }
             foreach ($Symbol in $OperationalFailures) {
                 if (
-                    [string]$Symbol -notmatch '^\d{4,6}$' -or
+                    $Symbol -notmatch $SymbolPattern -or
                     $ExpectedBySymbol.ContainsKey([string]$Symbol)
                 ) { throw 'Invalid operational_failed_symbols entry' }
             }
             if ($LatestSchema -eq 4) {
                 foreach ($Symbol in @($Manifest.unavailable_symbols)) {
                     if (
-                        [string]$Symbol -notmatch '^\d{4,6}$' -or
+                        $Symbol -notmatch $SymbolPattern -or
                         $ExpectedBySymbol.ContainsKey([string]$Symbol) -or
                         $SymbolProperties.Name -contains [string]$Symbol
                     ) { throw 'Invalid unavailable_symbols entry' }
