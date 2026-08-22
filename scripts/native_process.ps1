@@ -137,6 +137,7 @@ function Invoke-NativeProcessStreaming {
 
     $PreviousErrorActionPreference = $ErrorActionPreference
     $ExitCode = 1
+    $LogWriteFailed = $false
     $Tail = New-Object 'System.Collections.Generic.Queue[string]'
     try {
         $ErrorActionPreference = 'Continue'
@@ -149,9 +150,8 @@ function Invoke-NativeProcessStreaming {
                     -Encoding utf8 `
                     -ErrorAction Stop
             } catch {
-                throw [System.IO.IOException]::new(
-                    'Native process log write failed'
-                )
+                $LogWriteFailed = $true
+                return
             }
             $Tail.Enqueue($Line)
             while ($Tail.Count -gt $TailLineCount) {
@@ -159,6 +159,9 @@ function Invoke-NativeProcessStreaming {
             }
         }
         $ExitCode = $LASTEXITCODE
+        if ($LogWriteFailed) {
+            throw 'Native process log write failed'
+        }
     } finally {
         $ErrorActionPreference = $PreviousErrorActionPreference
     }

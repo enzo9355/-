@@ -23,6 +23,12 @@ class TestUSDateSemantics(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.root = Path(self.temp_dir.name)
+        self.status_patch = patch(
+            "stock_papi.batch.us_official_post_close_cli.get_us_trading_status_snapshot",
+            return_value={},
+        )
+        self.status_patch.start()
+        self.addCleanup(self.status_patch.stop)
         cal_docs = get_us_calendar_documents(2026, 2026)
         self.calendars = TradingCalendarSet.from_documents(cal_docs)
 
