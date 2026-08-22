@@ -96,8 +96,9 @@ import urllib.request
 import urllib.error
 
 
-def fetch_direct_yahoo_chart(symbol: str, range_str: str = "2y") -> pd.DataFrame:
-    """Fetch daily chart history directly from Yahoo chart API with zero crumb rate limits."""
+def fetch_direct_yahoo_chart(symbol: str, range_str: str = "2y", max_retries: int = 3) -> pd.DataFrame:
+    """Fetch daily chart history directly from Yahoo chart API with zero crumb rate limits and retry backoff."""
+    import time
     url = f"https://query2.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1d&range={range_str}"
     req = urllib.request.Request(
         url,
@@ -106,20 +107,35 @@ def fetch_direct_yahoo_chart(symbol: str, range_str: str = "2y") -> pd.DataFrame
             "Accept": "application/json",
         },
     )
-    try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            doc = json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        if e.code in (404, 400):
-            return pd.DataFrame()
-        if e.code == 429:
-            raise USRateLimitError(f"HTTP 429 rate limited for {symbol}") from e
-        raise USProviderOperationalError(f"HTTP {e.code} operational error for {symbol}") from e
-    except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as e:
-        raise USProviderOperationalError(f"Network transport error for {symbol}: {e}") from e
+    last_exc = None
+    doc = None
+    for attempt in range(max_retries):
+        try:
+            with urllib.request.urlopen(req, timeout=12) as resp:
+                doc = json.loads(resp.read().decode("utf-8"))
+            break
+        except urllib.error.HTTPError as e:
+            if e.code in (404, 400):
+                return pd.DataFrame()
+            if e.code == 429:
+                if attempt < max_retries - 1:
+                    time.sleep(1.0 * (attempt + 1))
+                    continue
+                raise USRateLimitError(f"HTTP 429 rate limited for {symbol}") from e
+            if attempt < max_retries - 1:
+                time.sleep(0.5 * (attempt + 1))
+                continue
+            raise USProviderOperationalError(f"HTTP {e.code} operational error for {symbol}") from e
+        except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as e:
+            last_exc = e
+            if attempt < max_retries - 1:
+                time.sleep(0.5 * (attempt + 1))
+                continue
+            raise USProviderOperationalError(f"Network transport error for {symbol}: {e}") from e
 
-    res = doc.get("chart", {}).get("result")
-    if not res:
+    if not doc:
+        if last_exc:
+            raise USProviderOperationalError(f"Network transport error for {symbol}: {last_exc}") from last_exc
         return pd.DataFrame()
 
     entry = res[0]
