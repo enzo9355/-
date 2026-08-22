@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import hashlib
 import json
 from pathlib import Path
 import zoneinfo
@@ -39,6 +40,23 @@ def run_us_pre_market(
     meta_rel = post_close_ptr["metadata"]
     base_meta = json.loads((root / "publish" / "reports" / "v2" / meta_rel).read_text(encoding="utf-8"))
 
+    post_close_meta_sha = base_meta.get("metadata_sha256") or post_close_ptr.get("metadata_sha256")
+    content = {
+        "base_metadata_sha256": post_close_meta_sha,
+        "core": base_meta.get("content", {}),
+        "overnight_overlay": {
+            "status": "mixed",
+            "message": f"美股 {target_market_date} 開盤前觀察",
+            "as_of": target_market_date.isoformat(),
+            "available": [],
+            "unavailable": [],
+        },
+    }
+    content_bytes = json.dumps(
+        content, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False
+    ).encode("utf-8")
+    content_sha256 = hashlib.sha256(content_bytes).hexdigest()
+
     doc = {
         "schema_version": 2,
         "kind": "absorb-report",
@@ -59,8 +77,8 @@ def run_us_pre_market(
         "title": f"ABSORB 美股盤前市場觀察報告 ({target_market_date})",
         "summary": [f"美股 {target_market_date} 開盤前市場觀察與前一交易日結構摘要。"],
         "warnings": [],
-        "content": base_meta.get("content", {}),
-        "content_sha256": base_meta["content_sha256"],
+        "content": content,
+        "content_sha256": content_sha256,
         "prediction_capability": base_meta["prediction_capability"],
     }
 
