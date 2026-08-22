@@ -63,6 +63,82 @@ def compute_us_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+import json
+import urllib.request
+import urllib.error
+
+
+def fetch_direct_yahoo_chart(symbol: str, range_str: str = "2y") -> pd.DataFrame:
+    """Fetch daily chart history directly from Yahoo chart API with zero crumb rate limits."""
+    url = f"https://query2.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1d&range={range_str}"
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            doc = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        if e.code in (404, 400):
+            return pd.DataFrame()
+        raise
+
+    res = doc.get("chart", {}).get("result")
+    if not res:
+        return pd.DataFrame()
+
+    entry = res[0]
+    timestamps = entry.get("timestamp")
+    if not timestamps:
+        return pd.DataFrame()
+
+    quote = entry.get("indicators", {}).get("quote", [{}])[0]
+    opens = quote.get("open", [])
+    highs = quote.get("high", [])
+    lows = quote.get("low", [])
+    closes = quote.get("close", [])
+    volumes = quote.get("volume", [])
+
+    n = len(timestamps)
+    records = []
+    for i in range(n):
+        o = opens[i] if i < len(opens) else None
+        h = highs[i] if i < len(highs) else None
+        l = lows[i] if i < len(lows) else None
+        c = closes[i] if i < len(closes) else None
+        v = volumes[i] if i < len(volumes) else 0.0
+        if o is None or h is None or l is None or c is None:
+            continue
+        try:
+            o, h, l, c, v = float(o), float(h), float(l), float(c), float(v or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if o <= 0 or h <= 0 or l <= 0 or c <= 0 or v < 0:
+            continue
+        if h < max(o, c, l) - 1e-4 or l > min(o, c, h) + 1e-4:
+            continue
+        dt = datetime.datetime.fromtimestamp(timestamps[i], tz=datetime.timezone.utc).astimezone(NEW_YORK).date()
+        records.append({
+            "Date": dt,
+            "Open": o,
+            "High": h,
+            "Low": l,
+            "Close": c,
+            "Volume": v,
+        })
+
+    if not records:
+        return pd.DataFrame()
+
+    df = pd.DataFrame.from_records(records)
+    df = df.drop_duplicates(subset=["Date"], keep="last")
+    df = df.set_index("Date").sort_index()
+    return df
+
+
 def fetch_us_stock_history(
     symbol: str,
     days: int = 730,
@@ -75,10 +151,13 @@ def fetch_us_stock_history(
     if mock_df is not None:
         raw_df = mock_df.copy()
     else:
-        # Ticker query using yfinance
-        yf_ticker = yf.Ticker(symbol)
-        period_str = "2y" if days >= 500 else "1y" if days >= 250 else "3mo"
-        raw_df = yf_ticker.history(period=period_str, auto_adjust=False)
+        range_str = "2y" if days >= 500 else "1y" if days >= 250 else "3mo"
+        try:
+            raw_df = fetch_direct_yahoo_chart(symbol, range_str=range_str)
+        except Exception:
+            # Fallback to yfinance if direct chart endpoint fails
+            yf_ticker = yf.Ticker(symbol)
+            raw_df = yf_ticker.history(period=range_str, auto_adjust=False)
 
     if raw_df is None or raw_df.empty:
         return pd.DataFrame()
@@ -90,18 +169,25 @@ def fetch_us_stock_history(
 
     df = raw_df.copy()
 
-    # Normalize index to America/New_York date
-    if df.index.tz is not None:
-        df.index = df.index.tz_convert(NEW_YORK)
-    
-    # Extract date
-    dates = [
-        val.date() if isinstance(val, (pd.Timestamp, datetime.datetime)) else val
-        for val in df.index
-    ]
-    df["Date"] = dates
-    df = df.drop_duplicates(subset=["Date"], keep="last")
-    df = df.set_index("Date").sort_index()
+    # Normalize index to America/New_York date if needed
+    if not isinstance(df.index, pd.DatetimeIndex) and "Date" in df.columns:
+        dates = [
+            val.date() if isinstance(val, (pd.Timestamp, datetime.datetime)) else val
+            for val in df["Date"]
+        ]
+        df["Date"] = dates
+        df = df.drop_duplicates(subset=["Date"], keep="last")
+        df = df.set_index("Date").sort_index()
+    elif isinstance(df.index, pd.DatetimeIndex):
+        if df.index.tz is not None:
+            df.index = df.index.tz_convert(NEW_YORK)
+        dates = [
+            val.date() if isinstance(val, (pd.Timestamp, datetime.datetime)) else val
+            for val in df.index
+        ]
+        df["Date"] = dates
+        df = df.drop_duplicates(subset=["Date"], keep="last")
+        df = df.set_index("Date").sort_index()
 
     # Filter out invalid numbers
     df = df.dropna(subset=["Close", "Open", "High", "Low"])
@@ -114,8 +200,8 @@ def fetch_us_stock_history(
     if (df["Volume"] < 0).any():
         raise ValueError(f"US price bar integrity violation for {symbol}: negative volume")
 
-    invalid_high = df["High"] < df[["Open", "Close", "Low"]].max(axis=1)
-    invalid_low = df["Low"] > df[["Open", "Close", "High"]].min(axis=1)
+    invalid_high = df["High"] < (df[["Open", "Close", "Low"]].max(axis=1) - 1e-4)
+    invalid_low = df["Low"] > (df[["Open", "Close", "High"]].min(axis=1) + 1e-4)
     if invalid_high.any() or invalid_low.any():
         raise ValueError(f"US price bar integrity violation for {symbol}: High/Low outside Open/Close range")
 
