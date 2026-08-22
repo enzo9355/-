@@ -61,6 +61,9 @@ def classify_sec_security_type(symbol: str, name: str, raw_ticker: str) -> str:
     if (
         "warrant" in name_lower
         or sym_upper.endswith("-WT")
+        or sym_upper.endswith("-WTA")
+        or sym_upper.endswith("-WTB")
+        or sym_upper.endswith("-WTC")
         or sym_upper.endswith("WS")
         or (len(sym_upper) == 5 and sym_upper.endswith("W"))
     ):

@@ -138,6 +138,10 @@ def fetch_direct_yahoo_chart(symbol: str, range_str: str = "2y", max_retries: in
             raise USProviderOperationalError(f"Network transport error for {symbol}: {last_exc}") from last_exc
         return pd.DataFrame()
 
+    res = doc.get("chart", {}).get("result")
+    if not res:
+        return pd.DataFrame()
+
     entry = res[0]
     timestamps = entry.get("timestamp")
     if not timestamps:
