@@ -16,9 +16,12 @@
 {% set flow_total_label = '機構資金合計買賣超' if market_code == 'US' else '三大法人合計買賣超' %}
 {% set flow_total_sub = '市場主力合計 (百萬美元)' if market_code == 'US' else '市場主力合計 (百萬元)' %}
 {% set flow_fallback = '機構資金流向尚未納入。' if market_code == 'US' else '法人流向尚未納入。' %}
+{% set status_heading = '官方交易狀態觀察（停牌、終止上市等）' if market_code == 'US' else '官方非價格交易狀態觀察（處置、減資、終止上市等）' %}
+{% set governance_gap_label = '交易狀態／資料不全' if market_code == 'US' else '處置/暫停/資料不全' %}
 {% set exec_summary = report.executive_summary if (report is defined and report.executive_summary is defined and report.executive_summary) else {} %}
 {% set market_sec = report.market if (report is defined and report.market is defined and report.market) else {} %}
 {% set flows_sec = report.capital_flows if (report is defined and report.capital_flows is defined and report.capital_flows) else {} %}
+{% set flow_reason = flow_fallback if market_code == 'US' else (flows_sec.reason or flow_fallback) %}
 {% set ind_sec = report.industries if (report is defined and report.industries is defined and report.industries) else {} %}
 {% set sec_sec = report.securities if (report is defined and report.securities is defined and report.securities) else {} %}
 {% set quant_sec = report.quantitative_research if (report is defined and report.quantitative_research is defined and report.quantitative_research) else {} %}
@@ -250,7 +253,7 @@
         </div>
       </div>
     {% else %}
-      <div class="empty-state">{{ flows_sec.reason or flow_fallback }}</div>
+      <div class="empty-state">{{ flow_reason }}</div>
     {% endif %}
   </section>
 
@@ -356,7 +359,7 @@
     {% if sec_sec.status == 'available' %}
       <!-- Subsection: Trading Status -->
       <div class="subsection">
-        <h3 class="subsection-title">官方非價格交易狀態觀察（處置、減資、終止上市等）</h3>
+        <h3 class="subsection-title">{{ status_heading }}</h3>
         {% if sec_sec.data.trading_status_observations %}
           <div class="table-wrap">
             <table class="data-table">
@@ -656,7 +659,7 @@
         <div class="kpi-card">
           <span class="kpi-label">未納入或缺失標的</span>
           <strong class="kpi-value">{{ gov_sec.data.failure_count if gov_sec.data.failure_count is not none else '0' }} 檔</strong>
-          <span class="kpi-sub">處置/暫停/資料不全</span>
+          <span class="kpi-sub">{{ governance_gap_label }}</span>
         </div>
         <div class="kpi-card">
           <span class="kpi-label">來源 Manifest 雜湊</span>
