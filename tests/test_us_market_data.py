@@ -105,6 +105,32 @@ class USMarketDataTests(unittest.TestCase):
         self.assertTrue(result.empty)
         self.assertEqual(result.attrs["dropped_non_observation_placeholder_count"], 1)
 
+    def test_direct_fetch_placeholder_count_survives_second_prepare(self):
+        target = datetime.date(2026, 8, 21)
+        dates = pd.date_range(end=target, periods=5, freq="B")
+        frame = pd.DataFrame(
+            {
+                "Open": [100.0] * 5,
+                "High": [101.0] * 5,
+                "Low": [99.0] * 5,
+                "Close": [100.5] * 5,
+                "Volume": [1000.0] * 5,
+            },
+            index=dates,
+        )
+        frame.attrs["dropped_non_observation_placeholder_count"] = 2
+
+        with patch(
+            "stock_papi.integrations.market_data.us_market_data.fetch_direct_yahoo_chart",
+            return_value=frame,
+        ):
+            result = fetch_us_stock_history(
+                "DIRECTCOUNT",
+                target_market_date=target,
+            )
+
+        self.assertEqual(result.attrs["dropped_non_observation_placeholder_count"], 2)
+
     def test_positive_volume_all_null_ohlcv_remains_schema_failure(self):
         target = datetime.date(2026, 8, 21)
         with self.assertRaises(USSchemaError):
