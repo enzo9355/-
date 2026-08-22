@@ -421,8 +421,14 @@ def fetch_us_stock_history(
         empty.attrs["dropped_non_observation_placeholder_count"] = 0
         return empty
 
+    upstream_dropped_placeholder_count = int(
+        getattr(raw_df, "attrs", {}).get(
+            "dropped_non_observation_placeholder_count", 0
+        )
+        or 0
+    )
     df = _prepare_us_history_frame(raw_df, symbol)
-    dropped_placeholder_count = int(
+    dropped_placeholder_count = upstream_dropped_placeholder_count + int(
         df.attrs.get("dropped_non_observation_placeholder_count", 0)
     )
     if df.empty:
