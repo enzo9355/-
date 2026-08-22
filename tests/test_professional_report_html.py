@@ -108,6 +108,38 @@ class ProfessionalReportHtmlTests(unittest.TestCase):
         self.assertIn("最後正常交易收盤 100.00（2026-07-16）", output)
         self.assertNotIn("quant/v1/manifests/", output)
 
+    def test_us_view_uses_us_title_and_market_disclosure(self):
+        template_text = pathlib.Path(
+            "templates/reports/post_close_professional.html"
+        ).read_text(encoding="utf-8")
+        env = Environment(
+            loader=DictLoader(
+                {
+                    "reports/post_close_professional.html": template_text,
+                    "base.html": "{% block title %}{% endblock %}{% block nav_reports %}{% endblock %}{% block content %}{% endblock %}",
+                }
+            )
+        )
+        metadata = self._metadata()
+        metadata["market"] = "US"
+        metadata["source_manifest"] = (
+            "quant/v1/manifests/US-20260717T091000Z-123456789abc.json"
+        )
+        report = build_professional_post_close_artifact(
+            metadata, code_commit_sha="b" * 40
+        )
+        view = build_professional_report_view(report)
+        output = env.get_template("reports/post_close_professional.html").render(
+            report=view
+        )
+
+        self.assertEqual(view["identity"]["market"], "US")
+        self.assertEqual(view["title"], "ABSORB 美股市場、產業與量化研究日報")
+        self.assertIn("美國公開市場資料", output)
+        self.assertNotIn("ABSORB 台股市場、產業與量化研究日報", output)
+        self.assertNotIn("TWSE", output)
+        self.assertNotIn("TPEx", output)
+
     def test_template_uses_csp_safe_classes_instead_of_inline_styles(self):
         template_text = pathlib.Path(
             "templates/reports/post_close_professional.html"
