@@ -141,6 +141,45 @@ class TestUSAdversarialFailures(unittest.TestCase):
             3,
         )
 
+    def test_integrity_failure_can_use_exact_official_fallback_with_lineage(self):
+        fallback = self._make_valid_df(symbol="FALLBACK")
+        fallback.attrs.update(
+            {
+                "source_schema_version": "nasdaq-historical-v1",
+                "source_id": "nasdaqtrader:historical",
+                "source_identity": "nasdaqtrader:historical:" + "a" * 64,
+                "source_url": "https://api.nasdaq.com/api/quote/FALLBACK/historical",
+                "payload_sha256": "a" * 64,
+                "provider_symbol": "FALLBACK",
+                "target_market_date": self.target_date.isoformat(),
+                "target_observation": "present",
+                "target_row_sha256": "b" * 64,
+                "skipped_incomplete_rows": 2,
+            }
+        )
+        with patch(
+            "stock_papi.batch.us_official_post_close_cli.fetch_us_stock_history",
+            side_effect=USIntegrityError("primary High/Low integrity failure"),
+        ), patch(
+            "stock_papi.batch.us_official_post_close_cli.fetch_nasdaq_historical_chart",
+            return_value=fallback,
+        ):
+            result = _fetch_and_classify_symbol(self.root, "FALLBACK", self.target_date)
+
+        self.assertEqual(result.kind, "R")
+        self.assertEqual(
+            result.provider_result["secondary_fallback"]["source_schema_version"],
+            "nasdaq-historical-v1",
+        )
+        self.assertEqual(
+            result.provider_result["secondary_fallback"]["provider_symbol"],
+            "FALLBACK",
+        )
+        self.assertEqual(
+            result.provider_result["primary_failure"]["error_type"],
+            "USIntegrityError",
+        )
+
     def test_target_row_with_null_ohlc_is_schema_failure(self):
         dates = pd.date_range(end=self.target_date, periods=10, freq="B")
         bad = self._make_valid_df(date=self.target_date).loc[:, ["Open", "High", "Low", "Close", "Volume"]]

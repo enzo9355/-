@@ -27,6 +27,7 @@ from stock_papi.integrations.market_data.us_calendar import (
     get_us_calendar_documents,
 )
 from stock_papi.integrations.market_data.us_market_data import (
+    fetch_nasdaq_historical_chart,
     fetch_us_stock_history,
     USObservationError,
     USObservationUnavailable,
@@ -85,6 +86,48 @@ class ObservationResult:
     official_status_evidence: dict[str, Any] | None = None
 
 
+def _provider_result(
+    df,
+    *,
+    status: str,
+    target_observation: str,
+    dropped_placeholder_count: int = 0,
+    latest_regular_price_date: str | None = None,
+    primary_failure: USObservationError | None = None,
+) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "status": status,
+        "target_observation": target_observation,
+        "dropped_non_observation_placeholder_count": dropped_placeholder_count,
+    }
+    if latest_regular_price_date is not None:
+        result["latest_regular_price_date"] = latest_regular_price_date
+    if primary_failure is not None:
+        result["primary_failure"] = {
+            "error_type": type(primary_failure).__name__,
+            "message": str(primary_failure),
+        }
+    attrs = getattr(df, "attrs", {}) if df is not None else {}
+    if attrs.get("source_schema_version"):
+        result["secondary_fallback"] = {
+            key: attrs.get(key)
+            for key in (
+                "source_schema_version",
+                "source_id",
+                "source_url",
+                "source_identity",
+                "payload_sha256",
+                "provider_symbol",
+                "target_market_date",
+                "target_row_sha256",
+                "skipped_incomplete_rows",
+                "target_observation",
+            )
+            if key in attrs
+        }
+    return result
+
+
 def _fetch_and_classify_symbol(
     root: Path,
     symbol: str,
@@ -94,8 +137,19 @@ def _fetch_and_classify_symbol(
 ) -> ObservationResult:
     """Fetch and classify a single symbol into R, N, M, or OP_FAIL using typed exception semantics."""
     target_iso = target_market_date.isoformat()
+    primary_failure: USObservationError | None = None
     try:
-        df = fetch_us_stock_history(symbol, target_market_date=target_market_date)
+        try:
+            df = fetch_us_stock_history(symbol, target_market_date=target_market_date)
+        except (USSchemaError, USIntegrityError) as exc:
+            primary_failure = exc
+            try:
+                df = fetch_nasdaq_historical_chart(
+                    symbol,
+                    target_market_date=target_market_date,
+                )
+            except Exception as fallback_exc:
+                raise exc from fallback_exc
         dropped_placeholder_count = int(
             getattr(df, "attrs", {}).get(
                 "dropped_non_observation_placeholder_count", 0
@@ -135,11 +189,13 @@ def _fetch_and_classify_symbol(
                     detail=halt_doc,
                     reason_code="verified_halt",
                     security_evidence=(security_evidence_by_symbol or {}).get(symbol),
-                    provider_result={
-                        "status": "healthy",
-                        "target_observation": "absent",
-                        "dropped_non_observation_placeholder_count": dropped_placeholder_count,
-                    },
+                    provider_result=_provider_result(
+                        df,
+                        status="healthy",
+                        target_observation="absent",
+                        dropped_placeholder_count=dropped_placeholder_count,
+                        primary_failure=primary_failure,
+                    ),
                     official_status_evidence=halt_doc,
                 )
             return ObservationResult(
@@ -148,11 +204,13 @@ def _fetch_and_classify_symbol(
                 detail="provider_healthy_no_target_observation",
                 reason_code="provider_healthy_no_target_observation",
                 security_evidence=(security_evidence_by_symbol or {}).get(symbol),
-                provider_result={
-                    "status": "healthy",
-                    "target_observation": "absent",
-                    "dropped_non_observation_placeholder_count": dropped_placeholder_count,
-                },
+                provider_result=_provider_result(
+                    df,
+                    status="healthy",
+                    target_observation="absent",
+                    dropped_placeholder_count=dropped_placeholder_count,
+                    primary_failure=primary_failure,
+                ),
             )
 
         daily = json.loads(
@@ -165,12 +223,13 @@ def _fetch_and_classify_symbol(
                 detail="provider_healthy_no_target_observation",
                 reason_code="provider_healthy_no_target_observation",
                 security_evidence=(security_evidence_by_symbol or {}).get(symbol),
-                provider_result={
-                    "status": "healthy",
-                    "target_observation": "absent",
-                    "latest_regular_price_date": None,
-                    "dropped_non_observation_placeholder_count": dropped_placeholder_count,
-                },
+                provider_result=_provider_result(
+                    df,
+                    status="healthy",
+                    target_observation="absent",
+                    dropped_placeholder_count=dropped_placeholder_count,
+                    primary_failure=primary_failure,
+                ),
             )
 
         latest = daily[-1]
@@ -188,10 +247,35 @@ def _fetch_and_classify_symbol(
                 "latest_regular_price_date": as_of,
                 "observation_kind": "regular_price",
                 "lineage": {
-                    "source_schema_version": "us-market-data-v1",
+                    "source_schema_version": getattr(df, "attrs", {}).get(
+                        "source_schema_version", "us-market-data-v1"
+                    ),
                     "observation_as_of": as_of,
                     "latest_regular_price_date": as_of,
                     "observation_kind": "regular_price",
+                    **(
+                        {
+                            "secondary_source": _provider_result(
+                                df,
+                                status="healthy",
+                                target_observation="present",
+                                dropped_placeholder_count=dropped_placeholder_count,
+                                primary_failure=primary_failure,
+                            ).get("secondary_fallback")
+                        }
+                        if getattr(df, "attrs", {}).get("source_schema_version")
+                        else {}
+                    ),
+                    **(
+                        {
+                            "primary_failure": {
+                                "error_type": type(primary_failure).__name__,
+                                "message": str(primary_failure),
+                            }
+                        }
+                        if primary_failure is not None
+                        else {}
+                    ),
                 },
                 "rows": len(daily),
                 "latest": latest,
@@ -204,12 +288,15 @@ def _fetch_and_classify_symbol(
                 kind="R",
                 detail=latest,
                 reason_code="regular_price_observed",
-                provider_result={
-                    "status": "healthy",
-                    "target_observation": "present",
-                    "latest_regular_price_date": as_of,
-                    "dropped_non_observation_placeholder_count": dropped_placeholder_count,
-                },
+                security_evidence=(security_evidence_by_symbol or {}).get(symbol),
+                provider_result=_provider_result(
+                    df,
+                    status="healthy",
+                    target_observation="present",
+                    dropped_placeholder_count=dropped_placeholder_count,
+                    latest_regular_price_date=as_of,
+                    primary_failure=primary_failure,
+                ),
             )
         elif as_of < target_iso:
             # History exists but no trade on target date
@@ -243,12 +330,14 @@ def _fetch_and_classify_symbol(
                     kind="N",
                     detail=halt_doc,
                     reason_code="verified_halt",
-                    provider_result={
-                        "status": "healthy",
-                        "target_observation": "absent",
-                        "latest_regular_price_date": as_of,
-                        "dropped_non_observation_placeholder_count": dropped_placeholder_count,
-                    },
+                    provider_result=_provider_result(
+                        df,
+                        status="healthy",
+                        target_observation="absent",
+                        dropped_placeholder_count=dropped_placeholder_count,
+                        latest_regular_price_date=as_of,
+                        primary_failure=primary_failure,
+                    ),
                 )
             return ObservationResult(
                 symbol=symbol,
@@ -256,12 +345,14 @@ def _fetch_and_classify_symbol(
                 detail=f"no_trade_on_target_date_last_trade_{as_of}",
                 reason_code="provider_healthy_no_target_observation",
                 security_evidence=(security_evidence_by_symbol or {}).get(symbol),
-                provider_result={
-                    "status": "healthy",
-                    "target_observation": "absent",
-                    "latest_regular_price_date": as_of,
-                    "dropped_non_observation_placeholder_count": dropped_placeholder_count,
-                },
+                provider_result=_provider_result(
+                    df,
+                    status="healthy",
+                    target_observation="absent",
+                    dropped_placeholder_count=dropped_placeholder_count,
+                    latest_regular_price_date=as_of,
+                    primary_failure=primary_failure,
+                ),
             )
         else:
             return ObservationResult(

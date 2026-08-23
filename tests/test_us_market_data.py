@@ -9,6 +9,7 @@ from unittest.mock import patch
 from stock_papi.integrations.market_data.us_market_data import (
     compute_us_technical_indicators,
     fetch_direct_yahoo_chart,
+    fetch_nasdaq_historical_chart,
     fetch_us_stock_history,
     USIntegrityError,
     USSchemaError,
@@ -38,6 +39,123 @@ class USMarketDataTests(unittest.TestCase):
         self.assertIn("D", res.columns)
         self.assertIn("VOL_RATIO", res.columns)
         self.assertAlmostEqual(float(res["MA5"].iloc[-1]), 129.0)  # Average of 127, 128, 129, 130, 131
+
+    def test_short_history_masks_indicators_that_lack_lookback(self):
+        target = datetime.date(2026, 8, 21)
+        dates = pd.date_range(end=target, periods=8, freq="B")
+        df = pd.DataFrame(
+            {
+                "Open": [10.0 + i for i in range(8)],
+                "High": [10.5 + i for i in range(8)],
+                "Low": [9.5 + i for i in range(8)],
+                "Close": [10.25 + i for i in range(8)],
+                "Volume": [1000.0 + i for i in range(8)],
+            },
+            index=dates,
+        )
+        result = compute_us_technical_indicators(df)
+
+        self.assertFalse(pd.isna(result["MA5"].iloc[-1]))
+        self.assertTrue(pd.isna(result["MA20"].iloc[-1]))
+        self.assertTrue(pd.isna(result["MA60"].iloc[-1]))
+        self.assertFalse(pd.isna(result["VOL_RATIO"].iloc[-1]))
+        self.assertTrue(pd.isna(result["RSI"].iloc[-1]))
+        self.assertTrue(pd.isna(result["MACD"].iloc[-1]))
+        self.assertTrue(pd.isna(result["K"].iloc[-1]))
+
+    def test_nasdaq_historical_fallback_requires_exact_symbol_and_preserves_target_evidence(self):
+        target = datetime.date(2026, 8, 21)
+        dates = [target - datetime.timedelta(days=7 - i) for i in range(8)]
+
+        def row(date, value):
+            return {
+                "date": date.strftime("%m/%d/%Y"),
+                "close": f"${value:.2f}",
+                "volume": f"{1000 + value:.0f}",
+                "open": f"${value - 0.1:.2f}",
+                "high": f"${value + 0.2:.2f}",
+                "low": f"${value - 0.2:.2f}",
+            }
+
+        document = {
+            "data": {
+                "symbol": "SNSC",
+                "tradesTable": {"rows": [row(date, 10.0 + i) for i, date in enumerate(dates)]},
+            }
+        }
+        result = fetch_nasdaq_historical_chart(
+            "SNSC",
+            target_market_date=target,
+            fetch_json=lambda: document,
+        )
+        self.assertIn(target, result.index)
+        self.assertEqual(result.attrs["source_schema_version"], "nasdaq-historical-v1")
+        self.assertEqual(result.attrs["provider_symbol"], "SNSC")
+        self.assertTrue(result.attrs["target_observation"] == "present")
+        self.assertTrue(pd.isna(result["MA20"].iloc[-1]))
+        self.assertTrue(pd.isna(result["RSI"].iloc[-1]))
+        self.assertTrue(pd.isna(result["K"].iloc[-1]))
+
+        wrong_identity = {"data": {**document["data"], "symbol": "WLYB"}}
+        with self.assertRaises(USSchemaError):
+            fetch_nasdaq_historical_chart(
+                "SNSC",
+                target_market_date=target,
+                fetch_json=lambda: wrong_identity,
+            )
+
+    def test_nasdaq_historical_fallback_does_not_promote_a_stale_date(self):
+        target = datetime.date(2026, 8, 21)
+        document = {
+            "data": {
+                "symbol": "SNSC",
+                "tradesTable": {
+                    "rows": [
+                        {
+                            "date": "08/20/2026",
+                            "close": "$10.00",
+                            "volume": "1000",
+                            "open": "$9.90",
+                            "high": "$10.20",
+                            "low": "$9.80",
+                        }
+                    ]
+                },
+            }
+        }
+        result = fetch_nasdaq_historical_chart(
+            "SNSC",
+            target_market_date=target,
+            fetch_json=lambda: document,
+        )
+        self.assertNotIn(target, result.index)
+        self.assertEqual(result.attrs["target_observation"], "absent")
+
+    def test_nasdaq_historical_fallback_rejects_incomplete_target_row(self):
+        target = datetime.date(2026, 8, 21)
+        document = {
+            "data": {
+                "symbol": "SNSC",
+                "tradesTable": {
+                    "rows": [
+                        {
+                            "date": "08/21/2026",
+                            "close": "N/A",
+                            "volume": "1000",
+                            "open": "$9.90",
+                            "high": "$10.20",
+                            "low": "$9.80",
+                        }
+                    ]
+                },
+            }
+        }
+        with self.assertRaises(USSchemaError):
+            fetch_nasdaq_historical_chart(
+                "SNSC",
+                target_market_date=target,
+                fetch_json=lambda: document,
+            )
 
     def test_fetch_us_stock_history_mock(self):
         dates = pd.date_range("2026-08-01", periods=15, freq="B")
