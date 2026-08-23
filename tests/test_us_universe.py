@@ -3,6 +3,7 @@
 import datetime
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from stock_papi.integrations.market_data.us_universe import (
     get_us_symbols,
@@ -216,6 +217,166 @@ class USUniverseTests(unittest.TestCase):
         self.assertEqual(breakdown.security_eligibility_by_symbol["ACP-PA"]["security_type"], "PREFERRED")
         self.assertNotIn("AACIW", breakdown.symbols)
         self.assertEqual(breakdown.exclusions_by_symbol["AACIW"]["source_id"] if "source_id" in breakdown.exclusions_by_symbol["AACIW"] else breakdown.exclusions_by_symbol["AACIW"]["source"], "nasdaqtrader:nasdaqlisted")
+
+    def test_nasdaq_etn_is_authoritatively_excluded_from_equity_observation(self):
+        from stock_papi.integrations.market_data.us_universe import (
+            parse_nasdaq_security_directory,
+            parse_sec_us_universe_with_metadata,
+        )
+
+        directory = parse_nasdaq_security_directory(
+            "\n".join(
+                [
+                    "ACT Symbol|Security Name|Exchange|CQS Symbol|ETF|Round Lot Size|Test Issue|NASDAQ Symbol",
+                    "BRZL|MicroSectors 3x Long Brazil ETNs|Z|BRZL|Y|100|N|BRZL",
+                    "File Creation Time: 0821202616:00|||||||",
+                ]
+            ),
+            source_id="nasdaqtrader:otherlisted",
+            source_url="https://example.test/otherlisted.txt",
+        )
+        self.assertEqual(directory["records"]["BRZL"]["security_type"], "ETN")
+
+        breakdown = parse_sec_us_universe_with_metadata(
+            {
+                "fields": ["cik", "name", "ticker", "exchange"],
+                "data": [
+                    [1, "MicroSectors 3x Long Brazil ETNs", "BRZL", "Nasdaq"],
+                    [2, "Apple Inc. Common Stock", "AAPL", "Nasdaq"],
+                ],
+            },
+            security_metadata=directory["records"],
+        )
+        self.assertEqual(breakdown.symbols, ["AAPL"])
+        self.assertEqual(breakdown.excluded_derivative_count, 1)
+        self.assertEqual(breakdown.derivative_breakdown["ETN"], 1)
+        self.assertEqual(
+            breakdown.exclusions_by_symbol["BRZL"]["reason"],
+            "excluded_authoritative_security_type_etn",
+        )
+
+    def test_nasdaq_etn_wins_generic_cross_exchange_etf_conflict(self):
+        from stock_papi.integrations.market_data.us_universe import fetch_official_us_security_metadata
+
+        nasdaq_record = {
+            "BRZL": {
+                "security_name": "MicroSectors 3x Long Brazil ETNs",
+                "security_type": "ETN",
+                "source_id": "nasdaqtrader:otherlisted",
+                "as_of": "2026-08-21",
+            }
+        }
+        nyse_record = {
+            "BRZL": {
+                "security_name": "MicroSectors 3x Long Brazil ETF",
+                "security_type": "ETF",
+                "source_id": "nyse:security_mapping",
+                "as_of": "2026-08-24",
+            }
+        }
+        with patch(
+            "stock_papi.integrations.market_data.us_universe.fetch_nasdaq_security_directory",
+            return_value={"records": nasdaq_record, "sources": [], "status": "healthy"},
+        ), patch(
+            "stock_papi.integrations.market_data.us_universe.fetch_nyse_security_mapping",
+            return_value={"records": nyse_record, "sources": [], "status": "healthy"},
+        ):
+            metadata = fetch_official_us_security_metadata(
+                target_market_date=datetime.date(2026, 8, 21)
+            )
+        self.assertEqual(metadata["records"]["BRZL"]["security_type"], "ETN")
+        self.assertNotIn("BRZL", metadata["conflicted_symbols"])
+
+    def test_nasdaq_corporate_action_parser_excludes_only_claimed_symbols(self):
+        from stock_papi.integrations.market_data.us_universe import parse_nasdaq_corporate_action_alert
+
+        text = """
+        Company Name/Issue: Inflection Point Acquisition Corp. III Class A Ordinary Shares
+        CUSIP#: G47875102 Symbol: IPCX Last Trading Date: August 14, 2026
+        Marketplace Effective Date for Suspension: August 17, 2026
+        Company Name/Issue: Inflection Point Acquisition Corp. III Rights
+        CUSIP#: G47875110 Symbol: IPCXR Last Trading Date: August 14, 2026
+        Marketplace Effective Date for Suspension: August 17, 2026
+        Company Name/Issue: Air Water Ventures Limited Ordinary Shares
+        CUSIP#: 00000000 Symbol: WATR Marketplace Effective Date: August 17, 2026
+        """
+        document = parse_nasdaq_corporate_action_alert(text)
+        self.assertEqual(
+            [(event["symbol"], event["security_type"]) for event in document["events"]],
+            [("IPCX", "COMMON_EQUITY"), ("IPCXR", "RIGHT")],
+        )
+
+    def test_effective_lifecycle_events_use_event_security_identity_and_preserve_replacement(self):
+        from stock_papi.integrations.market_data.us_universe import parse_sec_us_universe_with_metadata
+
+        doc = {
+            "fields": ["cik", "name", "ticker", "exchange"],
+            "data": [
+                [1, "iShares IPCX Class A Ordinary Shares", "IPCX", "Nasdaq"],
+                [2, "iShares IPCX Rights", "IPCXR", "Nasdaq"],
+                [3, "iShares IPCX Units", "IPCXU", "Nasdaq"],
+                [4, "WATER Technologies Common Stock", "WATR", "Nasdaq"],
+            ],
+        }
+        source_identity = "nasdaqtrader:corporate_action:ECA2026-576:" + "a" * 64
+        events = [
+            {
+                "symbol": "IPCX",
+                "event": "suspended",
+                "effective_date": "2026-08-17",
+                "last_trading_date": "2026-08-14",
+                "security_type": "COMMON_EQUITY",
+                "source": "https://www.nasdaqtrader.com/TraderNews.aspx?id=ECA2026-576",
+                "source_identity": source_identity,
+                "payload_sha256": "a" * 64,
+                "evidence_sha256": "b" * 64,
+            },
+            {
+                "symbol": "IPCXR",
+                "event": "suspended",
+                "effective_date": "2026-08-17",
+                "last_trading_date": "2026-08-14",
+                "security_type": "RIGHT",
+                "source": "https://www.nasdaqtrader.com/TraderNews.aspx?id=ECA2026-576",
+                "source_identity": source_identity,
+                "payload_sha256": "a" * 64,
+                "evidence_sha256": "c" * 64,
+            },
+            {
+                "symbol": "IPCXU",
+                "event": "suspended",
+                "effective_date": "2026-08-17",
+                "last_trading_date": "2026-08-14",
+                "security_type": "UNIT",
+                "source": "https://www.nasdaqtrader.com/TraderNews.aspx?id=ECA2026-576",
+                "source_identity": source_identity,
+                "payload_sha256": "a" * 64,
+                "evidence_sha256": "d" * 64,
+            },
+        ]
+
+        before_effective = parse_sec_us_universe_with_metadata(
+            doc,
+            target_market_date=datetime.date(2026, 8, 14),
+            lifecycle_events=events,
+        )
+        self.assertIn("IPCX", before_effective.symbols)
+        self.assertIn("IPCXR", before_effective.symbols)
+        self.assertIn("IPCXU", before_effective.symbols)
+        self.assertIn("WATR", before_effective.symbols)
+
+        after_effective = parse_sec_us_universe_with_metadata(
+            doc,
+            target_market_date=datetime.date(2026, 8, 21),
+            lifecycle_events=events,
+        )
+        self.assertNotIn("IPCX", after_effective.symbols)
+        self.assertNotIn("IPCXR", after_effective.symbols)
+        self.assertNotIn("IPCXU", after_effective.symbols)
+        self.assertIn("WATR", after_effective.symbols)
+        self.assertEqual(after_effective.exclusions_by_symbol["IPCX"]["event"], "suspended")
+        self.assertEqual(after_effective.exclusions_by_symbol["IPCXR"]["classification"], "RIGHT")
+        self.assertEqual(after_effective.security_eligibility_by_symbol["IPCX"]["security_type"], "COMMON_EQUITY")
 
     def test_first_party_directory_normalizes_official_security_aliases(self):
         from stock_papi.integrations.market_data.us_universe import parse_nasdaq_security_directory

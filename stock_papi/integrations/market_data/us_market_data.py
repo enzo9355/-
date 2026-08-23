@@ -1,7 +1,12 @@
 """Production US stock market data fetcher with schema validation and technical indicators."""
 
 import datetime
+import hashlib
+import json
 import math
+import urllib.error
+import urllib.parse
+import urllib.request
 import zoneinfo
 from collections.abc import Mapping
 
@@ -43,60 +48,73 @@ class USCalendarError(USObservationError):
 def compute_us_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
     """Compute standard technical indicators for US stock daily history."""
     df = df.copy()
-    if df.empty or len(df) < 5:
+    if df.empty:
         return df
 
     close = df["Close"]
     volume = df["Volume"]
 
     # Moving averages
-    df["MA5"] = close.rolling(window=5, min_periods=1).mean()
-    df["MA20"] = close.rolling(window=20, min_periods=1).mean()
-    df["MA60"] = close.rolling(window=60, min_periods=1).mean()
+    df["MA5"] = close.rolling(window=5, min_periods=5).mean()
+    df["MA20"] = close.rolling(window=20, min_periods=20).mean()
+    df["MA60"] = close.rolling(window=60, min_periods=60).mean()
 
     # Volume ratio (today volume / 5d average volume)
-    vol_ma5 = volume.rolling(window=5, min_periods=1).mean()
+    vol_ma5 = volume.rolling(window=5, min_periods=5).mean()
     df["VOL_RATIO"] = np.where(vol_ma5 > 0, volume / vol_ma5, 1.0)
 
     # RSI (14-period standard)
     delta = close.diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
-    avg_gain = gain.rolling(window=14, min_periods=1).mean()
-    avg_loss = loss.rolling(window=14, min_periods=1).mean()
-    rs = np.where(avg_loss > 0, avg_gain / avg_loss, 100.0)
-    df["RSI"] = 100.0 - (100.0 / (1.0 + rs))
+    avg_gain = gain.rolling(window=14, min_periods=14).mean()
+    avg_loss = loss.rolling(window=14, min_periods=14).mean()
+    rsi = pd.Series(np.nan, index=df.index, dtype=float)
+    valid_rsi = avg_gain.notna() & avg_loss.notna()
+    positive_loss = valid_rsi & avg_loss.gt(0)
+    rsi.loc[positive_loss] = 100.0 - (
+        100.0 / (1.0 + avg_gain.loc[positive_loss] / avg_loss.loc[positive_loss])
+    )
+    no_loss_gain = valid_rsi & avg_loss.eq(0) & avg_gain.gt(0)
+    rsi.loc[no_loss_gain] = 100.0
+    flat_window = valid_rsi & avg_loss.eq(0) & avg_gain.eq(0)
+    rsi.loc[flat_window] = 50.0
+    df["RSI"] = rsi
 
     # MACD (12, 26, 9)
-    ema12 = close.ewm(span=12, adjust=False).mean()
-    ema26 = close.ewm(span=26, adjust=False).mean()
+    ema12 = close.ewm(span=12, adjust=False, min_periods=12).mean()
+    ema26 = close.ewm(span=26, adjust=False, min_periods=26).mean()
     df["MACD"] = ema12 - ema26
-    df["MACD_SIGNAL"] = df["MACD"].ewm(span=9, adjust=False).mean()
+    df["MACD_SIGNAL"] = df["MACD"].ewm(span=9, adjust=False, min_periods=9).mean()
     df["MACD_OSC"] = df["MACD"] - df["MACD_SIGNAL"]
 
     # KD (9, 3, 3)
-    low9 = df["Low"].rolling(window=9, min_periods=1).min()
-    high9 = df["High"].rolling(window=9, min_periods=1).max()
-    rsv = np.where(high9 > low9, (close - low9) / (high9 - low9) * 100.0, 50.0)
-    k_series = pd.Series(50.0, index=df.index)
-    d_series = pd.Series(50.0, index=df.index)
+    low9 = df["Low"].rolling(window=9, min_periods=9).min()
+    high9 = df["High"].rolling(window=9, min_periods=9).max()
+    rsv = pd.Series(np.nan, index=df.index, dtype=float)
+    valid_kd = low9.notna() & high9.notna()
+    non_flat_kd = valid_kd & high9.gt(low9)
+    rsv.loc[non_flat_kd] = (
+        (close.loc[non_flat_kd] - low9.loc[non_flat_kd])
+        / (high9.loc[non_flat_kd] - low9.loc[non_flat_kd])
+        * 100.0
+    )
+    rsv.loc[valid_kd & high9.eq(low9)] = 50.0
+    k_series = pd.Series(np.nan, index=df.index, dtype=float)
+    d_series = pd.Series(np.nan, index=df.index, dtype=float)
+    previous_k = 50.0
+    previous_d = 50.0
     for i in range(len(df)):
-        if i == 0:
-            k_series.iloc[i] = 50.0 * (2/3) + rsv[i] * (1/3)
-            d_series.iloc[i] = 50.0 * (2/3) + k_series.iloc[i] * (1/3)
-        else:
-            k_series.iloc[i] = k_series.iloc[i-1] * (2/3) + rsv[i] * (1/3)
-            d_series.iloc[i] = d_series.iloc[i-1] * (2/3) + k_series.iloc[i] * (1/3)
+        if pd.isna(rsv.iloc[i]):
+            continue
+        previous_k = previous_k * (2 / 3) + float(rsv.iloc[i]) * (1 / 3)
+        previous_d = previous_d * (2 / 3) + previous_k * (1 / 3)
+        k_series.iloc[i] = previous_k
+        d_series.iloc[i] = previous_d
     df["K"] = k_series
     df["D"] = d_series
 
     return df
-
-
-import json
-import urllib.request
-import urllib.error
-
 
 _US_REQUIRED_PRICE_COLUMNS = ("Open", "High", "Low", "Close", "Volume")
 
@@ -186,6 +204,221 @@ def _validate_us_price_values(
             f"US price bar integrity violation for {symbol} on {date.isoformat()}: "
             "High/Low outside Open/Close range"
         )
+
+
+def _parse_nasdaq_historical_number(
+    value, *, symbol: str, field: str, date: datetime.date
+) -> float:
+    if value is None or (isinstance(value, str) and value.strip().upper() in {"", "N/A", "NA", "--"}):
+        raise USSchemaError(
+            f"Nasdaq historical row has missing {field} for {symbol} on {date.isoformat()}"
+        )
+    if isinstance(value, bool):
+        raise USSchemaError(
+            f"Nasdaq historical row has invalid {field} for {symbol} on {date.isoformat()}"
+        )
+    text = str(value).strip().replace(",", "")
+    if text.startswith("$"):
+        text = text[1:].strip()
+    try:
+        number = float(text)
+    except (TypeError, ValueError) as exc:
+        raise USSchemaError(
+            f"Nasdaq historical row has non-numeric {field} for {symbol} on {date.isoformat()}"
+        ) from exc
+    if not math.isfinite(number):
+        raise USSchemaError(
+            f"Nasdaq historical row has non-finite {field} for {symbol} on {date.isoformat()}"
+        )
+    return number
+
+
+def fetch_nasdaq_historical_chart(
+    symbol: str,
+    *,
+    target_market_date: datetime.date,
+    days: int = 730,
+    timeout: int = 30,
+    max_retries: int = 2,
+    fetch_json=None,
+) -> pd.DataFrame:
+    """Fetch exact-symbol daily history from Nasdaq's official historical API.
+
+    The endpoint is used only as a secondary source after a primary data
+    integrity/schema failure.  Incomplete historical rows are discarded with
+    a counted provenance record; an incomplete target row is always rejected.
+    No price or volume is synthesized.
+    """
+    normalized_symbol = str(symbol).strip().upper()
+    if not normalized_symbol or not all(
+        character.isalnum() or character == "-" for character in normalized_symbol
+    ):
+        raise USSchemaError(f"invalid Nasdaq historical symbol: {symbol!r}")
+    if not isinstance(target_market_date, datetime.date):
+        raise USSchemaError("Nasdaq historical target date is invalid")
+    if days <= 0:
+        raise USSchemaError("Nasdaq historical lookback is invalid")
+    if max_retries <= 0:
+        raise USSchemaError("Nasdaq historical retry count is invalid")
+
+    from_date = target_market_date - datetime.timedelta(days=days)
+    query = urllib.parse.urlencode(
+        {
+            "assetclass": "stocks",
+            "fromdate": from_date.isoformat(),
+            "todate": target_market_date.isoformat(),
+            "limit": "5000",
+        }
+    )
+    source_url = (
+        f"https://api.nasdaq.com/api/quote/{urllib.parse.quote(normalized_symbol)}/historical?{query}"
+    )
+
+    if fetch_json is not None:
+        try:
+            document = fetch_json()
+        except TypeError:
+            document = fetch_json(source_url)
+        try:
+            payload_sha256 = hashlib.sha256(
+                json.dumps(
+                    document,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                ).encode("utf-8")
+            ).hexdigest()
+        except (TypeError, ValueError) as exc:
+            raise USSchemaError("Nasdaq historical test payload is not canonical JSON") from exc
+    else:
+        request = urllib.request.Request(
+            source_url,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
+                "Accept": "application/json, text/plain, */*",
+                "Accept-Encoding": "identity",
+                "Origin": "https://www.nasdaq.com",
+                "Referer": "https://www.nasdaq.com/",
+            },
+        )
+        last_exc = None
+        for attempt in range(max_retries):
+            try:
+                with urllib.request.urlopen(request, timeout=timeout) as response:
+                    raw_payload = response.read(8 * 1024 * 1024 + 1)
+                break
+            except urllib.error.HTTPError as exc:
+                last_exc = exc
+                if exc.code in {408, 425, 429, 500, 502, 503, 504} and attempt < max_retries - 1:
+                    continue
+                raise USProviderOperationalError(
+                    f"Nasdaq historical HTTP {exc.code} for {normalized_symbol}"
+                ) from exc
+            except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as exc:
+                last_exc = exc
+                if attempt < max_retries - 1:
+                    continue
+                raise USProviderOperationalError(
+                    f"Nasdaq historical transport error for {normalized_symbol}: {exc}"
+                ) from exc
+        else:
+            raise USProviderOperationalError(
+                f"Nasdaq historical transport error for {normalized_symbol}: {last_exc}"
+            ) from last_exc
+        if len(raw_payload) > 8 * 1024 * 1024:
+            raise USSchemaError("Nasdaq historical response is too large")
+        payload_sha256 = hashlib.sha256(raw_payload).hexdigest()
+        try:
+            document = json.loads(raw_payload.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise USSchemaError("Nasdaq historical response is not valid JSON") from exc
+
+    if not isinstance(document, Mapping) or not isinstance(document.get("data"), Mapping):
+        raise USSchemaError(f"Nasdaq historical payload schema is invalid for {normalized_symbol}")
+    data = document["data"]
+    provider_symbol = str(data.get("symbol") or "").strip().upper()
+    if provider_symbol != normalized_symbol:
+        raise USSchemaError(
+            f"Nasdaq historical symbol identity mismatch: requested {normalized_symbol}, got {provider_symbol or '<missing>'}"
+        )
+    table = data.get("tradesTable")
+    rows = table.get("rows") if isinstance(table, Mapping) else None
+    if not isinstance(rows, list):
+        raise USSchemaError(f"Nasdaq historical rows schema is invalid for {normalized_symbol}")
+
+    records: list[dict[str, object]] = []
+    skipped_incomplete_rows = 0
+    target_row_sha256: str | None = None
+    field_map = {
+        "Open": "open",
+        "High": "high",
+        "Low": "low",
+        "Close": "close",
+        "Volume": "volume",
+    }
+    for row_number, row in enumerate(rows):
+        if not isinstance(row, Mapping):
+            raise USSchemaError(
+                f"Nasdaq historical row {row_number} is invalid for {normalized_symbol}"
+            )
+        date_text = str(row.get("date") or row.get("Date") or "").strip()
+        try:
+            row_date = datetime.datetime.strptime(date_text, "%m/%d/%Y").date()
+        except (TypeError, ValueError) as exc:
+            raise USSchemaError(
+                f"Nasdaq historical date is invalid for {normalized_symbol}: {date_text!r}"
+            ) from exc
+        if row_date > target_market_date:
+            raise USSchemaError(
+                f"Nasdaq historical future row for {normalized_symbol}: {row_date.isoformat()}"
+            )
+        raw_values = {field: row.get(source_field) for field, source_field in field_map.items()}
+        incomplete = any(
+            value is None
+            or (isinstance(value, str) and value.strip().upper() in {"", "N/A", "NA", "--"})
+            for value in raw_values.values()
+        )
+        if incomplete:
+            if row_date == target_market_date:
+                raise USSchemaError(
+                    f"Nasdaq historical target row is incomplete for {normalized_symbol}"
+                )
+            skipped_incomplete_rows += 1
+            continue
+        numeric = {
+            field: _parse_nasdaq_historical_number(
+                value,
+                symbol=normalized_symbol,
+                field=field,
+                date=row_date,
+            )
+            for field, value in raw_values.items()
+        }
+        _validate_us_price_values(symbol=normalized_symbol, date=row_date, values=numeric)
+        if row_date == target_market_date:
+            target_row_sha256 = hashlib.sha256(
+                json.dumps(dict(row), ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            ).hexdigest()
+        records.append({"Date": row_date, **numeric})
+
+    prepared = _prepare_us_history_frame(pd.DataFrame.from_records(records), normalized_symbol)
+    prepared = compute_us_technical_indicators(prepared)
+    prepared.attrs.update(
+        {
+            "source_schema_version": "nasdaq-historical-v1",
+            "source_id": "nasdaqtrader:historical",
+            "source_url": source_url,
+            "source_identity": f"nasdaqtrader:historical:{payload_sha256}",
+            "payload_sha256": payload_sha256,
+            "provider_symbol": provider_symbol,
+            "target_market_date": target_market_date.isoformat(),
+            "target_observation": "present" if target_market_date in prepared.index else "absent",
+            "target_row_sha256": target_row_sha256,
+            "skipped_incomplete_rows": skipped_incomplete_rows,
+        }
+    )
+    return prepared
 
 
 def _prepare_us_history_frame(raw_df: pd.DataFrame, symbol: str) -> pd.DataFrame:

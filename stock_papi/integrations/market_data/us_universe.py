@@ -1,7 +1,9 @@
 """Authoritative US stock market universe from official SEC exchange listings."""
 
 import datetime
+import base64
 import hashlib
+import html
 import json
 import re
 import urllib.request
@@ -33,6 +35,12 @@ SEC_US_UNIVERSE_MAX_BYTES = 15 * 1024 * 1024
 NASDAQ_SYMBOL_DIRECTORY_MAX_BYTES = 8 * 1024 * 1024
 NYSE_SYMBOL_MAPPING_INDEX_MAX_BYTES = 2 * 1024 * 1024
 NYSE_SYMBOL_MAPPING_MAX_BYTES = 12 * 1024 * 1024
+NASDAQ_CORPORATE_ACTION_ALERT_URL = "https://www.nasdaqtrader.com/TraderNews.aspx?id=ECA2026-576"
+NASDAQ_CORPORATE_ACTION_ALERT_SOURCE_ID = "nasdaqtrader:corporate_action:ECA2026-576"
+NASDAQ_CORPORATE_ACTION_ALERT_CLAIMS_SHA256 = "228096681f4d7b2f280f7fc7df4c063336227bc4ef6ee011fcb54d598ed822a2"
+NASDAQ_CORPORATE_ACTION_ALERT_EFFECTIVE_DATE = datetime.date(2026, 8, 17)
+NASDAQ_CORPORATE_ACTION_ALERT_MAX_BYTES = 2 * 1024 * 1024
+US_UNIVERSE_CACHE_CONTRACT_VERSION = 7
 US_ACCEPTED_EXCHANGES = frozenset(
     {"NASDAQ", "NYSE", "CBOE", "BATS", "NYS", "ASE", "AMEX"}
 )
@@ -77,6 +85,7 @@ SUPPORTED_SECURITY_TYPES = frozenset(
         "COMMON_EQUITY",
         "ADR",
         "ETF",
+        "ETN",
         "WARRANT",
         "RIGHT",
         "UNIT",
@@ -84,7 +93,7 @@ SUPPORTED_SECURITY_TYPES = frozenset(
         "UNKNOWN",
     }
 )
-DERIVATIVE_SECURITY_TYPES = frozenset({"WARRANT", "RIGHT", "UNIT", "PREFERRED"})
+DERIVATIVE_SECURITY_TYPES = frozenset({"ETN", "WARRANT", "RIGHT", "UNIT", "PREFERRED"})
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 NYSE_SECURITY_TYPE_CODES = {
     "C": "COMMON_EQUITY",
@@ -158,6 +167,8 @@ def _official_security_type_from_name(name: str, *, etf: str | None = None) -> s
         return "WARRANT"
     if re.search(r"\bright(?:s)?(?:\s*,|\s*$|\s+each|\s+entitl)", name_lower):
         return "RIGHT"
+    if re.search(r"\betn(?:s)?\b", name_lower):
+        return "ETN"
     if str(etf or "").strip().upper() == "Y":
         return "ETF"
     if re.search(r"american depositary|\badr(?:s)?\b|\bads\b", name_lower):
@@ -524,7 +535,11 @@ def fetch_nasdaq_security_directory(*, timeout: int = 15) -> dict[str, Any]:
     }
 
 
-def fetch_official_us_security_metadata(*, timeout: int = 15) -> dict[str, Any]:
+def fetch_official_us_security_metadata(
+    *,
+    timeout: int = 15,
+    target_market_date: datetime.date | None = None,
+) -> dict[str, Any]:
     """Combine first-party Nasdaq and NYSE metadata without weakening conflicts."""
     documents: list[dict[str, Any]] = []
     sources: list[dict[str, Any]] = []
@@ -567,6 +582,14 @@ def fetch_official_us_security_metadata(*, timeout: int = 15) -> dict[str, Any]:
                 and current_type != "UNKNOWN"
                 and previous_type != current_type
             ):
+                if previous_type == "ETN" or current_type == "ETN":
+                    etn_record = previous if previous_type == "ETN" else record
+                    etn_source = str(etn_record.get("source_id") or "")
+                    if etn_source.startswith("nasdaqtrader:"):
+                        # Nasdaq's explicit ETN name is stronger than a
+                        # generic ETF flag from another exchange mapping.
+                        records[symbol] = etn_record
+                        continue
                 if previous_type in DERIVATIVE_SECURITY_TYPES and current_type in DERIVATIVE_SECURITY_TYPES:
                     # Both official records prove the instrument is outside the
                     # equity-observation scope; retain the later typed exchange
@@ -617,6 +640,9 @@ def _authoritative_security_classification(
     if explicit in SUPPORTED_SECURITY_TYPES and explicit != "UNKNOWN":
         classification = explicit
         method = "authoritative_security_type_field"
+    elif re.search(r"\betn(?:s)?\b", str(evidence.get("security_name") or "").lower()):
+        classification = "ETN"
+        method = "exchange_security_name_explicit"
     elif str(evidence.get("etf") or "").strip().upper() == "Y":
         classification = "ETF"
         method = "exchange_etf_flag"
@@ -656,6 +682,194 @@ def classify_sec_security_type(symbol: str, name: str, raw_ticker: str) -> str:
     return "ETF_OR_FUND" if result == "ETF" else result
 
 
+def _parse_nasdaq_alert_date(value: str) -> datetime.date:
+    for date_format in ("%B %d, %Y", "%b %d, %Y"):
+        try:
+            return datetime.datetime.strptime(value.strip(), date_format).date()
+        except ValueError:
+            continue
+    raise ValueError(f"invalid Nasdaq corporate-action date: {value!r}")
+
+
+def _nasdaq_alert_security_type(issue: str) -> str:
+    issue_lower = issue.lower()
+    if re.search(r"\bright(?:s)?\b", issue_lower):
+        return "RIGHT"
+    if re.search(r"\bunit(?:s)?\b", issue_lower):
+        return "UNIT"
+    if re.search(r"\betn(?:s)?\b", issue_lower):
+        return "ETN"
+    if re.search(r"american depositary|\badr(?:s)?\b|\bads\b", issue_lower):
+        return "ADR"
+    if "preferred" in issue_lower or "preference" in issue_lower:
+        return "PREFERRED"
+    if re.search(r"\b(?:common stock|common shares?|ordinary shares?)\b", issue_lower):
+        return "COMMON_EQUITY"
+    return "UNKNOWN"
+
+
+def _nasdaq_lifecycle_claim_digest(events: Sequence[Mapping[str, Any]]) -> str:
+    claims = [
+        {
+            "symbol": str(event["symbol"]),
+            "event": str(event["event"]),
+            "effective_date": str(event["effective_date"]),
+            "last_trading_date": str(event["last_trading_date"]),
+            "security_type": str(event["security_type"]),
+        }
+        for event in sorted(events, key=lambda item: str(item["symbol"]))
+    ]
+    return _evidence_sha256(claims)
+
+
+def parse_nasdaq_corporate_action_alert(
+    text: str,
+    *,
+    source_id: str = NASDAQ_CORPORATE_ACTION_ALERT_SOURCE_ID,
+    source_url: str = NASDAQ_CORPORATE_ACTION_ALERT_URL,
+    payload_sha256: str | None = None,
+    expected_payload_sha256: str | None = None,
+) -> dict[str, Any]:
+    """Parse a hash-verified Nasdaq Trader corporate-action alert.
+
+    Only claims with both a last-trading date and an effective suspension date
+    become lifecycle events.  A replacement listing without those claims (for
+    example WATR in ECA2026-576) is deliberately not inherited as a lifecycle
+    event for the replaced symbol.
+    """
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError("Nasdaq corporate-action alert is empty")
+    raw_payload_sha256 = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    effective_payload_sha256 = payload_sha256 or raw_payload_sha256
+    if not _SHA256.fullmatch(effective_payload_sha256):
+        raise ValueError("Nasdaq corporate-action payload hash is invalid")
+    if expected_payload_sha256 and effective_payload_sha256 != expected_payload_sha256:
+        raise ValueError("Nasdaq corporate-action payload hash mismatch")
+
+    source_text = text
+    viewstate_match = re.search(
+        r'name=["\']__VIEWSTATE["\'][^>]*value=["\']([^"\']+)',
+        text,
+        flags=re.IGNORECASE,
+    )
+    if viewstate_match:
+        try:
+            decoded_viewstate = base64.b64decode(viewstate_match.group(1), validate=True)
+            source_text = f"{source_text}\n{decoded_viewstate.decode('utf-8', errors='ignore')}"
+        except (ValueError, base64.binascii.Error):
+            raise ValueError("Nasdaq corporate-action ASP.NET state is invalid")
+    clean_text = html.unescape(re.sub(r"<[^>]+>", " ", source_text))
+    clean_text = re.sub(r"\s+", " ", clean_text).strip()
+    entry_pattern = re.compile(
+        r"Company Name/Issue:\s*(?P<issue>.+?)\s+CUSIP(?:\s+Number)?\s*#?\s*:?\s*\S+\s+"
+        r"Symbol:\s*(?P<symbol>[A-Z][A-Z0-9-]*)\s*(?P<details>.*?)(?=Company Name/Issue:|$)",
+        flags=re.IGNORECASE,
+    )
+    events: list[dict[str, Any]] = []
+    source_identity = f"{source_id}:{effective_payload_sha256}"
+    for match in entry_pattern.finditer(clean_text):
+        issue = re.sub(r"\s+", " ", match.group("issue")).strip()
+        symbol = validate_us_ticker(match.group("symbol"))
+        details = match.group("details")
+        last_match = re.search(
+            r"Last Trading Date:\s*(?P<date>[A-Za-z]+\s+\d{1,2},\s+\d{4})",
+            details,
+            flags=re.IGNORECASE,
+        )
+        effective_match = re.search(
+            r"Marketplace Effective Date(?: for Suspension)?:\s*"
+            r"(?P<date>[A-Za-z]+\s+\d{1,2},\s+\d{4})",
+            details,
+            flags=re.IGNORECASE,
+        )
+        if last_match is None or effective_match is None:
+            continue
+        security_type = _nasdaq_alert_security_type(issue)
+        if security_type == "UNKNOWN":
+            raise ValueError(f"Nasdaq corporate-action security type is unknown for {symbol}")
+        last_trading_date = _parse_nasdaq_alert_date(last_match.group("date"))
+        effective_date = _parse_nasdaq_alert_date(effective_match.group("date"))
+        claim = {
+            "symbol": symbol,
+            "event": "suspended",
+            "effective_date": effective_date.isoformat(),
+            "last_trading_date": last_trading_date.isoformat(),
+            "security_type": security_type,
+            "source": source_url,
+            "source_id": source_id,
+            "source_identity": source_identity,
+            "payload_sha256": effective_payload_sha256,
+        }
+        claim["evidence_sha256"] = _nasdaq_lifecycle_claim_digest([claim])
+        events.append(claim)
+
+    if not events:
+        raise ValueError("Nasdaq corporate-action alert contains no lifecycle events")
+    unique_events: dict[str, dict[str, Any]] = {}
+    for event in events:
+        previous = unique_events.get(event["symbol"])
+        if previous is not None and previous != event:
+            raise ValueError(f"conflicting Nasdaq corporate-action events for {event['symbol']}")
+        unique_events[event["symbol"]] = event
+    source = {
+        "source": source_url,
+        "source_id": source_id,
+        "source_identity": source_identity,
+        "payload_sha256": effective_payload_sha256,
+        "evidence_sha256": _nasdaq_lifecycle_claim_digest(list(unique_events.values())),
+        "status": "healthy",
+    }
+    return {"events": list(unique_events.values()), "sources": [source]}
+
+
+def fetch_us_lifecycle_events(
+    target_market_date: datetime.date | None,
+    *,
+    timeout: int = 15,
+    fetch_text=None,
+) -> dict[str, Any]:
+    """Fetch the pinned Nasdaq corporate-action source used by US closure.
+
+    The source is intentionally hash-pinned.  A changed alert fails closed so
+    a changed public page cannot silently mutate the denominator contract.
+    """
+    if target_market_date is None or target_market_date < NASDAQ_CORPORATE_ACTION_ALERT_EFFECTIVE_DATE:
+        return {"events": [], "sources": []}
+
+    if fetch_text is not None:
+        content = fetch_text(NASDAQ_CORPORATE_ACTION_ALERT_URL)
+        if isinstance(content, str):
+            raw_content = content.encode("utf-8")
+        elif isinstance(content, bytes):
+            raw_content = content
+        else:
+            raise ValueError("Nasdaq corporate-action fetcher returned invalid content")
+    else:
+        request = urllib.request.Request(
+            NASDAQ_CORPORATE_ACTION_ALERT_URL,
+            headers={"User-Agent": "ABSORB-Research/1.0 (contact@absorb.local)"},
+        )
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            raw_content = response.read(NASDAQ_CORPORATE_ACTION_ALERT_MAX_BYTES + 1)
+    if len(raw_content) > NASDAQ_CORPORATE_ACTION_ALERT_MAX_BYTES:
+        raise RuntimeError("Nasdaq corporate-action alert response is too large")
+    payload_sha256 = hashlib.sha256(raw_content).hexdigest()
+    document = parse_nasdaq_corporate_action_alert(
+        raw_content.decode("utf-8-sig"),
+        source_id=NASDAQ_CORPORATE_ACTION_ALERT_SOURCE_ID,
+        source_url=NASDAQ_CORPORATE_ACTION_ALERT_URL,
+        payload_sha256=payload_sha256,
+    )
+    if document["sources"][0]["evidence_sha256"] != NASDAQ_CORPORATE_ACTION_ALERT_CLAIMS_SHA256:
+        raise RuntimeError("Nasdaq corporate-action claims hash mismatch")
+    document["events"] = [
+        event
+        for event in document["events"]
+        if datetime.date.fromisoformat(event["effective_date"]) <= target_market_date
+    ]
+    return document
+
+
 def parse_sec_us_universe_with_metadata(
     document: dict,
     *,
@@ -679,7 +893,7 @@ def parse_sec_us_universe_with_metadata(
     symbols = set()
     exchange_counts: dict[str, int] = {}
     derivative_counts: dict[str, int] = {
-        "WARRANT": 0, "UNIT": 0, "PREFERRED": 0, "RIGHT": 0
+        "ETN": 0, "WARRANT": 0, "UNIT": 0, "PREFERRED": 0, "RIGHT": 0
     }
     exclusions: dict[str, dict[str, Any]] = {}
     eligibility: dict[str, dict[str, Any]] = {}
@@ -713,11 +927,28 @@ def parse_sec_us_universe_with_metadata(
                 event_type = str(raw_event["event"]).strip().lower()
                 effective_date = datetime.date.fromisoformat(str(raw_event["effective_date"]))
                 source = str(raw_event["source"]).strip()
+                source_id = str(raw_event.get("source_id") or "").strip()
                 source_identity = str(raw_event["source_identity"]).strip()
                 evidence_hash = str(raw_event["evidence_sha256"]).strip()
+                payload_hash = str(raw_event.get("payload_sha256") or "").strip()
+                security_type = str(raw_event.get("security_type") or "UNKNOWN").strip().upper()
+                last_trading_date_value = raw_event.get("last_trading_date")
+                last_trading_date = (
+                    datetime.date.fromisoformat(str(last_trading_date_value))
+                    if last_trading_date_value is not None
+                    else None
+                )
             except (KeyError, TypeError, ValueError) as exc:
                 raise ValueError("US lifecycle event is invalid") from exc
-            if event_type not in {"delisted", "terminated"} or not source or not source_identity or not _SHA256.fullmatch(evidence_hash):
+            if (
+                event_type not in {"delisted", "terminated", "suspended"}
+                or not source
+                or not source_identity
+                or not _SHA256.fullmatch(evidence_hash)
+                or (payload_hash and not _SHA256.fullmatch(payload_hash))
+                or security_type not in SUPPORTED_SECURITY_TYPES
+                or (last_trading_date is not None and last_trading_date > effective_date)
+            ):
                 raise ValueError("US lifecycle event evidence is invalid")
             if effective_date > target_market_date:
                 continue
@@ -729,6 +960,14 @@ def parse_sec_us_universe_with_metadata(
                 "source_identity": source_identity,
                 "evidence_sha256": evidence_hash,
             }
+            if source_id:
+                event["source_id"] = source_id
+            if payload_hash:
+                event["payload_sha256"] = payload_hash
+            if security_type != "UNKNOWN":
+                event["security_type"] = security_type
+            if last_trading_date is not None:
+                event["last_trading_date"] = last_trading_date.isoformat()
             previous = lifecycle_by_symbol.get(event_symbol)
             if previous is not None and previous != event:
                 raise ValueError(f"conflicting US lifecycle events for {event_symbol}")
@@ -817,10 +1056,23 @@ def parse_sec_us_universe_with_metadata(
             continue
 
         eligible_listed_count += 1
+        lifecycle_event = lifecycle_by_symbol.get(valid_sym)
         metadata = security_records.get(valid_sym)
         classification = _authoritative_security_classification(
             valid_sym, name_val, raw_ticker, metadata
         )
+        event_security_type = str((lifecycle_event or {}).get("security_type") or "UNKNOWN").upper()
+        if event_security_type != "UNKNOWN":
+            if classification.get("authoritative") and classification["security_type"] != event_security_type:
+                raise ValueError(f"conflicting US security classifications for {valid_sym}")
+            if not classification.get("authoritative") or classification["security_type"] == "UNKNOWN":
+                classification = {
+                    **classification,
+                    "security_type": event_security_type,
+                    "classification_method": "authoritative_lifecycle_event",
+                    "authoritative": True,
+                    "evidence": lifecycle_event,
+                }
         sec_type = classification["security_type"]
         security_type_counts[sec_type] = security_type_counts.get(sec_type, 0) + 1
         metadata_evidence = classification.get("evidence") or {}
@@ -833,8 +1085,12 @@ def parse_sec_us_universe_with_metadata(
             "eligible": True,
             "source": metadata_evidence.get("source_id") or SEC_US_UNIVERSE_URL,
             "source_identity": metadata_evidence.get("source_identity") or SEC_US_UNIVERSE_URL,
-            "as_of": metadata_evidence.get("as_of") or document.get("as_of"),
-            "effective_date": metadata_evidence.get("as_of") or document.get("as_of"),
+            "as_of": metadata_evidence.get("as_of")
+            or (lifecycle_event or {}).get("effective_date")
+            or document.get("as_of"),
+            "effective_date": (lifecycle_event or {}).get("effective_date")
+            or metadata_evidence.get("as_of")
+            or document.get("as_of"),
             "evidence_sha256": metadata_evidence.get("evidence_sha256") or document_evidence_sha256,
         }
 
@@ -857,7 +1113,6 @@ def parse_sec_us_universe_with_metadata(
             )
             continue
 
-        lifecycle_event = lifecycle_by_symbol.get(valid_sym)
         if lifecycle_event is not None:
             eligibility[valid_sym]["eligible"] = False
             eligibility[valid_sym]["reason"] = "excluded_effective_lifecycle_event"
@@ -866,6 +1121,7 @@ def parse_sec_us_universe_with_metadata(
                 reason="excluded_effective_lifecycle_event",
                 classification=sec_type,
                 source=lifecycle_event["source"],
+                source_id=lifecycle_event.get("source_id"),
                 source_identity=lifecycle_event["source_identity"],
                 as_of=lifecycle_event["effective_date"],
                 evidence_sha256=lifecycle_event["evidence_sha256"],
@@ -964,12 +1220,17 @@ def get_us_universe_breakdown(
         try:
             cached_doc = json.loads(cache_path.read_text(encoding="utf-8"))
             if (
-                cached_doc.get("contract_version") == 3
+                cached_doc.get("contract_version") == US_UNIVERSE_CACHE_CONTRACT_VERSION
                 and cached_doc.get("as_of") == checked_at.date().isoformat()
                 and isinstance(cached_doc.get("symbols"), list)
                 and cached_doc.get("active_universe_count")
                 and cached_doc.get("security_metadata_status")
                 and cached_doc.get("lifecycle_evidence_status")
+                and (
+                    target_market_date is None
+                    or target_market_date < NASDAQ_CORPORATE_ACTION_ALERT_EFFECTIVE_DATE
+                    or cached_doc.get("lifecycle_evidence_status") == "available"
+                )
                 and isinstance(cached_doc.get("security_eligibility_by_symbol"), dict)
                 and cached_doc.get("target_market_date") == target_iso
             ):
@@ -1015,7 +1276,9 @@ def get_us_universe_breakdown(
             metadata_document = doc.get("security_metadata")
         else:
             try:
-                metadata_document = fetch_official_us_security_metadata()
+                metadata_document = fetch_official_us_security_metadata(
+                    target_market_date=target_market_date
+                )
             except Exception as exc:
                 metadata_document = {
                     "records": {},
@@ -1046,6 +1309,16 @@ def get_us_universe_breakdown(
                 lifecycle_sources = [dict(item) for item in (lifecycle_document.get("sources") or [])]
             else:
                 lifecycle_events = lifecycle_document
+        elif (
+            fetch_json is None
+            and target_market_date is not None
+            and target_market_date >= NASDAQ_CORPORATE_ACTION_ALERT_EFFECTIVE_DATE
+        ):
+            lifecycle_document = fetch_us_lifecycle_events(target_market_date)
+            lifecycle_events = lifecycle_document.get("events")
+            lifecycle_sources = [
+                dict(item) for item in (lifecycle_document.get("sources") or [])
+            ]
 
         breakdown = parse_sec_us_universe_with_metadata(
             doc,
@@ -1070,7 +1343,7 @@ def get_us_universe_breakdown(
 
     payload = {
         "schema_version": 2,
-        "contract_version": 3,
+        "contract_version": US_UNIVERSE_CACHE_CONTRACT_VERSION,
         "market": "US",
         "scope": scope,
         "as_of": checked_at.date().isoformat(),
