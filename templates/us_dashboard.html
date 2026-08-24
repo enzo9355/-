@@ -1,6 +1,8 @@
 {% extends "base.html" %}
 {% block title %}美股市場研究摘要｜ABSORB{% endblock %}
 {% block content %}
+{% set freshness = (data_freshness|default({}, true)).get('US', {}) %}
+{% set freshness_label = {'current':'資料最新','updating':'更新中','stale':'資料過期','unavailable':'暫時無法取得'}.get(freshness.get('status'), '暫時無法取得') %}
 <div class="page market-summary-page">
   <header class="page-header market-summary-header">
     <div>
@@ -12,6 +14,10 @@
       <div><dt>適用交易日</dt><dd>{{ summary.applicable_trading_date }}</dd></div>
     </dl>
   </header>
+  <section class="freshness-status" data-freshness-status="{{ freshness.get('status', 'unavailable') }}" aria-labelledby="us-freshness-title">
+    <div><h2 id="us-freshness-title">已驗證資料狀態</h2><p aria-live="polite">資料狀態：{{ freshness_label }}</p></div>
+    <dl><div><dt>來源交易日</dt><dd>{{ freshness.get('source_market_date') or '尚無已驗證日期' }}</dd></div><div><dt>適用交易日</dt><dd>{{ freshness.get('applicable_trading_date') or '尚無已驗證日期' }}</dd></div></dl>
+  </section>
   <section class="panel summary-conclusion" aria-labelledby="summary-conclusion-title">
     <h2 id="summary-conclusion-title">{{ summary.executive_summary.one_line_conclusion }}</h2>
     <p>{{ summary.executive_summary.largest_risk }}</p>

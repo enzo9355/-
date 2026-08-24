@@ -12,6 +12,8 @@
 {% set advancing_pct = (advancing / total_count * 100) if total_count else none %}
 {% set declining_pct = (declining / total_count * 100) if total_count else none %}
 {% set available_count = quality.get('available_count', quality.get('symbol_count')) %}
+{% set freshness = (data_freshness|default({}, true)).get('TW', {}) %}
+{% set freshness_label = {'current':'資料最新','updating':'更新中','stale':'資料過期','unavailable':'暫時無法取得'}.get(freshness.get('status'), '暫時無法取得') %}
 <div class="page dashboard-page research-dashboard" data-dashboard-endpoint="/api/dashboard">
   <div class="error-banner bootstrap-banner" role="status">AI 預測研究中。目前正式頁面只呈現已驗證的市場觀察，不提供機率預測或買賣指令。</div>
   {% if search_error %}<div class="error-banner" role="alert">找不到「{{ search_query }}」，請輸入台股代碼、名稱或美股代碼。</div>{% endif %}
@@ -30,6 +32,11 @@
       <div><dt>產生時間</dt><dd>{{ observation.generated_at|replace('T', ' ')|replace('Z', ' UTC') if observation.generated_at else '待更新' }}</dd></div>
     </dl>
   </header>
+
+  <section class="freshness-status" data-freshness-status="{{ freshness.get('status', 'unavailable') }}" aria-labelledby="tw-freshness-title">
+    <div><h2 id="tw-freshness-title">已驗證資料狀態</h2><p aria-live="polite">資料狀態：{{ freshness_label }}</p></div>
+    <dl><div><dt>來源交易日</dt><dd>{{ freshness.get('source_market_date') or '尚無已驗證日期' }}</dd></div><div><dt>適用交易日</dt><dd>{{ freshness.get('applicable_trading_date') or '尚無已驗證日期' }}</dd></div></dl>
+  </section>
 
   <section class="research-command" data-market-command aria-labelledby="market-command-title">
     <div class="command-heading"><div><h2 id="market-command-title">市場指揮台</h2><p>價格、廣度、資金與風險同步觀察</p></div><span>資料基準日 {{ observation.observation_as_of or '待更新' }}</span></div>

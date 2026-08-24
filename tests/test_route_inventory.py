@@ -19,6 +19,7 @@ EXPECTED_ROUTES = {
     ("/callback", "callback", frozenset({"POST"})),
     ("/dashboard", "dashboard_page", frozenset({"GET"})),
     ("/health", "healthz", frozenset({"GET"})),
+    ("/health/data", "data_health", frozenset({"GET"})),
     ("/healthz", "healthz", frozenset({"GET"})),
     ("/market", "market_page", frozenset({"GET"})),
     ("/market-map", "market_map_page", frozenset({"GET"})),

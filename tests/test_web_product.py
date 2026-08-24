@@ -4,11 +4,14 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from flask import Flask, render_template
+
 
 os.environ.setdefault("LINE_CHANNEL_ACCESS_TOKEN", "test")
 os.environ.setdefault("LINE_CHANNEL_SECRET", "test")
 
 import app as stock_app
+from stock_papi.web import routes as web_routes
 
 from tests.test_observation_public_surfaces import (
     observation_dashboard,
@@ -17,6 +20,142 @@ from tests.test_observation_public_surfaces import (
 
 
 class WebProductTests(unittest.TestCase):
+    def test_data_freshness_classifier_preserves_verified_dates_and_states(self):
+        classifier = getattr(web_routes.system, "classify_data_freshness", None)
+
+        self.assertIsNotNone(classifier)
+        cases = (
+            (
+                "current",
+                "2026-08-24",
+                "2026-08-24",
+                "current",
+            ),
+            (
+                "updating",
+                "2026-08-22",
+                "2026-08-24",
+                "updating",
+            ),
+            (
+                "stale",
+                "2026-08-20",
+                "2026-08-20",
+                "stale",
+            ),
+            ("unavailable", None, None, "unavailable"),
+        )
+        for label, source_date, applicable_date, expected in cases:
+            with self.subTest(label=label):
+                actual = classifier(
+                    source_market_date=source_date,
+                    applicable_trading_date=applicable_date,
+                    reference_date="2026-08-24",
+                )
+
+                self.assertEqual(actual["status"], expected)
+                self.assertEqual(actual["source_market_date"], source_date)
+                self.assertEqual(
+                    actual["applicable_trading_date"], applicable_date
+                )
+
+    @patch.object(stock_app, "_published_dashboard_snapshot")
+    @patch.object(stock_app, "_published_report_index_v2")
+    def test_data_health_keeps_service_ok_separate_from_stale_market_data(
+        self, load_index, load_dashboard
+    ):
+        load_dashboard.return_value = {
+            "market": "TW",
+            "observation_as_of": "2026-08-20",
+        }
+        load_index.side_effect = lambda market="TW": [
+            {
+                "market": market,
+                "report_type": "post_close",
+                "source_market_date": "2026-08-20",
+                "applicable_trading_date": "2026-08-20",
+            }
+        ]
+
+        response = stock_app.app.test_client().get("/health/data")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["service"]["status"], "ok")
+        self.assertEqual(payload["markets"]["TW"]["status"], "stale")
+        self.assertNotEqual(payload["markets"]["TW"]["status"], "current")
+        self.assertEqual(
+            payload["markets"]["TW"]["source_market_date"], "2026-08-20"
+        )
+        self.assertEqual(
+            payload["markets"]["TW"]["applicable_trading_date"], "2026-08-20"
+        )
+
+    @patch.object(stock_app, "_published_dashboard_snapshot")
+    @patch.object(stock_app, "_published_report_index_v2")
+    def test_dashboards_render_verified_freshness_with_exact_dates(
+        self, load_index, load_dashboard
+    ):
+        snapshot = observation_dashboard()
+        snapshot["observation_as_of"] = "2026-08-20"
+        load_dashboard.return_value = snapshot
+        load_index.side_effect = lambda market="TW": [
+            {
+                "market": market,
+                "report_type": "post_close",
+                "source_market_date": "2026-08-20",
+                "applicable_trading_date": "2026-08-20",
+            }
+        ]
+
+        dashboard = stock_app.app.test_client().get("/dashboard")
+        with stock_app.app.test_request_context("/us"):
+            us_html = render_template(
+                "us_dashboard.html",
+                market="US",
+                summary={
+                    "source_market_date": "2026-08-20",
+                    "applicable_trading_date": "2026-08-20",
+                    "executive_summary": {
+                        "one_line_conclusion": "已驗證摘要",
+                        "largest_risk": "測試風險",
+                    },
+                    "key_events": [],
+                    "validation": {"status": "unavailable", "reason": "測試"},
+                },
+                data_freshness={
+                    "US": {
+                        "status": "stale",
+                        "source_market_date": "2026-08-20",
+                        "applicable_trading_date": "2026-08-20",
+                    }
+                },
+            )
+
+        self.assertEqual(dashboard.status_code, 200)
+        for html in (dashboard.get_data(as_text=True), us_html):
+            self.assertIn('data-freshness-status="stale"', html)
+            self.assertIn("資料狀態：資料過期", html)
+            self.assertIn("來源交易日", html)
+            self.assertIn("適用交易日", html)
+            self.assertIn("2026-08-20", html)
+
+    def test_base_shell_renders_with_dashboard_endpoint_without_us_endpoints(self):
+        partial_app = Flask("partial-absorb", root_path=stock_app.app.root_path)
+        partial_app.jinja_env.globals["STATIC_ASSET_VERSION"] = "test"
+
+        @partial_app.get("/")
+        def dashboard_page():
+            return render_template("base.html")
+
+        response = partial_app.test_client().get("/")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        self.assertIn('href="/us"', html)
+        self.assertIn('href="/market"', html)
+        self.assertIn('href="/reports"', html)
+
     @patch.object(stock_app, "_published_dashboard_snapshot")
     def test_information_architecture_has_distinct_server_rendered_pages(self, load):
         load.return_value = observation_dashboard()

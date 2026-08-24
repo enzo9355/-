@@ -117,6 +117,14 @@ class ObservationDeployScriptTests(unittest.TestCase):
         ):
             self.assertIn(required, source)
 
+    def test_deployment_receipt_binds_the_checked_out_commit_and_rollback_revision(self) -> None:
+        source = DEPLOY.read_text(encoding="utf-8")
+
+        self.assertIn("rev-parse HEAD", source)
+        self.assertIn("source_commit = $Commit", source)
+        self.assertIn("previous_revision", source)
+        self.assertLess(source.index("rev-parse HEAD"), source.index("source_commit = $Commit"))
+
     def test_smoke_and_cutover_verification_forbid_prediction_payloads(self) -> None:
         deploy = DEPLOY.read_text(encoding="utf-8")
         verify = VERIFY.read_text(encoding="utf-8")

@@ -35,11 +35,11 @@
   {% set reports_active = 'report' in endpoint %}
   {% set ask_active = endpoint == 'ask_page' %}
   {% set learn_active = endpoint == 'learn_page' %}
-  {% set dashboard_url = url_for('us_dashboard_page') if us_market_active else url_for('dashboard_page') %}
-  {% set market_url = url_for('us_market_page') if us_market_active else url_for('market_page') %}
-  {% set industries_url = url_for('us_industries_page') if us_market_active else url_for('industries_page') %}
-  {% set stocks_url = url_for('us_stocks_page') if us_market_active else url_for('stocks_page') %}
-  {% set reports_url = url_for('us_reports_page') if us_market_active else url_for('reports_page') %}
+  {% set dashboard_url = '/us' if us_market_active else '/' %}
+  {% set market_url = '/us/market' if us_market_active else '/market' %}
+  {% set industries_url = '/us/industries' if us_market_active else '/industries' %}
+  {% set stocks_url = '/us/stocks' if us_market_active else '/stocks' %}
+  {% set reports_url = '/reports/us' if us_market_active else '/reports' %}
   <a class="skip-link" href="#main-content">跳到主要內容</a>
   <header class="site-header">
     <div class="topbar">
@@ -52,10 +52,10 @@
         <a class="nav-link{{ ' active' if reports_active else '' }}" href="{{ reports_url }}"{% if reports_active %} aria-current="page"{% endif %}>每日報告</a>
       </nav>
       <nav class="market-switch" data-market-switch aria-label="切換市場內容">
-        <a class="{{ 'active' if not us_market_active else '' }}" href="{{ url_for('dashboard_page') }}"{% if not us_market_active %} aria-current="true"{% endif %}>台股</a>
-        <a class="{{ 'active' if us_market_active else '' }}" href="{{ url_for('us_dashboard_page') }}" title="前往美股已驗證研究摘要"{% if us_market_active %} aria-current="true"{% endif %}>美股</a>
+        <a class="{{ 'active' if not us_market_active else '' }}" href="/"{% if not us_market_active %} aria-current="true"{% endif %}>台股</a>
+        <a class="{{ 'active' if us_market_active else '' }}" href="/us" title="前往美股已驗證研究摘要"{% if us_market_active %} aria-current="true"{% endif %}>美股</a>
       </nav>
-      <section class="account-nav" data-account-nav><a class="topbar-account" href="{{ url_for('line_login', return_to=request.path) }}">使用 LINE 登入</a></section>
+      <section class="account-nav" data-account-nav><a class="topbar-account" href="/auth/line/login?return_to={{ request.path|urlencode }}">使用 LINE 登入</a></section>
     </div>
   </header>
   <div class="app-shell">

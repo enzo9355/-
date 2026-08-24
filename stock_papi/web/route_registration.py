@@ -19,7 +19,12 @@ def register_routes(app, dependencies):
             is not None
         ),
     )
-    register_system_routes(app, search_stock=dependencies["search_stock"])
+    register_system_routes(
+        app,
+        search_stock=dependencies["search_stock"],
+        load_dashboard_snapshot=dependencies["dashboard_snapshot"],
+        load_report_index_v2=dependencies["load_report_index_v2"],
+    )
     register_report_routes(
         app,
         load_index=dependencies["load_report_index"],
