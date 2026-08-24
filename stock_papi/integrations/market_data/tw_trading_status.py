@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime as _datetime
 import hashlib
+import io
 import json
 import math
 import re
@@ -58,6 +59,12 @@ LIFECYCLE_SOURCE_DEFINITIONS = MappingProxyType({
         "twse_termination", "TWSE", "lifecycle",
         "https://openapi.twse.com.tw/v1/company/suspendListingCsvAndHtml", "json", 5 * 1024 * 1024,
     ),
+    "twse_listing_change_20260728": OfficialSourceDefinition(
+        "twse_listing_change_20260728", "TWSE", "lifecycle",
+        "https://investoredu.twse.com.tw/FileSystem/FileUpload/88ff18ef-5726-4b33-b207-f92310023328.pdf",
+        "pdf",
+        1024 * 1024,
+    ),
     "tpex_current_mode": OfficialSourceDefinition(
         "tpex_current_mode", "TPEx", "lifecycle",
         "https://www.tpex.org.tw/openapi/v1/tpex_cmode", "json", 5 * 1024 * 1024,
@@ -70,6 +77,17 @@ LIFECYCLE_SOURCE_DEFINITIONS = MappingProxyType({
         "tpex_termination", "TPEx", "lifecycle",
         "https://www.tpex.org.tw/www/zh-tw/company/deListed", "json", 5 * 1024 * 1024,
     ),
+})
+
+TWSE_LISTING_CHANGE_SOURCE_BINDINGS = MappingProxyType({
+    "twse_listing_change_20260728": MappingProxyType({
+        "announcement_date": "2026-07-28",
+        "covered_symbols": ("2867",),
+        "first_effective_date": "2026-08-20",
+        "termination_date": "2026-09-01",
+        "payload_size_bytes": 139878,
+        "payload_sha256": "3ff4455c1435b5d0dc62803953241d184c13775662eb46f2feaf25d3d300c768",
+    }),
 })
 
 
@@ -470,6 +488,23 @@ def _extract_current_mode_effective_date(
     return _roc_date(rows[0]["Date"])
 
 
+def _extract_pdf_text(payload: bytes) -> str:
+    if not isinstance(payload, bytes) or not payload.startswith(b"%PDF-"):
+        raise ValueError("official lifecycle PDF is invalid")
+    try:
+        from pypdf import PdfReader
+
+        reader = PdfReader(io.BytesIO(payload), strict=True)
+        if reader.is_encrypted or not reader.pages:
+            raise ValueError
+        text = "\n".join((page.extract_text() or "") for page in reader.pages)
+    except (ImportError, OSError, TypeError, ValueError) as exc:
+        raise ValueError("official lifecycle PDF is invalid") from exc
+    if not text.strip():
+        raise ValueError("official lifecycle PDF text is empty")
+    return text
+
+
 def _load_lifecycle_payload(
     root: Path,
     target_date: _datetime.date,
@@ -565,14 +600,44 @@ def _load_lifecycle_payload(
             raise OfficialSourceFailure(
                 cache_source_id, "cache_invalid", safe_message=str(exc)
             ) from None
-    try:
-        payload = json.loads(cached.payload.decode("utf-8-sig"))
-    except (UnicodeError, ValueError):
-        raise OfficialSourceFailure(
-            cache_source_id,
-            "schema_validation",
-            safe_message="response JSON is invalid",
-        ) from None
+    if definition.response_kind == "pdf":
+        binding = TWSE_LISTING_CHANGE_SOURCE_BINDINGS.get(cache_source_id)
+        if (
+            binding is None
+            or len(cached.payload) != binding["payload_size_bytes"]
+            or cached.payload_sha256 != binding["payload_sha256"]
+        ):
+            raise OfficialSourceFailure(
+                cache_source_id,
+                "cache_invalid",
+                safe_message="official PDF binding mismatch",
+            )
+        try:
+            extracted_text = _extract_pdf_text(cached.payload)
+        except ValueError as exc:
+            raise OfficialSourceFailure(
+                cache_source_id,
+                "schema_validation",
+                safe_message=str(exc),
+            ) from None
+        payload = {
+            "schema_version": 1,
+            "source_id": cache_source_id,
+            "source_url": definition.url,
+            "announcement_date": binding["announcement_date"],
+            "payload_size_bytes": len(cached.payload),
+            "payload_sha256": cached.payload_sha256,
+            "extracted_text": extracted_text,
+        }
+    else:
+        try:
+            payload = json.loads(cached.payload.decode("utf-8-sig"))
+        except (UnicodeError, ValueError):
+            raise OfficialSourceFailure(
+                cache_source_id,
+                "schema_validation",
+                safe_message="response JSON is invalid",
+            ) from None
     return payload, cached.payload_sha256, request_count
 
 
@@ -682,6 +747,121 @@ def _twse_termination_events(payload: Any, payload_sha256: str) -> list[dict[str
             exchange="TWSE", symbol=row["Code"], event_type="terminate",
             effective_date=row["DelistingDate"], source_id="twse_termination",
             payload_sha256=payload_sha256, raw_row=dict(row),
+        ))
+    return events
+
+
+def _twse_listing_change_events(
+    payload: Any,
+    payload_sha256: str,
+    source_id: str,
+) -> list[dict[str, Any]]:
+    binding = TWSE_LISTING_CHANGE_SOURCE_BINDINGS.get(source_id)
+    definition = LIFECYCLE_SOURCE_DEFINITIONS.get(source_id)
+    expected_fields = {
+        "schema_version",
+        "source_id",
+        "source_url",
+        "announcement_date",
+        "payload_size_bytes",
+        "payload_sha256",
+        "extracted_text",
+    }
+    if (
+        binding is None
+        or definition is None
+        or not isinstance(payload, Mapping)
+        or set(payload) != expected_fields
+        or payload.get("schema_version") != 1
+        or payload.get("source_id") != source_id
+        or payload.get("source_url") != definition.url
+        or payload.get("announcement_date") != binding["announcement_date"]
+        or payload.get("payload_size_bytes") != binding["payload_size_bytes"]
+        or payload.get("payload_sha256") != binding["payload_sha256"]
+        or payload_sha256 != binding["payload_sha256"]
+    ):
+        raise ValueError("TWSE listing change schema is invalid")
+    text = payload.get("extracted_text")
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError("TWSE listing change schema is invalid")
+    date = (
+        r"(?P<{prefix}_year>\d{{2,3}})\s*年\s*"
+        r"(?P<{prefix}_month>\d{{1,2}})\s*月\s*"
+        r"(?P<{prefix}_day>\d{{1,2}})\s*日"
+    )
+    announcement_pattern = re.compile(
+        r"中華民國\s*" + date.format(prefix="announcement")
+    )
+    announcement_matches = list(announcement_pattern.finditer(text))
+    if len(announcement_matches) != 1:
+        raise ValueError("TWSE listing change announcement date is invalid")
+    announcement_match = announcement_matches[0]
+    announcement_date = _datetime.date(
+        int(announcement_match.group("announcement_year")) + 1911,
+        int(announcement_match.group("announcement_month")),
+        int(announcement_match.group("announcement_day")),
+    )
+    if announcement_date.isoformat() != binding["announcement_date"]:
+        raise ValueError("TWSE listing change announcement date is invalid")
+    pattern = re.compile(
+        r"公司代號\s*[：:]\s*(?P<symbol>\d{4,6}).*?自\s*"
+        + date.format(prefix="suspend")
+        + r"\s*起停止買賣.*?並自\s*"
+        + date.format(prefix="terminate")
+        + r"\s*起終止上市",
+        re.DOTALL,
+    )
+    records: dict[tuple[str, _datetime.date, _datetime.date], dict[str, Any]] = {}
+    for match in pattern.finditer(text):
+        suspend_date = _datetime.date(
+            int(match.group("suspend_year")) + 1911,
+            int(match.group("suspend_month")),
+            int(match.group("suspend_day")),
+        )
+        termination_date = _datetime.date(
+            int(match.group("terminate_year")) + 1911,
+            int(match.group("terminate_month")),
+            int(match.group("terminate_day")),
+        )
+        if (
+            suspend_date.isoformat() != binding["first_effective_date"]
+            or termination_date.isoformat() != binding["termination_date"]
+            or not announcement_date <= suspend_date < termination_date
+        ):
+            raise ValueError("TWSE listing change dates are invalid")
+        symbol = normalize_symbol(match.group("symbol"))
+        raw_fields = {
+            "announcement_date": announcement_date.isoformat(),
+            "symbol": symbol,
+            "suspension_date": suspend_date.isoformat(),
+            "termination_date": termination_date.isoformat(),
+            "source_url": definition.url,
+        }
+        records[(symbol, suspend_date, termination_date)] = raw_fields
+    if not records:
+        raise ValueError("TWSE listing change row is invalid")
+    if {record[0] for record in records} != set(binding["covered_symbols"]):
+        raise ValueError("TWSE listing change symbol coverage is invalid")
+
+    events = []
+    for (symbol, suspend_date, termination_date), raw_fields in records.items():
+        events.append(_lifecycle_event(
+            exchange="TWSE",
+            symbol=symbol,
+            event_type="suspend",
+            effective_date=suspend_date,
+            source_id=source_id,
+            payload_sha256=payload_sha256,
+            raw_row=raw_fields,
+        ))
+        events.append(_lifecycle_event(
+            exchange="TWSE",
+            symbol=symbol,
+            event_type="terminate",
+            effective_date=termination_date,
+            source_id=source_id,
+            payload_sha256=payload_sha256,
+            raw_row=raw_fields,
         ))
     return events
 
@@ -821,6 +1001,22 @@ def load_lifecycle_snapshot(
                     pass
             payload, digest = load("twse_termination")
             events.extend(_twse_termination_events(payload, digest))
+            for source_id, binding in TWSE_LISTING_CHANGE_SOURCE_BINDINGS.items():
+                covered_symbols = {
+                    normalize_symbol(symbol)
+                    for symbol in binding["covered_symbols"]
+                }
+                if (
+                    target_date < _datetime.date.fromisoformat(
+                        str(binding["announcement_date"])
+                    )
+                    or not requested["TWSE"] & covered_symbols
+                ):
+                    continue
+                payload, digest = load(source_id)
+                events.extend(_twse_listing_change_events(
+                    payload, digest, source_id
+                ))
         if requested.get("TPEx"):
             payload, digest = load("tpex_current_mode")
             events.extend(_tpex_mode_events(payload, digest, target_date))

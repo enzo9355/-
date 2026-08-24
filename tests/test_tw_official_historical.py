@@ -188,34 +188,62 @@ class BlankPriceSession(Session):
         return response
 
 
-def lifecycle_snapshot(*, statuses=None, terminated=None):
+class Price2867Session(Session):
+    def get(self, url, *, params, headers, **kwargs):
+        response = super().get(url, params=params, headers=headers, **kwargs)
+        if self.calls[-1]["source_id"] == "twse_price":
+            payload = json.loads(response.content.decode("utf-8"))
+            payload["tables"][1]["data"].append(
+                [
+                    "2867", "三商壽", "1000", "1", "100", "10", "10", "10",
+                    "10", "+", "0", "10", "1", "10", "1", "10",
+                ]
+            )
+            return Response(payload)
+        return response
+
+
+def lifecycle_snapshot(*, statuses=None, terminated=None, source_hashes=None):
+    statuses = dict(statuses or {})
+    terminated = dict(terminated or {})
+    if source_hashes is None:
+        source_hashes = {}
+        for status in (*statuses.values(), *terminated.values()):
+            for event in status.get("lifecycle_events", ()):
+                source_hashes[event["source_id"]] = event["payload_sha256"]
+        if not source_hashes:
+            source_hashes = {"tpex_current_mode": "d" * 64}
     return LifecycleSnapshot(
         target_date=CONTRACT_TARGET,
-        status_by_symbol=MappingProxyType(dict(statuses or {})),
-        terminated_by_symbol=MappingProxyType(dict(terminated or {})),
-        source_hashes=MappingProxyType({"tpex_current_mode": "d" * 64}),
+        status_by_symbol=MappingProxyType(statuses),
+        terminated_by_symbol=MappingProxyType(terminated),
+        source_hashes=MappingProxyType(dict(source_hashes)),
         request_count=0,
     )
 
 
-def suspended_status(symbol, exchange="TPEx"):
+def suspended_status(
+    symbol, exchange="TPEx", target_date=CONTRACT_TARGET
+):
     event = {
         "schema_version": 1,
         "exchange": exchange,
         "symbol": symbol,
         "event_type": "suspend",
-        "effective_date": CONTRACT_TARGET.isoformat(),
+        "effective_date": target_date.isoformat(),
         "source_id": "tpex_suspend_history",
         "payload_sha256": "b" * 64,
         "raw_row_sha256": "c" * 64,
-        "raw_fields": {"symbol": symbol, "date": CONTRACT_TARGET.isoformat()},
+        "raw_fields": {"symbol": symbol, "date": target_date.isoformat()},
         "parser_version": "tw-lifecycle-parser-v2",
     }
     event["evidence_sha256"] = evidence_sha256(event)
-    return resolve_lifecycle_status([event], CONTRACT_TARGET, active=True)
+    return resolve_lifecycle_status([event], target_date, active=True)
 
 
-def terminated_status(symbol, effective_date, exchange="TWSE"):
+def terminated_status(
+    symbol, effective_date, exchange="TWSE", target_date=CONTRACT_TARGET
+):
     event = {
         "schema_version": 1,
         "exchange": exchange,
@@ -229,7 +257,7 @@ def terminated_status(symbol, effective_date, exchange="TWSE"):
         "parser_version": "tw-lifecycle-parser-v2",
     }
     event["evidence_sha256"] = evidence_sha256(event)
-    return resolve_lifecycle_status([event], CONTRACT_TARGET, active=True)
+    return resolve_lifecycle_status([event], target_date, active=True)
 
 
 class HistoricalParserTests(unittest.TestCase):
@@ -426,6 +454,65 @@ class HistoricalSeriesTests(unittest.TestCase):
 
 
 class HistoricalStatusSnapshotTests(unittest.TestCase):
+    def test_lifecycle_event_payload_must_match_snapshot_source_hash(self):
+        lifecycle_status = suspended_status("4804")
+        with tempfile.TemporaryDirectory() as temporary, mock.patch(
+            "stock_papi.integrations.market_data.tw_official_historical.load_lifecycle_snapshot",
+            return_value=lifecycle_snapshot(
+                statuses={"4804": lifecycle_status},
+                source_hashes={"twse_reduction_detail": "0" * 64},
+            ),
+        ), self.assertRaises(OfficialSourceFailure) as context:
+            build_historical_daily_snapshot(
+                Path(temporary),
+                CONTRACT_TARGET,
+                session=Session(),
+                minimum_price_symbols={"TWSE": 2, "TPEx": 2},
+                minimum_chip_symbols=1,
+                required_symbols_by_exchange={
+                    "TWSE": {"2330"},
+                    "TPEx": {"6488", "4804"},
+                },
+            )
+
+        self.assertEqual(context.exception.source_id, "tw_lifecycle")
+        self.assertEqual(context.exception.category, "schema_validation")
+
+    def test_same_session_2867_regular_price_and_termination_stays_fail_closed(self):
+        target = datetime.date(2026, 9, 1)
+        termination = terminated_status(
+            "2867", target.isoformat(), target_date=target
+        )
+        lifecycle = lifecycle_snapshot(
+            statuses={"4804": suspended_status("4804", target_date=target)},
+            terminated={"2867": termination},
+        )
+        lifecycle = LifecycleSnapshot(
+            target_date=target,
+            status_by_symbol=lifecycle.status_by_symbol,
+            terminated_by_symbol=lifecycle.terminated_by_symbol,
+            source_hashes=lifecycle.source_hashes,
+            request_count=0,
+        )
+        with tempfile.TemporaryDirectory() as temporary, mock.patch(
+            "stock_papi.integrations.market_data.tw_official_historical.load_lifecycle_snapshot",
+            return_value=lifecycle,
+        ), self.assertRaises(OfficialSourceFailure) as context:
+            build_historical_daily_snapshot(
+                Path(temporary),
+                target,
+                session=Price2867Session(),
+                minimum_price_symbols={"TWSE": 2, "TPEx": 2},
+                minimum_chip_symbols=1,
+                required_symbols_by_exchange={
+                    "TWSE": {"2330", "2867"},
+                    "TPEx": {"6488", "4804"},
+                },
+            )
+
+        self.assertEqual(context.exception.source_id, "tw_lifecycle")
+        self.assertEqual(context.exception.category, "price_status_conflict")
+
     def test_status_aware_snapshot_skips_lifecycle_when_all_required_prices_exist(self):
         with tempfile.TemporaryDirectory() as temporary, mock.patch(
             "stock_papi.integrations.market_data.tw_official_historical.load_lifecycle_snapshot"

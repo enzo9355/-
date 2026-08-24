@@ -8,8 +8,11 @@ import tempfile
 import unittest
 import uuid
 from pathlib import Path
+from types import MappingProxyType
 from unittest.mock import patch, Mock
 
+import stock_papi.integrations.market_data.tw_trading_status as trading_status
+from stock_papi.integrations.market_data.tw_official_bulk import OfficialSourceFailure
 from stock_papi.integrations.market_data.tw_trading_status import (
     HistoricalLifecycleUnavailable,
     _extract_current_mode_effective_date,
@@ -44,6 +47,108 @@ def _tpex_payload(effective_date: datetime.date):
 
 
 class TpexLifecycleCacheTests(unittest.TestCase):
+    def test_listing_change_pdf_cache_is_hash_bound_before_text_extraction(self):
+        target = datetime.date(2026, 8, 20)
+        source_id = "twse_listing_change_20260728"
+        definition = trading_status.LIFECYCLE_SOURCE_DEFINITIONS[source_id]
+        with tempfile.TemporaryDirectory() as root:
+            store_cached_raw_source(
+                Path(root),
+                source_id=source_id,
+                target_date=target,
+                payload=b"%PDF-1.4 rehashed tampering",
+                parser_version=LIFECYCLE_PARSER_VERSION,
+                source_url=definition.url,
+                fetched_at=datetime.datetime(2026, 8, 20, tzinfo=datetime.timezone.utc),
+                date_verification="lifecycle_contract",
+            )
+            with patch.object(
+                trading_status, "_extract_pdf_text", create=True
+            ) as extract, self.assertRaises(OfficialSourceFailure) as context:
+                trading_status._load_lifecycle_payload(
+                    Path(root),
+                    target,
+                    definition=definition,
+                    cache_source_id=source_id,
+                    params={},
+                    session=Mock(),
+                    timeout=30,
+                    fetched_at=datetime.datetime(
+                        2026, 8, 20, tzinfo=datetime.timezone.utc
+                    ),
+                )
+
+        self.assertEqual(context.exception.source_id, source_id)
+        self.assertEqual(context.exception.category, "cache_invalid")
+        extract.assert_not_called()
+
+    def test_hash_bound_listing_change_pdf_normalizes_for_generic_parser(self):
+        target = datetime.date(2026, 8, 20)
+        source_id = "twse_listing_change_20260728"
+        definition = trading_status.LIFECYCLE_SOURCE_DEFINITIONS[source_id]
+        raw_pdf = b"%PDF-1.4 deterministic test notice"
+        digest = hashlib.sha256(raw_pdf).hexdigest()
+        extracted_text = (
+            "中華民國 115 年 7 月 28 日\n"
+            "公司代號：2867 自115年8月20日起停止買賣，"
+            "並自115年9月1日起終止上市"
+        )
+        binding = MappingProxyType({
+            source_id: MappingProxyType({
+                "announcement_date": "2026-07-28",
+                "first_effective_date": "2026-08-20",
+                "termination_date": "2026-09-01",
+                "payload_size_bytes": len(raw_pdf),
+                "payload_sha256": digest,
+            }),
+        })
+        with tempfile.TemporaryDirectory() as root:
+            store_cached_raw_source(
+                Path(root),
+                source_id=source_id,
+                target_date=target,
+                payload=raw_pdf,
+                parser_version=LIFECYCLE_PARSER_VERSION,
+                source_url=definition.url,
+                fetched_at=datetime.datetime(2026, 8, 20, tzinfo=datetime.timezone.utc),
+                date_verification="lifecycle_contract",
+            )
+            with patch.object(
+                trading_status, "TWSE_LISTING_CHANGE_SOURCE_BINDINGS", binding
+            ), patch.object(
+                trading_status,
+                "_extract_pdf_text",
+                return_value=extracted_text,
+                create=True,
+            ) as extract:
+                payload, payload_sha256, request_count = (
+                    trading_status._load_lifecycle_payload(
+                        Path(root),
+                        target,
+                        definition=definition,
+                        cache_source_id=source_id,
+                        params={},
+                        session=Mock(),
+                        timeout=30,
+                        fetched_at=datetime.datetime(
+                            2026, 8, 20, tzinfo=datetime.timezone.utc
+                        ),
+                    )
+                )
+
+        self.assertEqual(payload_sha256, digest)
+        self.assertEqual(request_count, 0)
+        self.assertEqual(payload, {
+            "schema_version": 1,
+            "source_id": source_id,
+            "source_url": definition.url,
+            "announcement_date": "2026-07-28",
+            "payload_size_bytes": len(raw_pdf),
+            "payload_sha256": digest,
+            "extracted_text": extracted_text,
+        })
+        extract.assert_called_once_with(raw_pdf)
+
     def test_cached_current_payload_with_later_effective_date_fails_closed(self):
         target = datetime.date(2026, 8, 3)
         effective = datetime.date(2026, 8, 4)

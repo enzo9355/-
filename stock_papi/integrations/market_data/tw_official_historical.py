@@ -713,6 +713,31 @@ def build_historical_daily_snapshot(
         request_count += lifecycle.request_count
         cold_sources += lifecycle.request_count
         lifecycle_source_hashes = lifecycle.source_hashes
+        if any(
+            not re.fullmatch(r"[0-9a-f]{64}", str(digest))
+            for digest in lifecycle_source_hashes.values()
+        ):
+            raise OfficialSourceFailure(
+                "tw_lifecycle",
+                "schema_validation",
+                safe_message="lifecycle source hash is invalid",
+            )
+        for symbol, lifecycle_document in (
+            *lifecycle.status_by_symbol.items(),
+            *lifecycle.terminated_by_symbol.items(),
+        ):
+            for event in lifecycle_document.get("lifecycle_events", ()):
+                source_id = str(event.get("source_id") or "")
+                payload_sha256 = str(event.get("payload_sha256") or "")
+                if lifecycle_source_hashes.get(source_id) != payload_sha256:
+                    raise OfficialSourceFailure(
+                        "tw_lifecycle",
+                        "schema_validation",
+                        safe_message=(
+                            "lifecycle event source hash mismatch "
+                            f"{symbol}"
+                        ),
+                    )
         current_row_exchange = dict(price_exchange)
         current_row_exchange.update({
             symbol: str(candidate["exchange"])

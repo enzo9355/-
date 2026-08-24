@@ -3,6 +3,10 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
+
+import stock_papi.integrations.market_data.tw_trading_status as trading_status
+from stock_papi.integrations.market_data.tw_official_bulk import OfficialSourceFailure
 
 from stock_papi.integrations.market_data.tw_trading_status import (
     LIFECYCLE_SOURCE_DEFINITIONS,
@@ -15,6 +19,10 @@ from stock_papi.integrations.market_data.tw_trading_status import (
 
 
 TARGET = datetime.date(2026, 7, 29)
+TWSE_LISTING_CHANGE_SOURCE_ID = "twse_listing_change_20260728"
+TWSE_LISTING_CHANGE_FIXTURE = (
+    Path(__file__).parent / "fixtures" / "twse_listing_change_20260728.json"
+)
 FIELDS = (
     "代號",
     "名稱",
@@ -110,6 +118,35 @@ def lifecycle_payloads():
     }
 
 
+def listing_change_payload():
+    return json.loads(TWSE_LISTING_CHANGE_FIXTURE.read_text(encoding="utf-8"))
+
+
+def load_listing_change_snapshot(target_date, notice):
+    original_load = trading_status._load_lifecycle_payload
+
+    def load_with_notice(*args, **kwargs):
+        if kwargs["cache_source_id"] == TWSE_LISTING_CHANGE_SOURCE_ID:
+            return notice, notice.get("payload_sha256", "f" * 64), 1
+        return original_load(*args, **kwargs)
+
+    session = LifecycleSession()
+    session.payloads["twse_current_stop"]["tables"][0]["title"] = (
+        "115年09月02日 停止買賣"
+    )
+    with tempfile.TemporaryDirectory() as temporary, mock.patch(
+        "stock_papi.integrations.market_data.tw_trading_status._load_lifecycle_payload",
+        side_effect=load_with_notice,
+    ):
+        return load_lifecycle_snapshot(
+            Path(temporary),
+            target_date,
+            session=session,
+            required_symbols_by_exchange={"TWSE": {"2867"}},
+            now=datetime.datetime(2026, 9, 2, 1, tzinfo=datetime.timezone.utc),
+        )
+
+
 class LifecycleResponse:
     def __init__(self, payload):
         self.status_code = 200
@@ -135,6 +172,65 @@ class LifecycleSession:
 
 
 class TwTradingStatusTests(unittest.TestCase):
+    def test_twse_listing_change_notice_resolves_active_suspend_and_termination_dates(self):
+        notice = listing_change_payload()
+        expected = {
+            datetime.date(2026, 8, 19): None,
+            datetime.date(2026, 8, 20): "officially_suspended",
+            datetime.date(2026, 8, 31): "officially_suspended",
+            datetime.date(2026, 9, 1): "officially_terminated",
+        }
+        for target_date, expected_status in expected.items():
+            with self.subTest(target_date=target_date):
+                snapshot = load_listing_change_snapshot(target_date, notice)
+
+            if expected_status is None:
+                self.assertNotIn("2867", snapshot.status_by_symbol)
+                self.assertNotIn("2867", snapshot.terminated_by_symbol)
+            elif expected_status == "officially_terminated":
+                self.assertEqual(
+                    snapshot.terminated_by_symbol["2867"]["status"],
+                    expected_status,
+                )
+            else:
+                self.assertEqual(
+                    snapshot.status_by_symbol["2867"]["status"],
+                    expected_status,
+                )
+            self.assertEqual(
+                snapshot.source_hashes[TWSE_LISTING_CHANGE_SOURCE_ID],
+                notice["payload_sha256"],
+            )
+            self.assertEqual(snapshot.request_count, 5)
+
+    def test_twse_listing_change_notice_rejects_hash_date_and_schema_tampering(self):
+        original = listing_change_payload()
+        mutations = {
+            "schema": lambda value: value.update(schema_version=2),
+            "source_id": lambda value: value.update(source_id="twse_listing_change_other"),
+            "source_url": lambda value: value.update(source_url="https://example.com/notice.pdf"),
+            "payload_size": lambda value: value.update(payload_size_bytes=139879),
+            "payload_hash": lambda value: value.update(payload_sha256="0" * 64),
+            "announcement_date": lambda value: value.update(announcement_date="2026-07-29"),
+            "suspension_date": lambda value: value.update(
+                extracted_text=value["extracted_text"].replace(
+                    "115年8月20日", "115年8月21日"
+                ).replace("115 年 8 月 20 日", "115 年 8 月 21 日")
+            ),
+            "termination_date": lambda value: value.update(
+                extracted_text=value["extracted_text"].replace(
+                    "115年9月1日", "115年9月2日"
+                ).replace("115 年 9 月 1 日", "115 年 9 月 2 日")
+            ),
+        }
+        for label, mutate in mutations.items():
+            notice = dict(original)
+            mutate(notice)
+            with self.subTest(label=label):
+                with self.assertRaises(OfficialSourceFailure) as context:
+                    load_listing_change_snapshot(datetime.date(2026, 8, 20), notice)
+                self.assertEqual(context.exception.category, "schema_validation")
+
     def test_status_validator_rejects_rehashed_incomplete_raw_evidence(self):
         status = classify([
             "4804", "大略-KY", "---", "", "---", "---", "---", "", "0"
