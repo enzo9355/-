@@ -6,7 +6,12 @@ from reporting.exceptions import ReportWebError
 
 
 def register_dashboard_page(
-    app, *, load_report_index_v2, load_dashboard_snapshot, preview_enabled=False
+    app,
+    *,
+    load_report_index_v2,
+    load_dashboard_snapshot,
+    load_data_freshness=None,
+    preview_enabled=False,
 ):
     def _snapshot():
         value = load_dashboard_snapshot() or {}
@@ -14,7 +19,7 @@ def register_dashboard_page(
 
     def dashboard_page():
         try:
-            reports = load_report_index_v2() or []
+            reports = load_report_index_v2(market="TW") or []
         except ReportWebError:
             reports = []
         daily_cards = {
@@ -25,6 +30,14 @@ def register_dashboard_page(
             for report_type in ("post_close", "pre_market")
         }
         snapshot = _snapshot()
+        data_freshness = {}
+        if load_data_freshness is not None:
+            try:
+                data_freshness["TW"] = load_data_freshness(
+                    "TW", reports=reports, snapshot=snapshot
+                )
+            except Exception:
+                pass
         return render_template(
             "dashboard.html",
             search_query=request.args.get("q", "").strip(),
@@ -32,6 +45,7 @@ def register_dashboard_page(
             daily_cards=daily_cards,
             model_presentation=snapshot.get("presentation") or {},
             observation=snapshot,
+            data_freshness=data_freshness,
         )
 
     def industries_page():

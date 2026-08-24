@@ -1,3 +1,6 @@
+import datetime as dt
+import inspect
+import json
 import os
 import re
 import unittest
@@ -11,8 +14,10 @@ os.environ.setdefault("LINE_CHANNEL_ACCESS_TOKEN", "test")
 os.environ.setdefault("LINE_CHANNEL_SECRET", "test")
 
 import app as stock_app
+from stock_papi.batch.calendar import TradingCalendarSet
 from stock_papi.web import routes as web_routes
 
+from tests.test_batch_calendar import calendar_document
 from tests.test_observation_public_surfaces import (
     observation_dashboard,
     quant_snapshot,
@@ -24,40 +29,230 @@ class WebProductTests(unittest.TestCase):
         classifier = getattr(web_routes.system, "classify_data_freshness", None)
 
         self.assertIsNotNone(classifier)
+        self.assertIn("next_session", inspect.signature(classifier).parameters)
+        calendars = TradingCalendarSet.from_documents([
+            calendar_document(2026, closed=("2026-07-20",))
+        ])
         cases = (
-            (
-                "current",
-                "2026-08-24",
-                "2026-08-24",
-                "current",
-            ),
-            (
-                "updating",
-                "2026-08-22",
-                "2026-08-24",
-                "updating",
-            ),
-            (
-                "stale",
-                "2026-08-20",
-                "2026-08-20",
-                "stale",
-            ),
-            ("unavailable", None, None, "unavailable"),
+            ("source date", "2026-07-17", "current"),
+            ("weekend", "2026-07-18", "current"),
+            ("holiday", "2026-07-20", "current"),
+            ("applicable session", "2026-07-21", "current"),
+            ("next session", "2026-07-22", "updating"),
+            ("later missed session", "2026-07-23", "stale"),
         )
-        for label, source_date, applicable_date, expected in cases:
+        for label, reference_date, expected in cases:
             with self.subTest(label=label):
                 actual = classifier(
-                    source_market_date=source_date,
-                    applicable_trading_date=applicable_date,
-                    reference_date="2026-08-24",
+                    source_market_date="2026-07-17",
+                    applicable_trading_date="2026-07-21",
+                    reference_date=reference_date,
+                    next_session=calendars.next_session,
                 )
 
                 self.assertEqual(actual["status"], expected)
-                self.assertEqual(actual["source_market_date"], source_date)
+                self.assertEqual(actual["source_market_date"], "2026-07-17")
                 self.assertEqual(
-                    actual["applicable_trading_date"], applicable_date
+                    actual["applicable_trading_date"], "2026-07-21"
                 )
+
+        unavailable = classifier(
+            source_market_date=None,
+            applicable_trading_date=None,
+            reference_date="2026-07-21",
+            next_session=calendars.next_session,
+        )
+        self.assertEqual(unavailable["status"], "unavailable")
+        missing_calendar = classifier(
+            source_market_date="2026-07-17",
+            applicable_trading_date="2026-07-17",
+            reference_date="2026-07-21",
+            next_session=None,
+        )
+        self.assertEqual(missing_calendar["status"], "unavailable")
+        self.assertNotEqual(missing_calendar["status"], "current")
+
+    def test_market_local_date_uses_aware_tw_and_us_timezones(self):
+        market_local_date = getattr(web_routes.system, "market_local_date", None)
+
+        self.assertIsNotNone(market_local_date)
+        early_utc = dt.datetime(2026, 8, 24, 3, 30, tzinfo=dt.timezone.utc)
+        late_utc = dt.datetime(2026, 8, 24, 16, 30, tzinfo=dt.timezone.utc)
+
+        self.assertEqual(
+            market_local_date("TW", now=early_utc), dt.date(2026, 8, 24)
+        )
+        self.assertEqual(
+            market_local_date("US", now=early_utc), dt.date(2026, 8, 23)
+        )
+        self.assertEqual(
+            market_local_date("TW", now=late_utc), dt.date(2026, 8, 25)
+        )
+        self.assertEqual(
+            market_local_date("US", now=late_utc), dt.date(2026, 8, 24)
+        )
+        with self.assertRaises(ValueError):
+            market_local_date("TW", now=dt.datetime(2026, 8, 24, 3, 30))
+
+    def test_invalid_freshness_dates_normalize_to_json_safe_none(self):
+        classifier = web_routes.system.classify_data_freshness
+        self.assertIn("next_session", inspect.signature(classifier).parameters)
+
+        actual = classifier(
+            source_market_date={"not-json-safe"},
+            applicable_trading_date="2026-8-24",
+            reference_date=dt.date(2026, 8, 24),
+            next_session=lambda value: value + dt.timedelta(days=1),
+        )
+
+        self.assertEqual(actual["status"], "unavailable")
+        self.assertIsNone(actual["source_market_date"])
+        self.assertIsNone(actual["applicable_trading_date"])
+        json.dumps(actual)
+
+        with stock_app.app.test_request_context("/dashboard"):
+            html = render_template(
+                "dashboard.html",
+                observation={},
+                daily_cards={},
+                data_freshness={"TW": actual},
+            )
+        self.assertIn("尚無已驗證日期", html)
+        self.assertNotIn("not-json-safe", html)
+
+    @patch.object(stock_app, "_published_dashboard_snapshot")
+    @patch.object(stock_app, "_published_report_index_v2")
+    def test_internal_us_type_error_is_isolated_and_dashboards_remain_renderable(
+        self, load_index, load_dashboard
+    ):
+        load_dashboard.return_value = {
+            "market": "TW",
+            "observation_as_of": "2026-08-24",
+        }
+        calls = []
+
+        def reports_for(*, market="TW"):
+            calls.append(market)
+            if market == "US":
+                raise TypeError("reader implementation failed")
+            return [{
+                "market": "TW",
+                "report_type": "post_close",
+                "source_market_date": "2026-08-24",
+                "applicable_trading_date": "2026-08-24",
+            }]
+
+        load_index.side_effect = reports_for
+        fixed_now = dt.datetime(2026, 8, 24, 12, tzinfo=dt.timezone.utc)
+        with patch.object(
+            web_routes.system, "_utc_now", return_value=fixed_now, create=True
+        ):
+            health = stock_app.app.test_client().get("/health/data")
+
+        self.assertEqual(health.status_code, 200)
+        payload = health.get_json()
+        self.assertEqual(payload["markets"]["TW"]["status"], "current")
+        self.assertEqual(payload["markets"]["US"]["status"], "unavailable")
+        self.assertIsNone(payload["markets"]["US"]["source_market_date"])
+        self.assertEqual(calls, ["TW", "US"])
+
+        calls.clear()
+        dashboard = stock_app.app.test_client().get("/dashboard")
+        self.assertEqual(dashboard.status_code, 200)
+        self.assertEqual(calls, ["TW"])
+
+        calls.clear()
+        us_dashboard = stock_app.app.test_client().get("/us")
+        self.assertEqual(us_dashboard.status_code, 503)
+        self.assertEqual(calls, ["US"])
+
+    @patch.object(stock_app, "_published_dashboard_snapshot")
+    @patch.object(stock_app, "_published_report_index_v2")
+    def test_invalid_index_dates_are_json_safe_and_do_not_fall_back(
+        self, load_index, load_dashboard
+    ):
+        load_dashboard.return_value = {
+            "market": "TW",
+            "observation_as_of": "2026-08-24",
+        }
+
+        def reports_for(*, market="TW"):
+            if market == "TW":
+                return [{
+                    "market": "TW",
+                    "report_type": "post_close",
+                    "source_market_date": "2026-08-24",
+                    "applicable_trading_date": "2026-08-24",
+                }]
+            return [{
+                "market": "US",
+                "report_type": "post_close",
+                "source_market_date": {"not-json-safe"},
+                "applicable_trading_date": "2026-8-24",
+            }]
+
+        load_index.side_effect = reports_for
+        fixed_now = dt.datetime(2026, 8, 24, 12, tzinfo=dt.timezone.utc)
+        with patch.object(
+            web_routes.system, "_utc_now", return_value=fixed_now
+        ):
+            response = stock_app.app.test_client().get("/health/data")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["markets"]["TW"]["status"], "current")
+        self.assertEqual(payload["markets"]["US"]["status"], "unavailable")
+        self.assertIsNone(payload["markets"]["US"]["source_market_date"])
+        self.assertIsNone(
+            payload["markets"]["US"]["applicable_trading_date"]
+        )
+        json.dumps(payload)
+
+    @patch.object(stock_app, "_published_dashboard_snapshot")
+    @patch.object(stock_app, "_published_report_index_v2")
+    def test_report_item_market_mismatch_fails_closed_for_us_only(
+        self, load_index, load_dashboard
+    ):
+        load_dashboard.return_value = {
+            "market": "TW",
+            "observation_as_of": "2026-08-24",
+        }
+        load_index.side_effect = lambda market="TW": [{
+            "market": "TW",
+            "report_type": "post_close",
+            "source_market_date": "2026-08-24",
+            "applicable_trading_date": "2026-08-24",
+        }]
+
+        calendars = TradingCalendarSet.from_documents([
+            calendar_document(2026)
+        ])
+        fixed_now = dt.datetime(2026, 8, 24, 12, tzinfo=dt.timezone.utc)
+        with patch.object(
+            web_routes.system,
+            "_next_session_for_market",
+            side_effect=lambda _market, value: calendars.next_session(value),
+        ), patch.object(
+            web_routes.system, "_utc_now", return_value=fixed_now
+        ):
+            response = stock_app.app.test_client().get("/health/data")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["markets"]["TW"]["status"], "current")
+        self.assertEqual(payload["markets"]["US"]["status"], "unavailable")
+        self.assertIsNone(payload["markets"]["US"]["source_market_date"])
+
+    @patch.object(stock_app, "_published_dashboard_snapshot")
+    @patch.object(stock_app, "_published_report_index_v2")
+    def test_non_dashboard_page_does_not_load_freshness_data(
+        self, load_index, load_dashboard
+    ):
+        response = stock_app.app.test_client().get("/learn")
+
+        self.assertEqual(response.status_code, 200)
+        load_index.assert_not_called()
+        load_dashboard.assert_not_called()
 
     @patch.object(stock_app, "_published_dashboard_snapshot")
     @patch.object(stock_app, "_published_report_index_v2")
@@ -77,7 +272,18 @@ class WebProductTests(unittest.TestCase):
             }
         ]
 
-        response = stock_app.app.test_client().get("/health/data")
+        calendars = TradingCalendarSet.from_documents([
+            calendar_document(2026)
+        ])
+        fixed_now = dt.datetime(2026, 8, 24, 12, tzinfo=dt.timezone.utc)
+        with patch.object(
+            web_routes.system,
+            "_next_session_for_market",
+            side_effect=lambda _market, value: calendars.next_session(value),
+        ), patch.object(
+            web_routes.system, "_utc_now", return_value=fixed_now
+        ):
+            response = stock_app.app.test_client().get("/health/data")
 
         self.assertEqual(response.status_code, 200)
         payload = response.get_json()
@@ -108,7 +314,18 @@ class WebProductTests(unittest.TestCase):
             }
         ]
 
-        dashboard = stock_app.app.test_client().get("/dashboard")
+        calendars = TradingCalendarSet.from_documents([
+            calendar_document(2026)
+        ])
+        fixed_now = dt.datetime(2026, 8, 24, 12, tzinfo=dt.timezone.utc)
+        with patch.object(
+            web_routes.system,
+            "_next_session_for_market",
+            side_effect=lambda _market, value: calendars.next_session(value),
+        ), patch.object(
+            web_routes.system, "_utc_now", return_value=fixed_now
+        ):
+            dashboard = stock_app.app.test_client().get("/dashboard")
         with stock_app.app.test_request_context("/us"):
             us_html = render_template(
                 "us_dashboard.html",

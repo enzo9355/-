@@ -183,18 +183,24 @@ class ReportWebTests(unittest.TestCase):
             if path.is_file()
         }
 
+        original_load_index = stock_app._published_report_index_v2
         with patch.object(
             stock_app,
             "_gcs_get_report_v2_object",
             side_effect=lambda path, _size: objects.get(path) if path.startswith("reports/v2/") else objects.get(f"reports/v2/{path}"),
             create=True,
-        ):
+        ), patch.object(
+            stock_app,
+            "_published_report_index_v2",
+            side_effect=original_load_index,
+        ) as load_index:
             response = stock_app.app.test_client().get("/us")
 
         html = response.get_data(as_text=True)
         self.assertEqual(response.status_code, 200)
         self.assertIn("美股市場研究摘要", html)
         self.assertIn("2026-07-15", html)
+        load_index.assert_called_once_with(market="US")
 
     def test_production_shaped_daily_reports_have_distinct_canonical_pages(self):
         temporary, objects = self._production_shaped_objects()

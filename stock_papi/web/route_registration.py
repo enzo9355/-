@@ -3,17 +3,25 @@
 from stock_papi.web.routes.dashboard import register_dashboard_page
 from stock_papi.web.routes.market import register_market_routes
 from stock_papi.web.routes.reports import register_report_routes
-from stock_papi.web.routes.system import register_system_routes
+from stock_papi.web.routes.system import (
+    create_data_freshness_loader,
+    register_system_routes,
+)
 from stock_papi.web.routes.auth import register_auth_routes
 from stock_papi.integrations.line.webhook import register_line_routes
 from absorb.conversation.web import register_conversation_routes
 
 
 def register_routes(app, dependencies):
+    load_data_freshness = create_data_freshness_loader(
+        load_dashboard_snapshot=dependencies["dashboard_snapshot"],
+        load_report_index_v2=dependencies["load_report_index_v2"],
+    )
     register_dashboard_page(
         app,
         load_report_index_v2=dependencies["load_report_index_v2"],
         load_dashboard_snapshot=dependencies["dashboard_snapshot"],
+        load_data_freshness=load_data_freshness,
         preview_enabled=(
             dependencies["prediction_capability"].preview_candidate_prefix
             is not None
@@ -22,8 +30,7 @@ def register_routes(app, dependencies):
     register_system_routes(
         app,
         search_stock=dependencies["search_stock"],
-        load_dashboard_snapshot=dependencies["dashboard_snapshot"],
-        load_report_index_v2=dependencies["load_report_index_v2"],
+        load_data_freshness=load_data_freshness,
     )
     register_report_routes(
         app,
@@ -35,6 +42,7 @@ def register_routes(app, dependencies):
         load_canonical_object=dependencies["load_canonical_object"],
         load_regression_artifact=dependencies["load_regression_artifact"],
         prediction_capability=dependencies["prediction_capability"],
+        load_data_freshness=load_data_freshness,
     )
     register_market_routes(
         app,

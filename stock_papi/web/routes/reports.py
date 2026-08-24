@@ -45,6 +45,7 @@ def register_report_routes(
     load_metadata_v2_by_sha=None,
     load_canonical_object=None, load_regression_artifact=None,
     prediction_capability=None,
+    load_data_freshness=None,
 ):
     observation_mode = (
         prediction_capability is not None
@@ -82,12 +83,22 @@ def register_report_routes(
     def _v2_reports(market="TW", *, required=False):
         try:
             reports = load_index_v2(market=market)
-        except TypeError:
-            reports = load_index_v2()
+        except ReportWebError:
+            raise
+        except Exception as exc:
+            raise ReportWebError("報告索引暫時無法使用") from exc
         if reports is None:
             if required:
                 raise ReportWebError("報告索引暫時無法使用")
             return []
+        if not isinstance(reports, list):
+            raise ReportWebError("報告索引格式錯誤")
+        if any(
+            not isinstance(item, dict)
+            or ("market" in item and item.get("market") != market)
+            for item in reports
+        ):
+            raise ReportWebError("報告索引市場不一致")
         if observation_mode:
             return [
                 item for item in reports
@@ -460,9 +471,18 @@ def register_report_routes(
             )
             if report.identity.market != "US":
                 raise ReportWebError("美股 Canonical Object 市場不一致")
-            response = make_response(render_template(
-                template_name, summary=build_market_summary_view(report), market="US"
-            ))
+            context = {
+                "summary": build_market_summary_view(report),
+                "market": "US",
+            }
+            if template_name == "us_dashboard.html" and load_data_freshness:
+                try:
+                    context["data_freshness"] = {
+                        "US": load_data_freshness("US", reports=reports)
+                    }
+                except Exception:
+                    context["data_freshness"] = {}
+            response = make_response(render_template(template_name, **context))
             return _secure_response(response)
         except ReportWebError as exc:
             return _report_error(503, report_type="post_close", exc=exc)
