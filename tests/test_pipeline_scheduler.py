@@ -1103,6 +1103,61 @@ if ($postXml.Count -ne 1 -or $postXml[0].Xml -notmatch '<Interval>PT20M</Interva
             self.assertNotEqual(completed.returncode, 0)
             self.assertNotIn("already completed", completed.stdout + completed.stderr)
 
+    def test_full_backtest_verifier_marks_valid_stale_completion_for_new_run(self):
+        cli_root = Path(__file__).parents[1].resolve()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            checkpoint = root / "checkpoints" / "jobs" / "full_backtest" / "current.json"
+            checkpoint.parent.mkdir(parents=True)
+            items = ("2330",)
+            checkpoint.write_text(
+                json.dumps({
+                    "schema_version": 1,
+                    "job_type": "full_backtest",
+                    "dataset_manifest": "quant/v1/manifests/TW-20260821T000000Z-bbbbbbbbbbbb.json",
+                    "dataset_sha256": "b" * 64,
+                    "model_version": "model-v1",
+                    "feature_schema_version": 1,
+                    "cutoff": "2026-08-21",
+                    "items_sha256": hashlib.sha256(
+                        json.dumps(items, separators=(",", ":")).encode("utf-8")
+                    ).hexdigest(),
+                    "item_count": 1,
+                    "next_index": 1,
+                    "completed_items": ["2330"],
+                    "status": "completed",
+                }),
+                encoding="utf-8",
+            )
+            probe = root / "valid_stale_checkpoint_probe.py"
+            probe.write_text(
+                "import datetime\n"
+                "import sys\n"
+                "import types\n"
+                "from types import SimpleNamespace\n"
+                "from stock_papi.batch import full_backtest_cli\n"
+                "source_loader = types.ModuleType('reporting.source_loader')\n"
+                "source_loader.load_report_source = lambda _root, market: SimpleNamespace(\n"
+                "    manifest=SimpleNamespace(manifest_path='manifests/TW-20260824T000000Z-aaaaaaaaaaaa.json', manifest_sha256='a' * 64, market_as_of=datetime.date(2026, 8, 24)),\n"
+                "    stocks=(SimpleNamespace(model_version='model-v1', symbol='2330'),))\n"
+                "sys.modules['reporting.source_loader'] = source_loader\n"
+                "raise SystemExit(full_backtest_cli.main(['--root', sys.argv[1], '--verify-completion']))\n",
+                encoding="utf-8",
+            )
+            environment = os.environ.copy()
+            environment["PYTHONPATH"] = str(cli_root)
+            completed = subprocess.run(
+                [sys.executable, str(probe), str(root)],
+                cwd=cli_root,
+                env=environment,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+
+            self.assertEqual(completed.returncode, 3, completed.stdout + completed.stderr)
+            self.assertIn("not completed for the current source", completed.stdout)
+
     def test_full_backtest_wrapper_uses_authoritative_verifier_before_yfinance(self):
         wrapper = (
             Path(__file__).parents[1] / "scripts" / "run_full_backtest.ps1"
