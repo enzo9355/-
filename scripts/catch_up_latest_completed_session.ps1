@@ -180,6 +180,41 @@ function Read-JsonWithinRoot {
     }
 }
 
+function ConvertTo-CanonicalJsonValue {
+    param($Value)
+
+    if ($null -eq $Value) { return $null }
+    if ($Value -is [Collections.IDictionary]) {
+        $Normalized = [ordered]@{}
+        foreach ($Key in @($Value.Keys | Sort-Object)) {
+            $Normalized[[string]$Key] = ConvertTo-CanonicalJsonValue `
+                -Value $Value[$Key]
+        }
+        return $Normalized
+    }
+    if ($Value -is [pscustomobject]) {
+        $Normalized = [ordered]@{}
+        foreach ($Property in @($Value.PSObject.Properties | Sort-Object Name)) {
+            $Normalized[[string]$Property.Name] = ConvertTo-CanonicalJsonValue `
+                -Value $Property.Value
+        }
+        return $Normalized
+    }
+    if ($Value -is [array]) {
+        return ,@($Value | ForEach-Object {
+            ConvertTo-CanonicalJsonValue -Value $_
+        })
+    }
+    return $Value
+}
+
+function Get-CanonicalJson {
+    param([Parameter(Mandatory)]$Value)
+
+    $Normalized = ConvertTo-CanonicalJsonValue -Value $Value
+    return ($Normalized | ConvertTo-Json -Depth 50 -Compress)
+}
+
 function Write-AtomicJson {
     param(
         [Parameter(Mandatory)][string]$Path,
@@ -1585,41 +1620,6 @@ function Assert-IdentityMatch {
             throw "$Label identity mismatch: $Property"
         }
     }
-}
-
-function ConvertTo-CanonicalJsonValue {
-    param($Value)
-
-    if ($null -eq $Value) { return $null }
-    if ($Value -is [Collections.IDictionary]) {
-        $Normalized = [ordered]@{}
-        foreach ($Key in @($Value.Keys | Sort-Object)) {
-            $Normalized[[string]$Key] = ConvertTo-CanonicalJsonValue `
-                -Value $Value[$Key]
-        }
-        return $Normalized
-    }
-    if ($Value -is [pscustomobject]) {
-        $Normalized = [ordered]@{}
-        foreach ($Property in @($Value.PSObject.Properties | Sort-Object Name)) {
-            $Normalized[[string]$Property.Name] = ConvertTo-CanonicalJsonValue `
-                -Value $Property.Value
-        }
-        return $Normalized
-    }
-    if ($Value -is [array]) {
-        return ,@($Value | ForEach-Object {
-            ConvertTo-CanonicalJsonValue -Value $_
-        })
-    }
-    return $Value
-}
-
-function Get-CanonicalJson {
-    param([Parameter(Mandatory)]$Value)
-
-    $Normalized = ConvertTo-CanonicalJsonValue -Value $Value
-    return ($Normalized | ConvertTo-Json -Depth 50 -Compress)
 }
 
 function Convert-PointerEvidence {
