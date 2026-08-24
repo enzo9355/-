@@ -25,11 +25,24 @@ def _write_atomic(path, document):
     os.replace(temporary, path)
 
 
+def _completed_checkpoint(root):
+    path = Path(root) / "checkpoints" / "jobs" / "full_backtest" / "current.json"
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError):
+        return False
+    return isinstance(document, dict) and document.get("status") == "completed"
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="ABSORB resumable full backtest")
     parser.add_argument("--root", type=Path, default=Path(r"D:\AbsorbData"))
     parser.add_argument("--max-items", type=int, default=25)
     args = parser.parse_args(argv)
+
+    if _completed_checkpoint(args.root):
+        print("full backtest checkpoint is already completed; skipping execution")
+        return 0
 
     from local_quant import load_stock_pipeline
     from reporting.source_loader import load_report_source

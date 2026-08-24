@@ -238,6 +238,32 @@ class PythonRuntimeWrapperTests(unittest.TestCase):
             self.assertIn("Selected Python runtime cannot import stock_papi", combined)
             self.assertNotIn("sensitive-child-output", combined)
 
+    def test_runtime_smoke_check_can_require_yfinance_without_child_output(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repo = root / "repo"
+            repo.mkdir()
+            runtime = self.create_leaf(
+                root / "runtime.cmd",
+                (
+                    b"@echo off\r\n"
+                    b"echo %* | findstr /c:\"yfinance\" >nul && (>&2 echo sensitive-child-output & exit /b 7)\r\n"
+                    b"exit /b 0\r\n"
+                ),
+            )
+            result = self.run_powershell(
+                (
+                    "Assert-AbsorbPythonRuntime "
+                    f"-PythonExe '{self.ps_quote(runtime)}' "
+                    f"-RepoRoot '{self.ps_quote(repo)}' "
+                    "-RequiredImports @('stock_papi', 'yfinance')",
+                )
+            )
+            self.assertNotEqual(result.returncode, 0)
+            combined = result.stdout + result.stderr
+            self.assertIn("required ABSORB modules", combined)
+            self.assertNotIn("sensitive-child-output", combined)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,6 +1,9 @@
 import datetime
+import json
 import os
 import subprocess
+import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -97,8 +100,7 @@ class PipelineSchedulerTests(unittest.TestCase):
         self.assertIn("invoke_pipeline_task.ps1", script)
         self.assertIn("Task wrapper not found", script)
         self.assertIn("New-ScheduledTaskTrigger -Weekly", script)
-        self.assertIn("RepeatMinutes=1", script)
-        self.assertIn("-RepetitionInterval", script)
+        self.assertNotIn("RepeatMinutes=1", script)
         self.assertIn(r"D:\AbsorbData", script)
         wrapper_source = (scripts / "invoke_pipeline_task.ps1").read_text(
             encoding="utf-8"
@@ -185,6 +187,19 @@ class PipelineSchedulerTests(unittest.TestCase):
                 self.assertNotIn("codex-runtimes", source)
                 self.assertNotIn("$BundledPython", source)
 
+        for wrapper_name in ("run_us_daily.ps1", "run_full_backtest.ps1"):
+            source = (scripts / wrapper_name).read_text(encoding="utf-8")
+            with self.subTest(wrapper=wrapper_name):
+                self.assertIn(
+                    ". (Join-Path $PSScriptRoot 'python_runtime.ps1')", source
+                )
+                self.assertIn("Resolve-AbsorbPythonExecutable", source)
+                self.assertIn(
+                    "-RequiredImports @('stock_papi', 'yfinance')", source
+                )
+                self.assertNotIn("codex-runtimes", source)
+                self.assertNotIn("$BundledPython", source)
+
     def test_post_close_source_market_date_has_fail_closed_manifest_fallback(self):
         script = (
             Path(__file__).parents[1] / "scripts" / "run_tw_post_close_pipeline.ps1"
@@ -262,6 +277,250 @@ class PipelineSchedulerTests(unittest.TestCase):
         self.assertIn("2>&1", source)
         self.assertIn("$ExitCode = $LASTEXITCODE", source)
 
+    def test_mutex_plan_is_market_specific_and_waits_boundedly_under_contention(self):
+        """Execute the production mutex helpers without launching a pipeline."""
+        script = (
+            Path(__file__).parents[1] / "scripts" / "invoke_pipeline_task.ps1"
+        ).resolve()
+        harness = f"""
+$ErrorActionPreference = 'Stop'
+$tokens = $null
+$errors = $null
+$ast = [Management.Automation.Language.Parser]::ParseFile('{str(script).replace("'", "''")}', [ref]$tokens, [ref]$errors)
+if ($errors.Count -ne 0) {{ throw 'invoke_pipeline_task.ps1 did not parse' }}
+foreach ($name in @('Get-AbsorbPipelineMutexPlan', 'Enter-AbsorbPipelineMutexPlan', 'Exit-AbsorbPipelineMutexPlan')) {{
+    $definition = @($ast.FindAll({{ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name }}, $true))[0]
+    if ($null -eq $definition) {{ throw "required mutex helper was not found: $name" }}
+    Invoke-Expression $definition.Extent.Text
+}}
+$twPlan = @(Get-AbsorbPipelineMutexPlan -Job 'TW-PreMarket')
+$usPlan = @(Get-AbsorbPipelineMutexPlan -Job 'US-PreMarket')
+$postClosePlan = @(Get-AbsorbPipelineMutexPlan -Job 'TW-PostClose')
+$recoveryPlan = @(Get-AbsorbPipelineMutexPlan -Job 'ReportUploadRecovery')
+if ($twPlan.Count -ne 1 -or $twPlan[0].scope -ne 'market' -or $twPlan[0].market -ne 'TW') {{ throw 'TW premarket mutex plan is incorrect' }}
+if ($usPlan.Count -ne 1 -or $usPlan[0].scope -ne 'market' -or $usPlan[0].market -ne 'US') {{ throw 'US premarket mutex plan is incorrect' }}
+if (($postClosePlan.scope -join '|') -ne 'market|publication') {{ throw 'market-to-publication lock ordering is incorrect' }}
+if (($recoveryPlan.scope -join '|') -ne 'publication') {{ throw 'recovery should only hold the publication lock' }}
+$twName = 'Local\\ABSORB-Task3-TW-' + [Guid]::NewGuid().ToString('N')
+$usName = 'Local\\ABSORB-Task3-US-' + [Guid]::NewGuid().ToString('N')
+$publicationName = 'Local\\ABSORB-Task3-Publication-' + [Guid]::NewGuid().ToString('N')
+$twPlan[0].mutex_name = $twName
+$usPlan[0].mutex_name = $usName
+($postClosePlan | Where-Object {{ $_.scope -eq 'publication' }})[0].mutex_name = $publicationName
+$recoveryPlan[0].mutex_name = $publicationName
+$twPlan[0].wait_milliseconds = 100
+$recoveryPlan[0].wait_milliseconds = 100
+function Start-TestMutexHolder {{
+    param([string]$MutexName)
+    $token = [Guid]::NewGuid().ToString('N')
+    $ready = Join-Path ([IO.Path]::GetTempPath()) "absorb-task3-$token.ready"
+    $release = Join-Path ([IO.Path]::GetTempPath()) "absorb-task3-$token.release"
+    $job = Start-Job -ScriptBlock {{
+        param($Name, $ReadyPath, $ReleasePath)
+        $mutex = [Threading.Mutex]::new($false, $Name)
+        try {{
+            if (-not $mutex.WaitOne(5000)) {{ throw 'test holder could not acquire mutex' }}
+            [IO.File]::WriteAllText($ReadyPath, 'ready')
+            while (-not [IO.File]::Exists($ReleasePath)) {{ Start-Sleep -Milliseconds 10 }}
+        }} finally {{
+            try {{ $mutex.ReleaseMutex() }} catch {{ }}
+            $mutex.Dispose()
+        }}
+    }} -ArgumentList $MutexName, $ready, $release
+    for ($index = 0; $index -lt 200 -and -not [IO.File]::Exists($ready); $index++) {{ Start-Sleep -Milliseconds 10 }}
+    if (-not [IO.File]::Exists($ready)) {{
+        Receive-Job -Job $job -Keep | Out-String | Write-Error
+        throw 'test holder did not establish mutex contention'
+    }}
+    return [pscustomobject]@{{ job = $job; ready = $ready; release = $release }}
+}}
+function Stop-TestMutexHolder {{
+    param($Holder)
+    if ($null -eq $Holder) {{ return }}
+    [IO.File]::WriteAllText($Holder.release, 'release')
+    Wait-Job -Job $Holder.job -Timeout 5 | Out-Null
+    Remove-Job -Job $Holder.job -Force
+    Remove-Item -LiteralPath $Holder.ready, $Holder.release -Force -ErrorAction SilentlyContinue
+}}
+$twHolder = Start-TestMutexHolder -MutexName $twName
+$publicationHolder = Start-TestMutexHolder -MutexName $publicationName
+try {{
+    $watch = [Diagnostics.Stopwatch]::StartNew()
+    try {{
+        Enter-AbsorbPipelineMutexPlan -Plan $twPlan | Out-Null
+        throw 'TW contention was not rejected'
+    }} catch [TimeoutException] {{
+        if ($watch.ElapsedMilliseconds -lt 70 -or $watch.ElapsedMilliseconds -gt 1500) {{ throw 'TW wait was not bounded' }}
+    }} finally {{ $watch.Stop() }}
+    $usLeases = @(Enter-AbsorbPipelineMutexPlan -Plan $usPlan)
+    try {{
+        if ($usLeases.Count -ne 1 -or -not $usLeases[0].receipt.acquired) {{ throw 'US work was incorrectly blocked by TW contention' }}
+    }} finally {{ Exit-AbsorbPipelineMutexPlan -Leases $usLeases }}
+    $watch = [Diagnostics.Stopwatch]::StartNew()
+    try {{
+        Enter-AbsorbPipelineMutexPlan -Plan $recoveryPlan | Out-Null
+        throw 'publication contention was not rejected'
+    }} catch [TimeoutException] {{
+        if ($watch.ElapsedMilliseconds -lt 70 -or $watch.ElapsedMilliseconds -gt 1500) {{ throw 'publication wait was not bounded' }}
+    }} finally {{ $watch.Stop() }}
+}} finally {{
+    Stop-TestMutexHolder -Holder $twHolder
+    Stop-TestMutexHolder -Holder $publicationHolder
+}}
+@{{ tw_mutex = $twPlan[0].mutex_name; us_mutex = $usPlan[0].mutex_name; publication_scope = $recoveryPlan[0].scope }} | ConvertTo-Json -Compress
+"""
+        completed = subprocess.run(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                harness,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+        receipt = json.loads(completed.stdout)
+        self.assertNotEqual(receipt["tw_mutex"], receipt["us_mutex"])
+        self.assertEqual(receipt["publication_scope"], "publication")
+
+    def test_full_backtest_completed_checkpoint_exits_before_yfinance_import(self):
+        cli_root = Path(__file__).parents[1].resolve()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            checkpoint = root / "checkpoints" / "jobs" / "full_backtest" / "current.json"
+            checkpoint.parent.mkdir(parents=True)
+            checkpoint.write_text(json.dumps({"status": "completed"}), encoding="utf-8")
+            probe = root / "completed_checkpoint_probe.py"
+            probe.write_text(
+                "import builtins\n"
+                "import datetime\n"
+                "import sys\n"
+                "import types\n"
+                "from types import SimpleNamespace\n"
+                "from stock_papi.batch import full_backtest_cli\n"
+                "_real_import = builtins.__import__\n"
+                "def _blocked(name, *args, **kwargs):\n"
+                "    if name == 'yfinance' or name.startswith('yfinance.'):\n"
+                "        raise ModuleNotFoundError('deliberately unavailable yfinance')\n"
+                "    return _real_import(name, *args, **kwargs)\n"
+                "builtins.__import__ = _blocked\n"
+                "local_quant = types.ModuleType('local_quant')\n"
+                "def load_stock_pipeline(_root):\n"
+                "    import yfinance\n"
+                "local_quant.load_stock_pipeline = load_stock_pipeline\n"
+                "sys.modules['local_quant'] = local_quant\n"
+                "source_loader = types.ModuleType('reporting.source_loader')\n"
+                "source_loader.load_report_source = lambda _root, market: SimpleNamespace(\n"
+                "    manifest=SimpleNamespace(manifest_path='manifests/TW-20260821T000000Z-aaaaaaaaaaaa.json', manifest_sha256='a' * 64, market_as_of=datetime.date(2026, 8, 21)),\n"
+                "    stocks=(SimpleNamespace(model_version='model-v1', symbol='2330'),))\n"
+                "sys.modules['reporting.source_loader'] = source_loader\n"
+                "raise SystemExit(full_backtest_cli.main(['--root', sys.argv[1]]))\n",
+                encoding="utf-8",
+            )
+            environment = os.environ.copy()
+            environment["PYTHONPATH"] = str(cli_root)
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(probe),
+                    str(root),
+                ],
+                cwd=cli_root,
+                env=environment,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            output = completed.stdout + completed.stderr
+            self.assertEqual(completed.returncode, 0, output)
+            self.assertIn("already completed", output)
+            self.assertNotIn("deliberately unavailable yfinance", output)
+
+    def test_full_backtest_wrapper_checkpoint_guard_is_python_free(self):
+        wrapper = (
+            Path(__file__).parents[1] / "scripts" / "run_full_backtest.ps1"
+        ).resolve()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            checkpoint = root / "checkpoints" / "jobs" / "full_backtest" / "current.json"
+            checkpoint.parent.mkdir(parents=True)
+            checkpoint.write_text(json.dumps({"status": "completed"}), encoding="utf-8")
+            harness = f"""
+$ErrorActionPreference = 'Stop'
+$tokens = $null
+$errors = $null
+$ast = [Management.Automation.Language.Parser]::ParseFile('{str(wrapper).replace("'", "''")}', [ref]$tokens, [ref]$errors)
+if ($errors.Count -ne 0) {{ throw 'run_full_backtest.ps1 did not parse' }}
+$definition = @($ast.FindAll({{ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Test-AbsorbFullBacktestCompletedCheckpoint' }}, $true))[0]
+if ($null -eq $definition) {{ throw 'full backtest checkpoint helper was not found' }}
+Invoke-Expression $definition.Extent.Text
+$env:ABSORB_PYTHON_EXE = 'C:\\missing-yfinance-runtime.exe'
+if (-not (Test-AbsorbFullBacktestCompletedCheckpoint -DataRoot '{str(root).replace("'", "''")}')) {{ throw 'completed checkpoint was not accepted' }}
+[Console]::WriteLine('completed-without-python')
+"""
+            completed = subprocess.run(
+                [
+                    "powershell.exe",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-Command",
+                    harness,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+            self.assertIn("completed-without-python", completed.stdout)
+
+    def test_pipeline_installer_definition_is_daily_bounded_and_hidden(self):
+        installer = (
+            Path(__file__).parents[1] / "scripts" / "install_pipeline_tasks.ps1"
+        ).resolve()
+        harness = f"""
+$ErrorActionPreference = 'Stop'
+$tokens = $null
+$errors = $null
+$ast = [Management.Automation.Language.Parser]::ParseFile('{str(installer).replace("'", "''")}', [ref]$tokens, [ref]$errors)
+if ($errors.Count -ne 0) {{ throw 'install_pipeline_tasks.ps1 did not parse' }}
+$definition = @($ast.FindAll({{ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-AbsorbPipelineTaskDefinitions' }}, $true))[0]
+if ($null -eq $definition) {{ throw 'task definition helper was not found' }}
+Invoke-Expression $definition.Extent.Text
+$fullBacktest = @(Get-AbsorbPipelineTaskDefinitions -WeeklyDay Saturday | Where-Object {{ $_.Name -eq 'ABSORB-FullBacktest' }})
+if ($fullBacktest.Count -ne 1) {{ throw 'full backtest definition was not unique' }}
+@{{ time = $fullBacktest[0].Time; repeat_minutes = $fullBacktest[0].RepeatMinutes; execution_minutes = [int]$fullBacktest[0].ExecutionTimeLimit.TotalMinutes }} | ConvertTo-Json -Compress
+"""
+        completed = subprocess.run(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                harness,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+        definition = json.loads(completed.stdout)
+        self.assertEqual(definition["time"], "22:30")
+        self.assertIsNone(definition["repeat_minutes"])
+        self.assertEqual(definition["execution_minutes"], 225)
+        source = installer.read_text(encoding="utf-8")
+        for required in ("run_hidden.vbs", "wscript.exe", "//B", "//NoLogo", "-WindowStyle", "Hidden"):
+            with self.subTest(required=required):
+                self.assertIn(required, source)
+
     def test_task_wrapper_records_success_or_failure_without_secrets(self):
         source = (
             Path(__file__).parents[1] / "scripts" / "invoke_pipeline_task.ps1"
@@ -283,6 +542,9 @@ class PipelineSchedulerTests(unittest.TestCase):
         )
         self.assertNotIn("Invoke-NativeProcessCaptured", source)
         self.assertIn("$Checkpoint.status -eq 'completed'", source)
+        self.assertIn("mutexes = $MutexReceipts", source)
+        self.assertIn("wait_milliseconds", source)
+        self.assertIn("waited_milliseconds", source)
         for forbidden in (
             "LINE_CHANNEL_ACCESS_TOKEN",
             "GOOGLE_APPLICATION_CREDENTIALS",

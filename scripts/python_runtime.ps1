@@ -53,7 +53,8 @@ function Assert-AbsorbPythonRuntime {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$PythonExe,
-        [Parameter(Mandatory)][string]$RepoRoot
+        [Parameter(Mandatory)][string]$RepoRoot,
+        [string[]]$RequiredImports = @('stock_papi')
     )
 
     if (
@@ -70,6 +71,12 @@ function Assert-AbsorbPythonRuntime {
         throw 'Repository root is unavailable'
     }
 
+    if ($RequiredImports.Count -lt 1 -or $RequiredImports | Where-Object {
+        [string]::IsNullOrWhiteSpace($_) -or $_ -notmatch '^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$'
+    }) {
+        throw 'Required Python imports are invalid'
+    }
+
     $ResolvedRepoRoot = (Resolve-Path -LiteralPath $RepoRoot -ErrorAction Stop).Path
     $DepsRoot = Join-Path $ResolvedRepoRoot '.deps'
     $RuntimePythonPath = [string]::Join(
@@ -81,7 +88,7 @@ function Assert-AbsorbPythonRuntime {
     try {
         $env:PYTHONPATH = $RuntimePythonPath
         try {
-            & $PythonExe -c 'import stock_papi' 2>&1 | Out-Null
+            & $PythonExe -c 'import importlib, sys; [importlib.import_module(name) for name in sys.argv[1:]]' @RequiredImports 2>&1 | Out-Null
             $ExitCode = $LASTEXITCODE
         } catch {
             $ExitCode = 1
@@ -95,6 +102,6 @@ function Assert-AbsorbPythonRuntime {
     }
 
     if ($ExitCode -ne 0) {
-        throw 'Selected Python runtime cannot import stock_papi'
+        throw 'Selected Python runtime cannot import stock_papi or required ABSORB modules; install project requirements or set ABSORB_PYTHON_EXE'
     }
 }
