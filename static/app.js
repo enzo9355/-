@@ -241,35 +241,100 @@ function appendConversationMessage(log, role, text) {
   log.scrollTop = log.scrollHeight;
 }
 
-function initConversation() {
-  const form = bySelector("[data-conversation-form]");
-  const panel = bySelector("[data-conversation-endpoint]");
-  const log = bySelector("[data-conversation-log]");
-  if (!form || !panel || !log) return;
-  form.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const input = bySelector("input[name='question']", form);
-    const button = bySelector("button", form);
-    const question = input.value.trim();
-    if (!question) return;
-    appendConversationMessage(log, "user", question);
-    input.value = "";
-    button.disabled = true;
-    const headers = { Accept: "application/json", "Content-Type": "application/json" };
-    if (window.absorbAccount?.csrf_token) headers["X-CSRF-Token"] = window.absorbAccount.csrf_token;
-    try {
-      const response = await fetch(panel.dataset.conversationEndpoint, {
-        method: "POST",
-        headers,
-        body: JSON.stringify({ question }),
-      });
-      const data = await response.json();
-      appendConversationMessage(log, "assistant", response.ok ? data.text : "自然語言分析暫時無法使用，請稍後再試。");
-    } catch (_error) {
-      appendConversationMessage(log, "assistant", "自然語言分析暫時無法使用，固定指令與股票查詢不受影響。");
-    } finally {
-      button.disabled = false;
-      input.focus();
+function initConversations() {
+  document.querySelectorAll("[data-conversation-form]").forEach((form) => {
+    const panel = form.closest("[data-conversation-endpoint]");
+    const log = panel && bySelector("[data-conversation-log]", panel);
+    if (!panel || !log) return;
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const input = bySelector("input[name='question']", form);
+      const button = bySelector("button", form);
+      const question = input.value.trim();
+      if (!question) return;
+      appendConversationMessage(log, "user", question);
+      input.value = "";
+      button.disabled = true;
+      const headers = { Accept: "application/json", "Content-Type": "application/json" };
+      if (window.absorbAccount?.csrf_token) headers["X-CSRF-Token"] = window.absorbAccount.csrf_token;
+      try {
+        const response = await fetch(panel.dataset.conversationEndpoint, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ question }),
+        });
+        const data = await response.json();
+        appendConversationMessage(log, "assistant", response.ok ? data.text : "自然語言分析暫時無法使用，請稍後再試。");
+      } catch (_error) {
+        appendConversationMessage(log, "assistant", "自然語言分析暫時無法使用，固定指令與股票查詢不受影響。");
+      } finally {
+        button.disabled = false;
+        input.focus();
+      }
+    });
+  });
+}
+
+function initQuickAsk() {
+  const dialog = bySelector("[data-quick-ask-dialog]");
+  const dataQuickAskOpen = document.querySelectorAll("[data-quick-ask-open]");
+  if (!dialog || !dataQuickAskOpen.length) return;
+  const closeButton = bySelector("[data-quick-ask-close]", dialog);
+  const input = bySelector("input[name='question']", dialog);
+  let lastFocus = null;
+
+  const open = (instant = false) => {
+    if (!dialog.hidden) {
+      input.focus({ preventScroll: true });
+      return;
+    }
+    lastFocus = document.activeElement;
+    dialog.hidden = false;
+    dataQuickAskOpen.forEach((button) => button.setAttribute("aria-expanded", "true"));
+    const reveal = () => {
+      dialog.classList.add("is-open");
+      input.focus({ preventScroll: true });
+    };
+    if (instant) reveal();
+    else window.requestAnimationFrame(reveal);
+  };
+
+  const close = () => {
+    dialog.classList.remove("is-open");
+    dataQuickAskOpen.forEach((button) => button.setAttribute("aria-expanded", "false"));
+    const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    window.setTimeout(() => {
+      dialog.hidden = true;
+      if (lastFocus instanceof HTMLElement) lastFocus.focus({ preventScroll: true });
+    }, reduceMotion ? 0 : 180);
+  };
+
+  dataQuickAskOpen.forEach((button) => button.addEventListener("click", () => open(false)));
+  closeButton.addEventListener("click", close);
+  dialog.addEventListener("click", (event) => {
+    if (event.target === dialog) close();
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && !dialog.hidden) close();
+    if (event.key === "Tab" && !dialog.hidden) {
+      const focusable = [...dialog.querySelectorAll(
+        'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+      )];
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (!first || !last) {
+        event.preventDefault();
+      } else if (event.shiftKey && (document.activeElement === first || !dialog.contains(document.activeElement))) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    }
+    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+      event.preventDefault();
+      open(true);
     }
   });
 }
@@ -430,4 +495,5 @@ loadDashboard();
 loadAccountState();
 initStockChart();
 initReturnCalculator();
-initConversation();
+initConversations();
+initQuickAsk();

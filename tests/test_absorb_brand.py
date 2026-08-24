@@ -56,7 +56,9 @@ class AbsorbBrandTests(unittest.TestCase):
     def test_design_system_uses_measured_navy_and_prohibits_old_persona(self):
         design = (ROOT / "DESIGN.md").read_text(encoding="utf-8")
         self.assertIn("--absorb-navy: #122643", design)
-        self.assertIn("alt 固定為「ABSORB logo」", design)
+        self.assertIn("導覽文字標誌固定為小寫草寫 `absorb`", design)
+        self.assertIn("Avenir Next", design)
+        self.assertIn("不下載、內嵌或提交專有字型", design)
         self.assertIn("不使用玻璃擬態", design)
 
     def test_new_user_visible_sources_do_not_contain_legacy_brand(self):

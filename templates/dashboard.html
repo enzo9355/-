@@ -1,41 +1,79 @@
 {% extends "base.html" %}
 {% block title %}今日市場｜ABSORB{% endblock %}
 {% block content %}
-<div class="page dashboard-page" data-dashboard-endpoint="/api/dashboard">
-  <div class="error-banner bootstrap-banner" role="status">AI 預測研究中。目前正式頁面只呈現已驗證的市場實況，不提供研究型輸出。</div>
+{% set market = observation.market_observation or {} %}
+{% set quality = observation.data_quality or {} %}
+{% set industries = observation.industry_observations or [] %}
+{% set focus = observation.daily_focus or [] %}
+{% set advancing = market.get('advancing_count') %}
+{% set declining = market.get('declining_count') %}
+{% set unchanged = market.get('unchanged_count') %}
+{% set total_count = advancing + declining + unchanged if advancing is not none and declining is not none and unchanged is not none else none %}
+{% set advancing_pct = (advancing / total_count * 100) if total_count else none %}
+{% set declining_pct = (declining / total_count * 100) if total_count else none %}
+{% set available_count = quality.get('available_count', quality.get('symbol_count')) %}
+<div class="page dashboard-page research-dashboard" data-dashboard-endpoint="/api/dashboard">
+  <div class="error-banner bootstrap-banner" role="status">AI 預測研究中。目前正式頁面只呈現已驗證的市場觀察，不提供機率預測或買賣指令。</div>
   {% if search_error %}<div class="error-banner" role="alert">找不到「{{ search_query }}」，請輸入台股代碼、名稱或美股代碼。</div>{% endif %}
 
-  <section class="panel trading-prep-panel" aria-labelledby="trading-prep-title">
-    <div class="section-heading"><div><p class="eyebrow">TODAY</p><h1 id="trading-prep-title">今日市場準備</h1></div></div>
-    <div class="report-card-grid">
-      {% for report_type, label in [('post_close', '盤後觀察'), ('pre_market', '盤前風險更新')] %}
-        {% set item = daily_cards.get(report_type) %}
-        <article class="report-insight-card">
-          <p class="eyebrow">{{ label }}</p>
-          {% if item %}
-            <h2>{{ item.title }}</h2><p>{{ item.summary|join('；') }}</p><p class="muted small">資料基準日 {{ item.source_market_date }}｜適用交易日 {{ item.applicable_trading_date }}（下一交易日）</p>
-            {% if report_type == 'post_close' %}<a class="button button-secondary" href="{{ url_for('post_close_report_page', trading_date=item.source_market_date) }}">查看盤後觀察</a>{% else %}<a class="button button-secondary" href="{{ url_for('pre_market_report_page', trading_date=item.applicable_trading_date) }}">查看盤前更新</a>{% endif %}
-          {% else %}<h2>尚未發布</h2><p class="muted">通過資料與發布驗證後才會顯示，不以假資料補位。</p>{% endif %}
-        </article>
-      {% endfor %}
+  <header class="research-summary" data-research-summary>
+    <div class="research-copy">
+      <p class="research-status"><span aria-hidden="true"></span>台股市場研究摘要</p>
+      <h1>台股市場研究摘要</h1>
+      <p class="research-headline">{% if market %}MA20 市場廣度 {{ '%.1f%%'|format(market.get('ma20_breadth_pct')) if market.get('ma20_breadth_pct') is not none else '資料不足' }}，20 日已實現波動 {{ '%.1f%%'|format(market.get('realized_volatility_20d_pct')) if market.get('realized_volatility_20d_pct') is not none else '資料不足' }}，風險狀態為 {{ {'normal':'一般','cautious':'謹慎','elevated':'升高'}.get(market.get('risk_state'), '資料不足') }}。{% else %}已驗證市場觀察尚待發布，暫不形成方向判斷。{% endif %}</p>
+      <p class="research-limit">畫面整理已發生的市場廣度、報酬、波動與產業相對強度。缺值維持缺值，所有數據皆以資料基準日為準。</p>
+    </div>
+    <dl class="research-evidence">
+      <div><dt>資料基準日</dt><dd>{{ observation.observation_as_of or '待更新' }}</dd></div>
+      <div><dt>資料覆蓋</dt><dd>{{ '%.1f%%'|format(quality.get('coverage') * 100) if quality.get('coverage') is not none else '資料不足' }}</dd></div>
+      <div><dt>有效標的</dt><dd>{{ available_count if available_count is not none else '資料不足' }}</dd></div>
+      <div><dt>產生時間</dt><dd>{{ observation.generated_at|replace('T', ' ')|replace('Z', ' UTC') if observation.generated_at else '待更新' }}</dd></div>
+    </dl>
+  </header>
+
+  <section class="research-command" data-market-command aria-labelledby="market-command-title">
+    <div class="command-heading"><div><h2 id="market-command-title">市場指揮台</h2><p>價格、廣度、資金與風險同步觀察</p></div><span>資料基準日 {{ observation.observation_as_of or '待更新' }}</span></div>
+    <div class="command-grid">
+      <div class="command-metrics" aria-label="市場關鍵指標">
+        <article><span>市場廣度</span><strong>{{ '%.1f%%'|format(market.get('ma20_breadth_pct')) if market.get('ma20_breadth_pct') is not none else '資料不足' }}</strong><small>站上 MA20</small>{% if market.get('ma20_breadth_pct') is not none %}<progress value="{{ market.get('ma20_breadth_pct') }}" max="100">{{ market.get('ma20_breadth_pct') }}%</progress>{% endif %}</article>
+        <article><span>成交動能</span><strong>{{ '%.2f'|format(market.get('median_volume_ratio')) if market.get('median_volume_ratio') is not none else '資料不足' }}</strong><small>成交量中位比</small>{% if market.get('median_volume_ratio') is not none %}<progress value="{{ market.get('median_volume_ratio') }}" max="2">{{ market.get('median_volume_ratio') }}</progress>{% endif %}</article>
+        <article><span>波動壓力</span><strong>{{ '%.1f%%'|format(market.get('realized_volatility_20d_pct')) if market.get('realized_volatility_20d_pct') is not none else '資料不足' }}</strong><small>20 日已實現波動</small></article>
+        <article><span>風險狀態</span><strong>{{ {'normal':'一般','cautious':'謹慎','elevated':'升高'}.get(market.get('risk_state'), '資料不足') }}</strong><small>已驗證狀態</small></article>
+      </div>
+
+      <section class="evidence-canvas" aria-labelledby="return-title">
+        <div class="evidence-canvas-head"><div><span>VERIFIED MARKET ACTUALS</span><h3 id="return-title">期間報酬</h3></div><span>非即時報價</span></div>
+        <dl class="return-grid">
+          {% for key, label in [('return_1d_pct','1 日'),('return_5d_pct','5 日'),('return_20d_pct','20 日'),('return_60d_pct','60 日')] %}
+          {% set value = market.get(key) %}<div><dt>{{ label }}</dt><dd class="{{ 'positive' if value is not none and value > 0 else 'negative' if value is not none and value < 0 else '' }}">{{ '%+.2f%%'|format(value) if value is not none else '資料不足' }}</dd></div>
+          {% endfor %}
+        </dl>
+        <div class="breadth-band"><div><span>MA20 廣度</span><strong>{{ '%.1f%%'|format(market.get('ma20_breadth_pct')) if market.get('ma20_breadth_pct') is not none else '資料不足' }}</strong></div>{% if market.get('ma20_breadth_pct') is not none %}<progress value="{{ market.get('ma20_breadth_pct') }}" max="100">{{ market.get('ma20_breadth_pct') }}%</progress>{% endif %}<div><span>MA60 廣度</span><strong>{{ '%.1f%%'|format(market.get('ma60_breadth_pct')) if market.get('ma60_breadth_pct') is not none else '資料不足' }}</strong></div>{% if market.get('ma60_breadth_pct') is not none %}<progress value="{{ market.get('ma60_breadth_pct') }}" max="100">{{ market.get('ma60_breadth_pct') }}%</progress>{% endif %}</div>
+        <p class="canvas-note">以不同期間的已發生報酬與均線廣度交叉檢查，不代表未來方向。</p>
+      </section>
+
+      <div class="command-insights">
+        <section class="breadth-panel" data-breadth-visual aria-labelledby="breadth-title">
+          <div class="insight-heading"><h3 id="breadth-title">市場廣度</h3><span>{{ total_count if total_count is not none else '資料不足' }} 檔</span></div>
+          {% if advancing_pct is not none and declining_pct is not none %}
+          <div class="breadth-chart"><svg viewBox="0 0 42 42" role="img" aria-label="上漲 {{ advancing }} 檔，下跌 {{ declining }} 檔，持平 {{ unchanged }} 檔"><circle class="breadth-track" cx="21" cy="21" r="15.9155"></circle><circle class="breadth-up" cx="21" cy="21" r="15.9155" stroke-dasharray="{{ '%.2f %.2f'|format(advancing_pct, 100 - advancing_pct) }}" stroke-dashoffset="25"></circle><circle class="breadth-down" cx="21" cy="21" r="15.9155" stroke-dasharray="{{ '%.2f %.2f'|format(declining_pct, 100 - declining_pct) }}" stroke-dashoffset="{{ '%.2f'|format(25 - advancing_pct) }}"></circle><text x="21" y="20">{{ '%.0f%%'|format(advancing_pct) }}</text><text class="breadth-caption" x="21" y="25">上漲占比</text></svg><dl><div><dt>上漲</dt><dd class="positive">{{ advancing }}</dd></div><div><dt>下跌</dt><dd class="negative">{{ declining }}</dd></div><div><dt>持平</dt><dd>{{ unchanged }}</dd></div></dl></div>
+          {% else %}<p class="empty-state">市場廣度資料不足。</p>{% endif %}
+        </section>
+        <section class="risk-panel" aria-labelledby="risk-title"><div class="insight-heading"><h3 id="risk-title">波動與風險</h3><span>20 日觀察</span></div><dl><div><dt>20 日新高</dt><dd>{{ market.get('new_high_20d_count') if market.get('new_high_20d_count') is not none else '資料不足' }}</dd></div><div><dt>20 日新低</dt><dd>{{ market.get('new_low_20d_count') if market.get('new_low_20d_count') is not none else '資料不足' }}</dd></div><div><dt>法人淨流中位</dt><dd>{{ '%+.2f%%'|format(market.get('median_institution_net_ratio_pct')) if market.get('median_institution_net_ratio_pct') is not none else '資料不足' }}</dd></div></dl><p>風險檢查不等同停損建議，需與個別標的事件分開判讀。</p></section>
+      </div>
+    </div>
+
+    <div class="command-lower">
+      <section class="sector-flow" data-sector-flow aria-labelledby="sector-flow-title"><div class="insight-heading"><h3 id="sector-flow-title">產業相對強度</h3><a href="{{ url_for('industries_page') }}">查看產業觀察</a></div><div class="sector-flow-list">{% for item in industries[:5] %}{% set value = item.relative_return_5d_pct %}<div class="sector-flow-row"><span>{{ item.name }}</span>{% if value is not none %}<progress class="{{ 'negative' if value < 0 else '' }}" value="{{ value|abs }}" max="5">{{ value|abs }}</progress><strong class="{{ 'positive' if value > 0 else 'negative' if value < 0 else '' }}">{{ '%+.2f%%'|format(value) }}</strong>{% else %}<span>資料不足</span>{% endif %}</div>{% else %}<p class="empty-state">產業相對強度資料不足。</p>{% endfor %}</div></section>
+      <section class="quality-panel" aria-labelledby="quality-title"><div class="insight-heading"><h3 id="quality-title">資料覆蓋</h3><span>{{ observation.market or 'TW' }}</span></div><dl><div><dt>覆蓋率</dt><dd>{{ '%.1f%%'|format(quality.get('coverage') * 100) if quality.get('coverage') is not none else '資料不足' }}</dd></div><div><dt>有效標的</dt><dd>{{ available_count if available_count is not none else '資料不足' }}</dd></div><div><dt>未納入標的</dt><dd>{{ quality.get('failure_count') if quality.get('failure_count') is not none else '資料不足' }}</dd></div></dl></section>
     </div>
   </section>
 
-  <section class="panel focus-panel" aria-labelledby="home-focus-title">
-    <div class="section-heading"><div><p class="eyebrow">DAILY FOCUS</p><h2 id="home-focus-title">今日焦點</h2></div><span class="muted small">資料日 {{ observation.observation_as_of or '待更新' }}</span></div>
-    <div class="focus-grid">{% for text in (observation.daily_focus or [])[:5] %}<article class="focus-card"><span>焦點 {{ loop.index }}</span><strong>{{ text }}</strong></article>{% else %}<div class="empty-state">今日焦點資料暫時無法取得。</div>{% endfor %}</div>
-  </section>
+  <section class="verified-focus" aria-labelledby="home-focus-title"><div class="section-heading"><div><h2 id="home-focus-title">今日焦點</h2><p>已發布觀察摘要</p></div><span class="muted small">資料日 {{ observation.observation_as_of or '待更新' }}</span></div><ol>{% for text in focus[:5] %}<li><span>{{ '%02d'|format(loop.index) }}</span><strong>{{ text }}</strong></li>{% else %}<li class="empty-state">今日焦點資料暫時無法取得。</li>{% endfor %}</ol></section>
 
-  <section class="panel" aria-labelledby="home-entry-title">
-    <div class="section-heading"><div><p class="eyebrow">EXPLORE</p><h2 id="home-entry-title">選擇觀察入口</h2></div></div>
-    <div class="report-card-grid home-entry-grid">
-      <a class="report-insight-card" href="{{ url_for('market_page') }}"><p class="eyebrow">MARKET</p><h3>市場實況</h3><p>廣度、報酬、波動與資料品質。</p></a>
-      <a class="report-insight-card" href="{{ url_for('industries_page') }}"><p class="eyebrow">INDUSTRIES</p><h3>產業觀察</h3><p>相對報酬、熱圖與產業廣度。</p></a>
-      <a class="report-insight-card" href="{{ url_for('stocks_page') }}"><p class="eyebrow">STOCKS</p><h3>個股與 ETF</h3><p>搜尋標的、事件與 ETF 實況。</p></a>
-      <a class="report-insight-card" href="{{ url_for('ask_page') }}"><p class="eyebrow">ASK</p><h3>Ask ABSORB</h3><p>以已發布觀察資料回答問題。</p></a>
-    </div>
-    <p class="muted small"><a href="{{ url_for('learn_page') }}">第一次使用？先看市場觀察小辭典</a></p>
-  </section>
+  <section class="market-prep" aria-labelledby="trading-prep-title"><div class="section-heading"><div><h2 id="trading-prep-title">今日市場準備</h2><p>通過資料與發布驗證的報告</p></div><a href="{{ url_for('reports_page') }}">查看所有報告</a></div><div class="report-card-grid">{% for report_type, label in [('post_close', '盤後觀察'), ('pre_market', '盤前風險更新')] %}{% set item = daily_cards.get(report_type) %}<article class="report-insight-card"><p class="eyebrow">{{ label }}</p>{% if item %}<h3>{{ item.title }}</h3><p>{{ item.summary|join('；') }}</p><p class="muted small">資料基準日 {{ item.source_market_date }}｜適用交易日 {{ item.applicable_trading_date }}</p>{% if report_type == 'post_close' %}<a class="button button-secondary" href="{{ url_for('post_close_report_page', trading_date=item.source_market_date) }}">查看盤後觀察</a>{% else %}<a class="button button-secondary" href="{{ url_for('pre_market_report_page', trading_date=item.applicable_trading_date) }}">查看盤前更新</a>{% endif %}{% else %}<h3>尚未發布</h3><p class="muted">通過資料與發布驗證後才會顯示，不以假資料補位。</p>{% endif %}</article>{% endfor %}</div></section>
+
+  <nav class="dashboard-destinations" aria-label="研究功能入口"><a href="{{ url_for('market_page') }}"><strong>市場實況</strong><span>廣度、報酬與波動</span></a><a href="{{ url_for('industries_page') }}"><strong>產業觀察</strong><span>相對強度與產業廣度</span></a><a href="{{ url_for('stocks_page') }}"><strong>個股與 ETF</strong><span>事件與標的觀察</span></a><a href="{{ url_for('ask_page') }}"><strong>Ask ABSORB</strong><span>以已發布資料回答</span></a><a href="{{ url_for('learn_page') }}"><strong>學習</strong><span>市場觀察小辭典</span></a></nav>
   <div class="error-banner" data-dashboard-error aria-live="polite" hidden>已驗證的市場觀察資料暫時無法取得，請稍後再試。</div>
 </div>
 {% endblock %}

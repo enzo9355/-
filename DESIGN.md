@@ -19,10 +19,9 @@ ABSORB 是 AI 量化市場情報與決策輔助系統。介面先服務資料閱
 
 ## 4. Logo usage
 
-- 唯一來源：`static/brand/absorb-mark.png`，SHA-256 `2e7b3950809748d5e02648dfc26b0b403f7cabd2d706ce3130b28bad86c9443d`。
-- 圖形維持純白背景、原始比例與安全邊距；不得裁切、重畫、改色、加字、陰影或漸層。
-- 頭貼與 favicon 只用圖形；導覽可在圖形右側以文字顯示 `ABSORB`。
-- HTML alt 固定為「ABSORB logo」。
+- Canonical 圖形來源維持 `static/brand/absorb-mark.png`，SHA-256 `2e7b3950809748d5e02648dfc26b0b403f7cabd2d706ce3130b28bad86c9443d`，供 favicon、社群預覽、LINE 與其他非導覽用途使用。
+- Canonical 圖形維持純白背景、原始比例與安全邊距；不得裁切、重畫、改色、加字、陰影或漸層。使用圖形時 HTML alt 固定為「ABSORB logo」。
+- 導覽文字標誌固定為小寫草寫 `absorb`，不得搭配圓形圖示，並連回主畫面。
 
 ## 5. Color system
 
@@ -52,7 +51,7 @@ Logo 實測主要深藍為 `#122643`。CSS token：
 
 ## 6. Typography
 
-使用系統字型：`system-ui, -apple-system, "Segoe UI", "Noto Sans TC", sans-serif`。不下載或提交專有字型。標題使用同字族與較高字重，不以裝飾性襯線製造品牌感。
+英文字優先使用系統已安裝的 `Avenir Next` 或 `Avenir`，繁體中文搭配 `Noto Sans TC`，再依序退回 `PingFang TC`、`Microsoft JhengHei` 與 `sans-serif`。不下載、內嵌或提交專有字型，也不建立外部 font request。草寫只用於導覽文字標誌，內容標題維持人文無襯線。
 
 ## 7. Numeric typography
 
@@ -96,7 +95,7 @@ Primary 為深藍底白字；secondary 為白底深藍邊界；danger 僅用於�
 
 ## 17. Navigation
 
-Sidebar 使用 Logo 圖形加 `ABSORB`。目前頁面同時用文字、邊界與底色標示。行動版保留四個核心入口。
+桌面使用頂部導覽列與小寫草寫 `absorb` 文字標誌，目前頁面同時用文字與底線標示。市場切換必須導向實際存在且通過驗證的市場內容，不得只換標籤。行動版保留五個核心入口。
 
 ## 18. Charts
 

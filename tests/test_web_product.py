@@ -22,7 +22,7 @@ class WebProductTests(unittest.TestCase):
         load.return_value = observation_dashboard()
         client = stock_app.app.test_client()
         expectations = {
-            "/": "今日市場準備",
+            "/": "台股市場研究摘要",
             "/market": "市場實況",
             "/industries": "產業觀察",
             "/stocks": "個股與 ETF",
@@ -161,14 +161,22 @@ class WebProductTests(unittest.TestCase):
         )
 
         self.assertIn("ABSORB", html)
-        self.assertIn('alt="ABSORB logo"', html)
+        self.assertIn('class="brand-wordmark"', html)
+        self.assertIn('data-brand-wordmark', html)
+        self.assertIn('aria-label="回到 ABSORB 主畫面"', html)
+        self.assertNotIn('class="brand-mark"', html)
         self.assertIn("今天市場", html)
         self.assertIn("使用 LINE 登入", html)
         self.assertIn("已驗證市場觀察", html)
+        self.assertIn('data-market-switch', html)
+        self.assertIn('href="/reports/us"', html)
         self.assertNotIn("fonts.googleapis.com", html)
         self.assertIn("--absorb-navy:#122643", css)
         self.assertIn("--absorb-canvas:#f7f9fc", css)
-        self.assertIn(".glass-panel", css)
+        self.assertIn('"Avenir Next",Avenir,"Noto Sans TC"', css)
+        self.assertIn(".research-command", css)
+        self.assertIn(".market-switch a{display:grid;min-height:44px", css)
+        self.assertIn(".quick-ask-header button{display:grid;width:44px;height:44px", css)
         version = re.search(r'/static/app\.css\?v=([0-9a-f]{12})', html)
         self.assertIsNotNone(version)
         self.assertIn(f'/static/app.js?v={version.group(1)}', html)
@@ -217,14 +225,25 @@ class WebProductTests(unittest.TestCase):
         self.assertNotIn("style=", stock_html)
 
     def test_dashboard_page_is_the_observation_dashboard(self):
-        with patch.object(stock_app, "analyze") as analyze:
+        with patch.object(stock_app, "analyze") as analyze, patch.object(
+            stock_app,
+            "_published_dashboard_snapshot",
+            return_value=observation_dashboard(),
+        ):
             response = stock_app.app.test_client().get("/dashboard")
 
         self.assertEqual(response.status_code, 200)
         analyze.assert_not_called()
         html = response.get_data(as_text=True)
         for label in (
-            "今日市場準備",
+            "台股市場研究摘要",
+            "市場指揮台",
+            "市場廣度",
+            "期間報酬",
+            "波動與風險",
+            "產業相對強度",
+            "資料覆蓋",
+            "資料基準日 2026-07-15",
             "今日焦點",
             "產業觀察",
             "市場實況",
@@ -240,6 +259,60 @@ class WebProductTests(unittest.TestCase):
             "data-top-picks",
         ):
             self.assertNotIn(forbidden, html)
+
+    @patch.object(
+        stock_app, "_published_dashboard_snapshot", return_value=observation_dashboard()
+    )
+    def test_dashboard_research_command_uses_verified_data_without_inline_styles(
+        self, _load
+    ):
+        html = stock_app.app.test_client().get("/dashboard").get_data(as_text=True)
+
+        for marker in (
+            'data-research-summary',
+            'data-market-command',
+            'data-breadth-visual',
+            'data-sector-flow',
+            '<progress',
+            'value="61.2"',
+            '1200',
+            '700',
+            '17.5%',
+            '半導體',
+            '+1.85%',
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, html)
+        self.assertNotIn("23,742.18", html)
+        self.assertNotIn("style=", html)
+
+    def test_quick_ask_reuses_conversation_contract_and_has_dialog_controls(self):
+        html = stock_app.app.test_client().get("/dashboard").get_data(as_text=True)
+        script = Path(stock_app.app.static_folder, "app.js").read_text(
+            encoding="utf-8"
+        )
+
+        for marker in (
+            'data-quick-ask-open',
+            'data-quick-ask-dialog',
+            'role="dialog"',
+            'aria-modal="true"',
+            'data-conversation-endpoint="/api/conversation"',
+            'maxlength="1200"',
+            'aria-live="polite"',
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, html)
+        for marker in (
+            "dataQuickAskOpen",
+            'event.key === "Escape"',
+            'event.key === "Tab"',
+            'event.key.toLowerCase() === "k"',
+            "querySelectorAll(\"[data-conversation-form]\")",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, script)
+        self.assertNotIn(".innerHTML", script)
 
     def test_dashboard_has_route_based_section_navigation(self):
         html = stock_app.app.test_client().get(
@@ -267,7 +340,6 @@ class WebProductTests(unittest.TestCase):
             ("/industries", "產業觀察"),
             ("/stocks", "個股與 ETF"),
             ("/reports", "每日報告"),
-            ("/ask", "Ask ABSORB"),
         ):
             with self.subTest(path=path):
                 html = client.get(path).get_data(as_text=True)
@@ -281,6 +353,9 @@ class WebProductTests(unittest.TestCase):
         self.assertNotIn('href="#', primary_nav)
         self.assertNotIn('href="#', mobile_nav)
         self.assertIn('aria-current="page">今天</a>', mobile_nav)
+        ask = client.get("/ask").get_data(as_text=True)
+        ask_mobile = ask.split('<nav class="mobile-nav"', 1)[1].split("</nav>", 1)[0]
+        self.assertIn('class="active" href="/ask" aria-current="page">Ask</a>', ask_mobile)
 
     def test_legacy_hash_migrator_uses_only_fixed_canonical_routes(self):
         script = Path(stock_app.app.static_folder, "app.js").read_text(
