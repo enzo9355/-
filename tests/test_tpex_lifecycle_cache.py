@@ -47,6 +47,48 @@ def _tpex_payload(effective_date: datetime.date):
 
 
 class TpexLifecycleCacheTests(unittest.TestCase):
+    def test_invalid_fresh_listing_change_pdf_is_rejected_before_cache_write(self):
+        target = datetime.date(2026, 8, 20)
+        source_id = "twse_listing_change_20260728"
+        definition = trading_status.LIFECYCLE_SOURCE_DEFINITIONS[source_id]
+        response = Mock(
+            status_code=200,
+            content=b"%PDF-1.4 invalid HTTP 200 body",
+        )
+        session = Mock()
+        session.get.return_value = response
+
+        with tempfile.TemporaryDirectory() as root:
+            cache_directory = (
+                Path(root)
+                / "source-cache"
+                / "tw-official"
+                / "v2"
+                / target.isoformat()
+                / source_id
+            )
+            with self.assertRaises(OfficialSourceFailure) as context:
+                trading_status._load_lifecycle_payload(
+                    Path(root),
+                    target,
+                    definition=definition,
+                    cache_source_id=source_id,
+                    params={},
+                    session=session,
+                    timeout=30,
+                    fetched_at=datetime.datetime(
+                        2026, 8, 20, tzinfo=datetime.timezone.utc
+                    ),
+                )
+
+            self.assertFalse(
+                cache_directory.exists(),
+                "invalid HTTP 200 bytes must not create a cache entry",
+            )
+
+        self.assertEqual(context.exception.source_id, source_id)
+        self.assertEqual(context.exception.category, "cache_invalid")
+
     def test_listing_change_pdf_cache_is_hash_bound_before_text_extraction(self):
         target = datetime.date(2026, 8, 20)
         source_id = "twse_listing_change_20260728"
@@ -96,8 +138,18 @@ class TpexLifecycleCacheTests(unittest.TestCase):
         binding = MappingProxyType({
             source_id: MappingProxyType({
                 "announcement_date": "2026-07-28",
-                "first_effective_date": "2026-08-20",
-                "termination_date": "2026-09-01",
+                "expected_records": (
+                    MappingProxyType({
+                        "symbol": "2867",
+                        "event_type": "suspend",
+                        "effective_date": "2026-08-20",
+                    }),
+                    MappingProxyType({
+                        "symbol": "2867",
+                        "event_type": "terminate",
+                        "effective_date": "2026-09-01",
+                    }),
+                ),
                 "payload_size_bytes": len(raw_pdf),
                 "payload_sha256": digest,
             }),

@@ -1,8 +1,10 @@
 import datetime
+import hashlib
 import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import MappingProxyType
 from unittest import mock
 
 import stock_papi.integrations.market_data.tw_trading_status as trading_status
@@ -22,6 +24,9 @@ TARGET = datetime.date(2026, 7, 29)
 TWSE_LISTING_CHANGE_SOURCE_ID = "twse_listing_change_20260728"
 TWSE_LISTING_CHANGE_FIXTURE = (
     Path(__file__).parent / "fixtures" / "twse_listing_change_20260728.json"
+)
+TWSE_LISTING_CHANGE_PDF_FIXTURE = (
+    Path(__file__).parent / "fixtures" / "twse_listing_change_20260728.pdf"
 )
 FIELDS = (
     "代號",
@@ -150,7 +155,10 @@ def load_listing_change_snapshot(target_date, notice):
 class LifecycleResponse:
     def __init__(self, payload):
         self.status_code = 200
-        self.content = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        if isinstance(payload, bytes):
+            self.content = payload
+        else:
+            self.content = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.headers = {"Content-Length": str(len(self.content))}
 
 
@@ -171,7 +179,159 @@ class LifecycleSession:
         return LifecycleResponse(self.payloads[source_id])
 
 
+class OfficialPdfLifecycleSession(LifecycleSession):
+    def __init__(self, pdf_bytes):
+        super().__init__()
+        self.pdf_bytes = pdf_bytes
+
+    def get(self, url, *, params, headers, timeout):
+        source_id = next(
+            source_id
+            for source_id, definition in LIFECYCLE_SOURCE_DEFINITIONS.items()
+            if definition.url == url
+        )
+        if source_id == TWSE_LISTING_CHANGE_SOURCE_ID:
+            self.calls.append((source_id, dict(params)))
+            return LifecycleResponse(self.pdf_bytes)
+        return super().get(url, params=params, headers=headers, timeout=timeout)
+
+
 class TwTradingStatusTests(unittest.TestCase):
+    def test_listing_change_binding_supports_multiple_companies_and_lifecycle_pairs(self):
+        source_id = TWSE_LISTING_CHANGE_SOURCE_ID
+        definition = LIFECYCLE_SOURCE_DEFINITIONS[source_id]
+        text = (
+            "中華民國 115 年 7 月 28 日\n"
+            "公司代號：1111 自115年8月20日起停止買賣，並自115年9月1日起終止上市\n"
+            "公司代號：2222 自115年8月22日起停止買賣，並自115年9月3日起終止上市\n"
+            "公司代號：1111 自115年10月5日起停止買賣，並自115年10月20日起終止上市"
+        )
+        digest = "d" * 64
+        expected_records = (
+            MappingProxyType({
+                "symbol": "1111", "event_type": "suspend",
+                "effective_date": "2026-08-20",
+            }),
+            MappingProxyType({
+                "symbol": "1111", "event_type": "terminate",
+                "effective_date": "2026-09-01",
+            }),
+            MappingProxyType({
+                "symbol": "2222", "event_type": "suspend",
+                "effective_date": "2026-08-22",
+            }),
+            MappingProxyType({
+                "symbol": "2222", "event_type": "terminate",
+                "effective_date": "2026-09-03",
+            }),
+            MappingProxyType({
+                "symbol": "1111", "event_type": "suspend",
+                "effective_date": "2026-10-05",
+            }),
+            MappingProxyType({
+                "symbol": "1111", "event_type": "terminate",
+                "effective_date": "2026-10-20",
+            }),
+        )
+        binding = MappingProxyType({
+            source_id: MappingProxyType({
+                "announcement_date": "2026-07-28",
+                "expected_records": expected_records,
+                "payload_size_bytes": 123,
+                "payload_sha256": digest,
+            }),
+        })
+        payload = {
+            "schema_version": 1,
+            "source_id": source_id,
+            "source_url": definition.url,
+            "announcement_date": "2026-07-28",
+            "payload_size_bytes": 123,
+            "payload_sha256": digest,
+            "extracted_text": text,
+        }
+
+        with mock.patch.object(
+            trading_status, "TWSE_LISTING_CHANGE_SOURCE_BINDINGS", binding
+        ):
+            try:
+                events = trading_status._twse_listing_change_events(
+                    payload, digest, source_id
+                )
+            except KeyError as exc:
+                self.fail(f"parser still depends on source-wide lifecycle dates: {exc}")
+
+        self.assertEqual(
+            {
+                (item["symbol"], item["event_type"], item["effective_date"])
+                for item in events
+            },
+            {
+                (item["symbol"], item["event_type"], item["effective_date"])
+                for item in expected_records
+            },
+        )
+
+        unexpected = dict(payload)
+        unexpected["extracted_text"] += (
+            "\n公司代號：3333 自115年11月1日起停止買賣，"
+            "並自115年11月15日起終止上市"
+        )
+        with mock.patch.object(
+            trading_status, "TWSE_LISTING_CHANGE_SOURCE_BINDINGS", binding
+        ), self.assertRaisesRegex(ValueError, "event set is invalid"):
+            trading_status._twse_listing_change_events(
+                unexpected, digest, source_id
+            )
+
+    def test_official_pdf_fixture_is_hash_bound_extracted_and_parsed_in_production_path(self):
+        pdf_bytes = TWSE_LISTING_CHANGE_PDF_FIXTURE.read_bytes()
+        self.assertEqual(len(pdf_bytes), 139878)
+        self.assertEqual(
+            hashlib.sha256(pdf_bytes).hexdigest(),
+            "3ff4455c1435b5d0dc62803953241d184c13775662eb46f2feaf25d3d300c768",
+        )
+        session = OfficialPdfLifecycleSession(pdf_bytes)
+        session.payloads["twse_current_stop"]["tables"][0]["title"] = (
+            "115年09月02日 停止買賣"
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            snapshot = load_lifecycle_snapshot(
+                Path(temporary),
+                datetime.date(2026, 8, 20),
+                session=session,
+                required_symbols_by_exchange={"TWSE": {"2867"}},
+                now=datetime.datetime(2026, 9, 2, 1, tzinfo=datetime.timezone.utc),
+            )
+
+        binding = trading_status.TWSE_LISTING_CHANGE_SOURCE_BINDINGS[
+            TWSE_LISTING_CHANGE_SOURCE_ID
+        ]
+        self.assertEqual(snapshot.request_count, 5)
+        self.assertEqual(
+            snapshot.source_hashes[TWSE_LISTING_CHANGE_SOURCE_ID],
+            hashlib.sha256(pdf_bytes).hexdigest(),
+        )
+        self.assertEqual(
+            snapshot.status_by_symbol["2867"]["status"],
+            "officially_suspended",
+        )
+        self.assertEqual(
+            {
+                (
+                    item["symbol"],
+                    item["event_type"],
+                    item["effective_date"],
+                )
+                for item in binding["expected_records"]
+            },
+            {
+                ("2867", "suspend", "2026-08-20"),
+                ("2867", "terminate", "2026-09-01"),
+            },
+        )
+
     def test_twse_listing_change_notice_resolves_active_suspend_and_termination_dates(self):
         notice = listing_change_payload()
         expected = {

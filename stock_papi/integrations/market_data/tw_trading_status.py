@@ -82,9 +82,18 @@ LIFECYCLE_SOURCE_DEFINITIONS = MappingProxyType({
 TWSE_LISTING_CHANGE_SOURCE_BINDINGS = MappingProxyType({
     "twse_listing_change_20260728": MappingProxyType({
         "announcement_date": "2026-07-28",
-        "covered_symbols": ("2867",),
-        "first_effective_date": "2026-08-20",
-        "termination_date": "2026-09-01",
+        "expected_records": (
+            MappingProxyType({
+                "symbol": "2867",
+                "event_type": "suspend",
+                "effective_date": "2026-08-20",
+            }),
+            MappingProxyType({
+                "symbol": "2867",
+                "event_type": "terminate",
+                "effective_date": "2026-09-01",
+            }),
+        ),
         "payload_size_bytes": 139878,
         "payload_sha256": "3ff4455c1435b5d0dc62803953241d184c13775662eb46f2feaf25d3d300c768",
     }),
@@ -505,6 +514,92 @@ def _extract_pdf_text(payload: bytes) -> str:
     return text
 
 
+def _listing_change_expected_records(
+    binding: Mapping[str, Any],
+) -> tuple[tuple[str, str, _datetime.date], ...]:
+    expected_binding_fields = {
+        "announcement_date",
+        "expected_records",
+        "payload_size_bytes",
+        "payload_sha256",
+    }
+    if not isinstance(binding, Mapping) or set(binding) != expected_binding_fields:
+        raise ValueError("TWSE listing change binding is invalid")
+    announcement_text = binding.get("announcement_date")
+    payload_size = binding.get("payload_size_bytes")
+    payload_sha256 = binding.get("payload_sha256")
+    records = binding.get("expected_records")
+    try:
+        announcement_date = _datetime.date.fromisoformat(announcement_text)
+    except (TypeError, ValueError):
+        raise ValueError("TWSE listing change binding is invalid") from None
+    if (
+        announcement_date.isoformat() != announcement_text
+        or not isinstance(payload_size, int)
+        or isinstance(payload_size, bool)
+        or payload_size <= 0
+        or not isinstance(payload_sha256, str)
+        or _SHA256.fullmatch(payload_sha256) is None
+        or not isinstance(records, tuple)
+        or not records
+    ):
+        raise ValueError("TWSE listing change binding is invalid")
+
+    normalized = []
+    for record in records:
+        if (
+            not isinstance(record, Mapping)
+            or set(record) != {"symbol", "event_type", "effective_date"}
+        ):
+            raise ValueError("TWSE listing change expected record is invalid")
+        symbol = record.get("symbol")
+        event_type = record.get("event_type")
+        effective_text = record.get("effective_date")
+        try:
+            normalized_symbol = normalize_symbol(symbol)
+            effective_date = _datetime.date.fromisoformat(effective_text)
+        except (TypeError, ValueError):
+            raise ValueError(
+                "TWSE listing change expected record is invalid"
+            ) from None
+        if (
+            symbol != normalized_symbol
+            or event_type not in {"suspend", "terminate"}
+            or effective_date.isoformat() != effective_text
+            or effective_date < announcement_date
+        ):
+            raise ValueError("TWSE listing change expected record is invalid")
+        normalized.append((normalized_symbol, event_type, effective_date))
+    if len(normalized) != len(set(normalized)):
+        raise ValueError("TWSE listing change expected records are duplicated")
+    return tuple(normalized)
+
+
+def _validate_listing_change_raw_payload(
+    source_id: str,
+    payload: bytes,
+) -> Mapping[str, Any]:
+    binding = TWSE_LISTING_CHANGE_SOURCE_BINDINGS.get(source_id)
+    try:
+        if binding is None:
+            raise ValueError("TWSE listing change binding is missing")
+        _listing_change_expected_records(binding)
+    except ValueError as exc:
+        raise OfficialSourceFailure(
+            source_id, "cache_invalid", safe_message=str(exc)
+        ) from None
+    if (
+        len(payload) != binding["payload_size_bytes"]
+        or hashlib.sha256(payload).hexdigest() != binding["payload_sha256"]
+    ):
+        raise OfficialSourceFailure(
+            source_id,
+            "cache_invalid",
+            safe_message="official PDF binding mismatch",
+        )
+    return binding
+
+
 def _load_lifecycle_payload(
     root: Path,
     target_date: _datetime.date,
@@ -571,6 +666,8 @@ def _load_lifecycle_payload(
                 "response_too_large",
                 safe_message="response size is invalid",
             )
+        if definition.response_kind == "pdf":
+            _validate_listing_change_raw_payload(cache_source_id, content)
         effective_date = _extract_current_mode_effective_date(
             cache_source_id, content
         )
@@ -601,17 +698,9 @@ def _load_lifecycle_payload(
                 cache_source_id, "cache_invalid", safe_message=str(exc)
             ) from None
     if definition.response_kind == "pdf":
-        binding = TWSE_LISTING_CHANGE_SOURCE_BINDINGS.get(cache_source_id)
-        if (
-            binding is None
-            or len(cached.payload) != binding["payload_size_bytes"]
-            or cached.payload_sha256 != binding["payload_sha256"]
-        ):
-            raise OfficialSourceFailure(
-                cache_source_id,
-                "cache_invalid",
-                safe_message="official PDF binding mismatch",
-            )
+        binding = _validate_listing_change_raw_payload(
+            cache_source_id, cached.payload
+        )
         try:
             extracted_text = _extract_pdf_text(cached.payload)
         except ValueError as exc:
@@ -781,6 +870,7 @@ def _twse_listing_change_events(
         or payload_sha256 != binding["payload_sha256"]
     ):
         raise ValueError("TWSE listing change schema is invalid")
+    expected_records = _listing_change_expected_records(binding)
     text = payload.get("extracted_text")
     if not isinstance(text, str) or not text.strip():
         raise ValueError("TWSE listing change schema is invalid")
@@ -823,11 +913,7 @@ def _twse_listing_change_events(
             int(match.group("terminate_month")),
             int(match.group("terminate_day")),
         )
-        if (
-            suspend_date.isoformat() != binding["first_effective_date"]
-            or termination_date.isoformat() != binding["termination_date"]
-            or not announcement_date <= suspend_date < termination_date
-        ):
+        if not announcement_date <= suspend_date < termination_date:
             raise ValueError("TWSE listing change dates are invalid")
         symbol = normalize_symbol(match.group("symbol"))
         raw_fields = {
@@ -840,8 +926,16 @@ def _twse_listing_change_events(
         records[(symbol, suspend_date, termination_date)] = raw_fields
     if not records:
         raise ValueError("TWSE listing change row is invalid")
-    if {record[0] for record in records} != set(binding["covered_symbols"]):
-        raise ValueError("TWSE listing change symbol coverage is invalid")
+    parsed_records = {
+        (symbol, event_type, effective_date)
+        for symbol, suspend_date, termination_date in records
+        for event_type, effective_date in (
+            ("suspend", suspend_date),
+            ("terminate", termination_date),
+        )
+    }
+    if parsed_records != set(expected_records):
+        raise ValueError("TWSE listing change event set is invalid")
 
     events = []
     for (symbol, suspend_date, termination_date), raw_fields in records.items():
@@ -1003,8 +1097,9 @@ def load_lifecycle_snapshot(
             events.extend(_twse_termination_events(payload, digest))
             for source_id, binding in TWSE_LISTING_CHANGE_SOURCE_BINDINGS.items():
                 covered_symbols = {
-                    normalize_symbol(symbol)
-                    for symbol in binding["covered_symbols"]
+                    symbol
+                    for symbol, _event_type, _effective_date
+                    in _listing_change_expected_records(binding)
                 }
                 if (
                     target_date < _datetime.date.fromisoformat(
