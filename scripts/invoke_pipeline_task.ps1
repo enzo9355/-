@@ -6,8 +6,6 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-if ($DataRoot -ne 'D:\AbsorbData') { throw 'Data root is not allowlisted' }
-. (Join-Path $PSScriptRoot 'native_process.ps1')
 
 function Get-AbsorbPipelineMutexPlan {
     [CmdletBinding()]
@@ -22,7 +20,7 @@ function Get-AbsorbPipelineMutexPlan {
     $Plan = New-Object 'System.Collections.Generic.List[object]'
     $Market = switch ($Job) {
         { $_ -in @('TW-PostClose', 'TW-PreMarket') } { 'TW'; break }
-        { $_ -in @('US-PostClose', 'US-PreMarket') } { 'US'; break }
+        { $_ -in @('US-PostClose', 'US-PreMarket', 'US-Daily') } { 'US'; break }
         default { $null }
     }
     if ($Market) {
@@ -33,7 +31,7 @@ function Get-AbsorbPipelineMutexPlan {
             wait_milliseconds = 120000
         })
     }
-    if ($Job -in @('TW-PostClose', 'US-PostClose', 'WeeklyModel', 'ReportUploadRecovery')) {
+    if ($Job -in @('TW-PostClose', 'US-PostClose', 'US-Daily', 'WeeklyModel', 'ReportUploadRecovery')) {
         $Plan.Add([pscustomobject]@{
             scope = 'publication'
             market = $null
@@ -46,7 +44,10 @@ function Get-AbsorbPipelineMutexPlan {
 
 function Enter-AbsorbPipelineMutexPlan {
     [CmdletBinding()]
-    param([Parameter(Mandatory)][object[]]$Plan)
+    param(
+        [Parameter(Mandatory)][object[]]$Plan,
+        [System.Collections.Generic.List[object]]$Receipts = (New-Object 'System.Collections.Generic.List[object]')
+    )
 
     $Leases = New-Object 'System.Collections.Generic.List[object]'
     try {
@@ -55,30 +56,58 @@ function Enter-AbsorbPipelineMutexPlan {
             if ($WaitMilliseconds -lt 1 -or $WaitMilliseconds -gt 600000) {
                 throw 'Pipeline mutex wait is outside the safe range'
             }
-            $Mutex = [Threading.Mutex]::new($false, [string]$Entry.mutex_name)
+            $Receipt = [ordered]@{
+                scope = [string]$Entry.scope
+                market = $Entry.market
+                mutex_name = [string]$Entry.mutex_name
+                wait_milliseconds = $WaitMilliseconds
+                waited_milliseconds = 0
+                acquired = $false
+                ever_acquired = $false
+                released = $false
+                acquisition_reason = $null
+                failure_reason = $null
+            }
+            [void]$Receipts.Add($Receipt)
             $Watch = [Diagnostics.Stopwatch]::StartNew()
+            $Mutex = $null
             try {
-                $Acquired = $Mutex.WaitOne($WaitMilliseconds)
-            } catch [Threading.AbandonedMutexException] {
-                $Mutex.Dispose()
-                throw "Pipeline $($Entry.scope) mutex was abandoned; refusing to run"
+                try {
+                    $Mutex = [Threading.Mutex]::new($false, [string]$Entry.mutex_name)
+                } catch {
+                    $Receipt.failure_reason = 'mutex_create_failed'
+                    throw 'Pipeline mutex could not be created'
+                }
+                try {
+                    $Acquired = $Mutex.WaitOne($WaitMilliseconds)
+                    if ($Acquired) {
+                        $Receipt.acquisition_reason = 'acquired'
+                    }
+                } catch [Threading.AbandonedMutexException] {
+                    # WaitOne transfers ownership to the current thread before
+                    # reporting abandonment. Treat it as an acquired lease.
+                    $Acquired = $true
+                    $Receipt.acquisition_reason = 'abandoned_mutex_acquired'
+                } catch {
+                    $Receipt.failure_reason = 'wait_failed'
+                    throw 'Pipeline mutex wait failed'
+                }
             } finally {
                 $Watch.Stop()
+                $Receipt.waited_milliseconds = [int]$Watch.ElapsedMilliseconds
             }
             if (-not $Acquired) {
-                $Mutex.Dispose()
+                $Receipt.failure_reason = 'timeout'
+                try { $Mutex.Dispose() } catch { }
                 throw [TimeoutException]::new("Timed out waiting for pipeline $($Entry.scope) mutex")
             }
-            $Leases.Add([pscustomobject]@{
+            $Receipt.acquired = $true
+            $Receipt.ever_acquired = $true
+            [void]$Leases.Add([pscustomobject]@{
                 mutex = $Mutex
-                receipt = [ordered]@{
-                    scope = [string]$Entry.scope
-                    market = $Entry.market
-                    mutex_name = [string]$Entry.mutex_name
-                    wait_milliseconds = $WaitMilliseconds
-                    waited_milliseconds = [int]$Watch.ElapsedMilliseconds
-                    acquired = $true
-                }
+                receipt = $Receipt
+                released = $false
+                disposed = $false
             })
         }
     } catch {
@@ -94,9 +123,147 @@ function Exit-AbsorbPipelineMutexPlan {
 
     for ($Index = $Leases.Count - 1; $Index -ge 0; $Index--) {
         $Lease = $Leases[$Index]
-        try { $Lease.mutex.ReleaseMutex() } catch { }
-        try { $Lease.mutex.Dispose() } catch { }
+        if (-not $Lease.released) {
+            try {
+                $Lease.mutex.ReleaseMutex()
+                $Lease.released = $true
+                $Lease.receipt.acquired = $false
+                $Lease.receipt.released = $true
+            } catch {
+                $Lease.receipt.failure_reason = 'release_failed'
+            }
+        }
+        if (-not $Lease.disposed) {
+            try { $Lease.mutex.Dispose() } catch { }
+            $Lease.disposed = $true
+        }
     }
+}
+
+function Disable-AbsorbCompletedFullBacktestTask {
+    [CmdletBinding()]
+    param()
+
+    try {
+        $ScheduledTask = Get-ScheduledTask -TaskName 'ABSORB-FullBacktest' -ErrorAction Stop
+    } catch {
+        throw 'Unable to query the completed FullBacktest scheduled task'
+    }
+    if ([string]$ScheduledTask.State -eq 'Disabled') {
+        return [pscustomobject]@{ disabled = $true; already_disabled = $true }
+    }
+    try {
+        Disable-ScheduledTask -TaskName 'ABSORB-FullBacktest' -ErrorAction Stop | Out-Null
+    } catch {
+        throw 'Unable to disable the completed FullBacktest scheduled task'
+    }
+    try {
+        $ReadBack = Get-ScheduledTask -TaskName 'ABSORB-FullBacktest' -ErrorAction Stop
+    } catch {
+        throw 'Unable to verify the completed FullBacktest scheduled task'
+    }
+    if ([string]$ReadBack.State -ne 'Disabled') {
+        throw 'Completed FullBacktest scheduled task did not become disabled'
+    }
+    return [pscustomobject]@{ disabled = $true; already_disabled = $false }
+}
+
+function Invoke-AbsorbPipelineTask {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [ValidateSet('TW-PostClose', 'TW-PreMarket', 'US-PostClose', 'US-PreMarket', 'FullBacktest', 'US-Daily', 'WeeklyModel', 'ReportUploadRecovery')]
+        [string]$Job,
+        [Parameter(Mandatory)][string]$DataRoot,
+        [Parameter(Mandatory)][string]$ScriptPath,
+        [string[]]$ScriptArguments = @(),
+        [Parameter(Mandatory)][string]$LogDirectory,
+        [Parameter(Mandatory)][string]$PowerShellExe
+    )
+
+    New-Item -ItemType Directory -Path $LogDirectory -Force | Out-Null
+    $StartedAt = [DateTimeOffset]::Now
+    $LogPath = Join-Path $LogDirectory ("{0}-{1:yyyyMMdd}.log" -f $Job, $StartedAt)
+    $StatusPath = Join-Path $LogDirectory ("current-{0}.json" -f $Job)
+    $MutexPlan = @(Get-AbsorbPipelineMutexPlan -Job $Job)
+    $MutexReceipts = New-Object 'System.Collections.Generic.List[object]'
+    $MutexLeases = @()
+    $TaskExitCode = 1
+    $TaskSucceeded = $false
+    $SafeError = $null
+    $FullBacktestTask = $null
+
+    try {
+        $MutexLeases = @(Enter-AbsorbPipelineMutexPlan -Plan $MutexPlan -Receipts $MutexReceipts)
+        $Arguments = @(
+            '-NoProfile',
+            '-NonInteractive',
+            '-ExecutionPolicy',
+            'Bypass',
+            '-File',
+            $ScriptPath,
+            '-DataRoot',
+            $DataRoot
+        ) + $ScriptArguments
+        $Result = Invoke-NativeProcessStreaming `
+            -FilePath $PowerShellExe `
+            -Arguments $Arguments `
+            -LogPath $LogPath `
+            -AllowFailure
+        $TaskExitCode = [int]$Result.exit_code
+        if ($TaskExitCode -ne 0) {
+            $SafeError = "Pipeline exited with code $TaskExitCode"
+        } else {
+            if ($Job -eq 'FullBacktest') {
+                $CheckpointPath = Join-Path $DataRoot 'checkpoints\jobs\full_backtest\current.json'
+                $Checkpoint = if (Test-Path -LiteralPath $CheckpointPath -PathType Leaf) {
+                    Get-Content -LiteralPath $CheckpointPath -Raw -Encoding utf8 | ConvertFrom-Json
+                } else {
+                    $null
+                }
+                if ($null -ne $Checkpoint -and $Checkpoint.status -eq 'completed') {
+                    # Disable and verify before a success receipt is committed.
+                    $FullBacktestTask = Disable-AbsorbCompletedFullBacktestTask
+                }
+            }
+            $TaskSucceeded = $true
+        }
+    } catch [TimeoutException] {
+        $TaskExitCode = 1
+        $SafeError = 'Pipeline mutex acquisition timed out'
+    } catch {
+        $TaskExitCode = 1
+        $SafeError = if ($_.Exception.Message -like 'Unable to * FullBacktest scheduled task' -or $_.Exception.Message -eq 'Completed FullBacktest scheduled task did not become disabled') {
+            $_.Exception.Message
+        } else {
+            'Pipeline task failed before successful completion'
+        }
+    } finally {
+        Exit-AbsorbPipelineMutexPlan -Leases $MutexLeases
+    }
+    if (@($MutexReceipts | Where-Object { $_.failure_reason -eq 'release_failed' }).Count -gt 0) {
+        $TaskExitCode = 1
+        $TaskSucceeded = $false
+        $SafeError = 'Pipeline mutex release failed'
+    }
+
+    $Status = [ordered]@{
+        job = $Job
+        started_at = $StartedAt.ToString('o')
+        finished_at = [DateTimeOffset]::Now.ToString('o')
+        success = $TaskSucceeded
+        exit_code = $TaskExitCode
+        log = $LogPath
+        mutexes = @($MutexReceipts.ToArray())
+    }
+    if ($null -ne $SafeError) {
+        $Status.error = $SafeError
+    }
+    if ($null -ne $FullBacktestTask) {
+        $Status.full_backtest_task = $FullBacktestTask
+    }
+    $Status | ConvertTo-Json -Depth 6 -Compress | Set-Content -LiteralPath $StatusPath -Encoding utf8
+    return [int]$TaskExitCode
 }
 
 $Definitions = @{
@@ -116,52 +283,15 @@ $ScriptPath = Join-Path $PSScriptRoot $Definition.Script
 if (-not (Test-Path -LiteralPath $ScriptPath -PathType Leaf)) { throw "Task wrapper not found: $ScriptPath" }
 
 $LogDirectory = Join-Path $DataRoot 'logs\tasks'
-New-Item -ItemType Directory -Path $LogDirectory -Force | Out-Null
-$StartedAt = [DateTimeOffset]::Now
-$LogPath = Join-Path $LogDirectory ("{0}-{1:yyyyMMdd}.log" -f $Job, $StartedAt)
-$StatusPath = Join-Path $LogDirectory ("current-{0}.json" -f $Job)
 $PowerShellExe = (Get-Command powershell.exe -ErrorAction Stop).Source
 if (-not (Test-Path -LiteralPath $PowerShellExe -PathType Leaf)) { throw 'PowerShell executable was not found' }
-$Arguments = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $ScriptPath, '-DataRoot', $DataRoot) + $Definition.Arguments
-$MutexPlan = @(Get-AbsorbPipelineMutexPlan -Job $Job)
-$MutexReceipts = @(
-    $MutexPlan | ForEach-Object {
-        [ordered]@{
-            scope = [string]$_.scope
-            market = $_.market
-            mutex_name = [string]$_.mutex_name
-            wait_milliseconds = [int]$_.wait_milliseconds
-            waited_milliseconds = 0
-            acquired = $false
-        }
-    }
-)
-$MutexLeases = @()
-$ExitCode = 1
-
-try {
-    $MutexLeases = @(Enter-AbsorbPipelineMutexPlan -Plan $MutexPlan)
-    $MutexReceipts = @($MutexLeases | ForEach-Object { $_.receipt })
-    $Result = Invoke-NativeProcessStreaming `
-        -FilePath $PowerShellExe `
-        -Arguments $Arguments `
-        -LogPath $LogPath `
-        -AllowFailure
-    $ExitCode = $Result.exit_code
-    if ($ExitCode -ne 0) { throw "Pipeline exited with code $ExitCode" }
-    @{ job = $Job; started_at = $StartedAt.ToString('o'); finished_at = [DateTimeOffset]::Now.ToString('o'); success = $true; exit_code = 0; log = $LogPath; mutexes = $MutexReceipts } |
-        ConvertTo-Json -Compress | Set-Content -LiteralPath $StatusPath -Encoding utf8
-    if ($Job -eq 'FullBacktest') {
-        $CheckpointPath = Join-Path $DataRoot 'checkpoints\jobs\full_backtest\current.json'
-        $Checkpoint = if (Test-Path -LiteralPath $CheckpointPath) { Get-Content -LiteralPath $CheckpointPath -Raw -Encoding utf8 | ConvertFrom-Json } else { $null }
-        if ($Checkpoint.status -eq 'completed') {
-            try { Disable-ScheduledTask -TaskName 'ABSORB-FullBacktest' -ErrorAction Stop | Out-Null } catch { Write-Warning 'Unable to disable completed full-backtest task' }
-        }
-    }
-} catch {
-    @{ job = $Job; started_at = $StartedAt.ToString('o'); finished_at = [DateTimeOffset]::Now.ToString('o'); success = $false; exit_code = if ($ExitCode -is [int]) { $ExitCode } else { 1 }; error = $_.Exception.Message; log = $LogPath; mutexes = $MutexReceipts } |
-        ConvertTo-Json -Compress | Set-Content -LiteralPath $StatusPath -Encoding utf8
-    throw
-} finally {
-    Exit-AbsorbPipelineMutexPlan -Leases $MutexLeases
-}
+if ($DataRoot -ne 'D:\AbsorbData') { throw 'Data root is not allowlisted' }
+. (Join-Path $PSScriptRoot 'native_process.ps1')
+$TaskExitCode = Invoke-AbsorbPipelineTask `
+    -Job $Job `
+    -DataRoot $DataRoot `
+    -ScriptPath $ScriptPath `
+    -ScriptArguments $Definition.Arguments `
+    -LogDirectory $LogDirectory `
+    -PowerShellExe $PowerShellExe
+exit $TaskExitCode

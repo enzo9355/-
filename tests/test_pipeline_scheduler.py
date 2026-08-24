@@ -11,6 +11,19 @@ UTC = datetime.timezone.utc
 
 
 class PipelineSchedulerTests(unittest.TestCase):
+    @staticmethod
+    def _powershell_function_import(script):
+        escaped = str(Path(script).resolve()).replace("'", "''")
+        return f"""
+$tokens = $null
+$errors = $null
+$ast = [Management.Automation.Language.Parser]::ParseFile('{escaped}', [ref]$tokens, [ref]$errors)
+if ($errors.Count -ne 0) {{ throw 'PowerShell source did not parse' }}
+foreach ($definition in @($ast.FindAll({{ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] }}, $true))) {{
+    Invoke-Expression $definition.Extent.Text
+}}
+"""
+
     def test_historical_target_with_publish_fails_before_data_access(self):
         script = (
             Path(__file__).parents[1]
@@ -388,6 +401,360 @@ try {{
         self.assertNotEqual(receipt["tw_mutex"], receipt["us_mutex"])
         self.assertEqual(receipt["publication_scope"], "publication")
 
+    def test_us_daily_and_us_post_close_serialize_while_tw_premarket_is_independent(self):
+        script = (
+            Path(__file__).parents[1] / "scripts" / "invoke_pipeline_task.ps1"
+        ).resolve()
+        harness = self._powershell_function_import(script) + r"""
+$ErrorActionPreference = 'Stop'
+$dailyPlan = @(Get-AbsorbPipelineMutexPlan -Job 'US-Daily')
+$postClosePlan = @(Get-AbsorbPipelineMutexPlan -Job 'US-PostClose')
+$twPlan = @(Get-AbsorbPipelineMutexPlan -Job 'TW-PreMarket')
+if ($dailyPlan.Count -lt 1 -or $dailyPlan[0].scope -ne 'market' -or $dailyPlan[0].market -ne 'US') { throw 'US-Daily lacks the US market lock' }
+if ($dailyPlan[0].mutex_name -ne $postClosePlan[0].mutex_name) { throw 'US jobs do not share the US market lock' }
+if (($dailyPlan.scope -join '|') -ne 'market|publication') { throw 'US-Daily lock order is not market then publication' }
+$sharedName = 'Local\ABSORB-Round1-US-' + [Guid]::NewGuid().ToString('N')
+$twName = 'Local\ABSORB-Round1-TW-' + [Guid]::NewGuid().ToString('N')
+$dailyPlan[0].mutex_name = $sharedName
+$postClosePlan[0].mutex_name = $sharedName
+$postClosePlan[0].wait_milliseconds = 100
+$twPlan[0].mutex_name = $twName
+$holderReady = Join-Path ([IO.Path]::GetTempPath()) ('absorb-round1-' + [Guid]::NewGuid().ToString('N') + '.ready')
+$holderRelease = $holderReady + '.release'
+$holder = Start-Job -ScriptBlock {
+    param($Name, $Ready, $Release)
+    $mutex = [Threading.Mutex]::new($false, $Name)
+    try {
+        if (-not $mutex.WaitOne(5000)) { throw 'holder could not acquire US mutex' }
+        [IO.File]::WriteAllText($Ready, 'ready')
+        while (-not [IO.File]::Exists($Release)) { Start-Sleep -Milliseconds 10 }
+    } finally {
+        try { $mutex.ReleaseMutex() } catch { }
+        $mutex.Dispose()
+    }
+} -ArgumentList $sharedName, $holderReady, $holderRelease
+try {
+    for ($index = 0; $index -lt 300 -and -not (Test-Path -LiteralPath $holderReady); $index++) { Start-Sleep -Milliseconds 10 }
+    if (-not (Test-Path -LiteralPath $holderReady)) { throw 'US holder did not become ready' }
+    $receipts = New-Object 'System.Collections.Generic.List[object]'
+    try {
+        Enter-AbsorbPipelineMutexPlan -Plan $postClosePlan -Receipts $receipts | Out-Null
+        throw 'US PostClose did not serialize behind US-Daily'
+    } catch [TimeoutException] { }
+    $twReceipts = New-Object 'System.Collections.Generic.List[object]'
+    $twLeases = @(Enter-AbsorbPipelineMutexPlan -Plan $twPlan -Receipts $twReceipts)
+    try {
+        if ($twLeases.Count -ne 1) { throw 'TW premarket was blocked by US work' }
+    } finally {
+        Exit-AbsorbPipelineMutexPlan -Leases $twLeases
+    }
+    if ($receipts.Count -ne 1 -or $receipts[0].failure_reason -ne 'timeout') { throw 'US contention receipt is incomplete' }
+} finally {
+    [IO.File]::WriteAllText($holderRelease, 'release')
+    Wait-Job -Job $holder -Timeout 5 | Out-Null
+    Remove-Job -Job $holder -Force
+    Remove-Item -LiteralPath $holderReady, $holderRelease -Force -ErrorAction SilentlyContinue
+}
+[Console]::WriteLine('serialized')
+"""
+        completed = subprocess.run(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                harness,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+        self.assertIn("serialized", completed.stdout)
+
+    def test_mutex_abandonment_and_partial_timeout_release_exactly_once(self):
+        script = (
+            Path(__file__).parents[1] / "scripts" / "invoke_pipeline_task.ps1"
+        ).resolve()
+        harness = self._powershell_function_import(script) + r"""
+$ErrorActionPreference = 'Stop'
+$abandonedName = 'Local\ABSORB-Round1-Abandoned-' + [Guid]::NewGuid().ToString('N')
+Add-Type -TypeDefinition @'
+using System;
+using System.Threading;
+public static class AbsorbAbandonedMutexProbe {
+    public static void Create(string name) {
+        var thread = new Thread(() => {
+            var mutex = new Mutex(false, name);
+            if (!mutex.WaitOne(5000)) throw new Exception("unable to establish abandoned mutex");
+        });
+        thread.Start();
+        thread.Join();
+    }
+}
+'@
+[AbsorbAbandonedMutexProbe]::Create($abandonedName)
+$abandonedPlan = @([pscustomobject]@{ scope='market'; market='US'; mutex_name=$abandonedName; wait_milliseconds=500 })
+$abandonedReceipts = New-Object 'System.Collections.Generic.List[object]'
+$abandonedLeases = @(Enter-AbsorbPipelineMutexPlan -Plan $abandonedPlan -Receipts $abandonedReceipts)
+Exit-AbsorbPipelineMutexPlan -Leases $abandonedLeases
+Exit-AbsorbPipelineMutexPlan -Leases $abandonedLeases
+$abandoned = $abandonedReceipts[0]
+if (-not $abandoned.ever_acquired -or $abandoned.acquired -or -not $abandoned.released -or $abandoned.acquisition_reason -ne 'abandoned_mutex_acquired') { throw 'abandoned mutex ownership was not safely released' }
+
+$marketName = 'Local\ABSORB-Round1-Market-' + [Guid]::NewGuid().ToString('N')
+$publicationName = 'Local\ABSORB-Round1-Publication-' + [Guid]::NewGuid().ToString('N')
+$ready = Join-Path ([IO.Path]::GetTempPath()) ('absorb-round1-' + [Guid]::NewGuid().ToString('N') + '.ready')
+$release = $ready + '.release'
+$holder = Start-Job -ScriptBlock {
+    param($Name, $Ready, $Release)
+    $mutex = [Threading.Mutex]::new($false, $Name)
+    try {
+        if (-not $mutex.WaitOne(5000)) { throw 'unable to hold publication mutex' }
+        [IO.File]::WriteAllText($Ready, 'ready')
+        while (-not [IO.File]::Exists($Release)) { Start-Sleep -Milliseconds 10 }
+    } finally {
+        try { $mutex.ReleaseMutex() } catch { }
+        $mutex.Dispose()
+    }
+} -ArgumentList $publicationName, $ready, $release
+try {
+    for ($index = 0; $index -lt 300 -and -not (Test-Path -LiteralPath $ready); $index++) { Start-Sleep -Milliseconds 10 }
+    if (-not (Test-Path -LiteralPath $ready)) { throw 'publication holder did not become ready' }
+    $plan = @(
+        [pscustomobject]@{ scope='market'; market='US'; mutex_name=$marketName; wait_milliseconds=500 },
+        [pscustomobject]@{ scope='publication'; market=$null; mutex_name=$publicationName; wait_milliseconds=100 }
+    )
+    $receipts = New-Object 'System.Collections.Generic.List[object]'
+    try {
+        Enter-AbsorbPipelineMutexPlan -Plan $plan -Receipts $receipts | Out-Null
+        throw 'partial acquisition unexpectedly succeeded'
+    } catch [TimeoutException] { }
+    if ($receipts.Count -ne 2) { throw 'partial acquisition receipts are incomplete' }
+    $market = $receipts[0]
+    $publication = $receipts[1]
+    if ($market.acquired -or -not $market.ever_acquired -or -not $market.released) { throw 'market lock was not cleaned up after publication timeout' }
+    if ($publication.acquired -or $publication.ever_acquired -or $publication.released -or $publication.failure_reason -ne 'timeout' -or $publication.waited_milliseconds -lt 70) { throw 'publication timeout receipt is misleading' }
+    $probe = [Threading.Mutex]::new($false, $marketName)
+    try {
+        if (-not $probe.WaitOne(0)) { throw 'market mutex remains locked after partial failure' }
+        $probe.ReleaseMutex()
+    } finally { $probe.Dispose() }
+} finally {
+    [IO.File]::WriteAllText($release, 'release')
+    Wait-Job -Job $holder -Timeout 5 | Out-Null
+    Remove-Job -Job $holder -Force
+    Remove-Item -LiteralPath $ready, $release -Force -ErrorAction SilentlyContinue
+}
+[Console]::WriteLine('cleanup-ok')
+"""
+        completed = subprocess.run(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                harness,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+        self.assertIn("cleanup-ok", completed.stdout)
+
+    def test_hidden_task_wrapper_preserves_distinctive_native_exit_code_and_receipt(self):
+        scripts = Path(__file__).parents[1] / "scripts"
+        invoke_script = (scripts / "invoke_pipeline_task.ps1").resolve()
+        native_helper = (scripts / "native_process.ps1").resolve()
+        hidden_launcher = (scripts / "run_hidden.vbs").resolve()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            native_helper_ps = str(native_helper).replace("'", "''")
+            root_ps = str(root).replace("'", "''")
+            probe = root / "exit_probe.ps1"
+            probe.write_text("param([string]$DataRoot)\nexit 73\n", encoding="utf-8-sig")
+            probe_ps = str(probe).replace("'", "''")
+            logs_ps = str(root / "logs").replace("'", "''")
+            harness = root / "invoke_probe.ps1"
+            harness.write_text(
+                "$ErrorActionPreference = 'Stop'\n"
+                + self._powershell_function_import(invoke_script)
+                + f". '{native_helper_ps}'\n"
+                + (
+                    "$code = Invoke-AbsorbPipelineTask "
+                    "-Job 'US-Daily' "
+                    f"-DataRoot '{root_ps}' "
+                    f"-ScriptPath '{probe_ps}' "
+                    "-ScriptArguments @() "
+                    f"-LogDirectory '{logs_ps}' "
+                    "-PowerShellExe (Get-Command powershell.exe -ErrorAction Stop).Source\n"
+                    "exit $code\n"
+                ),
+                encoding="utf-8-sig",
+            )
+            completed = subprocess.run(
+                [
+                    "cscript.exe",
+                    "//B",
+                    "//NoLogo",
+                    str(hidden_launcher),
+                    r"C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    str(harness),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            self.assertEqual(completed.returncode, 73, completed.stdout + completed.stderr)
+            receipt = json.loads(
+                (root / "logs" / "current-US-Daily.json").read_text(
+                    encoding="utf-8-sig"
+                )
+            )
+            self.assertFalse(receipt["success"])
+            self.assertEqual(receipt["exit_code"], 73)
+            self.assertTrue(receipt["mutexes"])
+            self.assertTrue(all(item["released"] for item in receipt["mutexes"] if item["ever_acquired"]))
+
+    def test_full_backtest_disable_is_idempotent_and_failure_is_task_failure(self):
+        scripts = Path(__file__).parents[1] / "scripts"
+        invoke_script = (scripts / "invoke_pipeline_task.ps1").resolve()
+        native_helper = (scripts / "native_process.ps1").resolve()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            native_helper_ps = str(native_helper).replace("'", "''")
+            root_ps = str(root).replace("'", "''")
+            checkpoint = root / "checkpoints" / "jobs" / "full_backtest" / "current.json"
+            checkpoint.parent.mkdir(parents=True)
+            checkpoint.write_text(json.dumps({"status": "completed"}), encoding="utf-8")
+            probe = root / "success_probe.ps1"
+            probe.write_text("param([string]$DataRoot, [int]$MaxItems)\nexit 0\n", encoding="utf-8-sig")
+            probe_ps = str(probe).replace("'", "''")
+            logs_ps = str(root / "logs").replace("'", "''")
+            harness = (
+                "$ErrorActionPreference = 'Stop'\n"
+                + self._powershell_function_import(invoke_script)
+                + f". '{native_helper_ps}'\n"
+                + r"""
+$Global:TaskState = 'Disabled'
+$Global:DisableCalls = 0
+$Global:DisableMode = 'ok'
+function Get-ScheduledTask { param([string]$TaskName, $ErrorAction) [pscustomobject]@{ TaskName=$TaskName; State=$Global:TaskState } }
+function Disable-ScheduledTask {
+    param([string]$TaskName, $ErrorAction)
+    $Global:DisableCalls++
+    if ($Global:DisableMode -eq 'permission') { throw [UnauthorizedAccessException]::new('sensitive permission detail') }
+    $Global:TaskState = 'Disabled'
+}
+$already = Disable-AbsorbCompletedFullBacktestTask
+if (-not $already.already_disabled -or $Global:DisableCalls -ne 0) { throw 'already-disabled task was not idempotent' }
+$Global:TaskState = 'Ready'
+$disabled = Disable-AbsorbCompletedFullBacktestTask
+if ($disabled.already_disabled -or -not $disabled.disabled -or $Global:DisableCalls -ne 1) { throw 'enabled task was not disabled and verified' }
+$Global:TaskState = 'Ready'
+$Global:DisableMode = 'permission'
+"""
+                + (
+                    "$code = Invoke-AbsorbPipelineTask "
+                    "-Job 'FullBacktest' "
+                    f"-DataRoot '{root_ps}' "
+                    f"-ScriptPath '{probe_ps}' "
+                    "-ScriptArguments @('-MaxItems', '500') "
+                    f"-LogDirectory '{logs_ps}' "
+                    "-PowerShellExe (Get-Command powershell.exe -ErrorAction Stop).Source\n"
+                    "$receipt = Get-Content -LiteralPath '"
+                    + str(root / "logs" / "current-FullBacktest.json").replace("'", "''")
+                    + "' -Raw -Encoding utf8 | ConvertFrom-Json\n"
+                    "if ($code -eq 0 -or $receipt.success -or $receipt.exit_code -eq 0) { throw 'disable failure was reported as success' }\n"
+                    "if ([string]$receipt.error -match 'sensitive permission detail') { throw 'unsafe disable error leaked' }\n"
+                    "[Console]::WriteLine('disable-contract-ok')\n"
+                )
+            )
+            completed = subprocess.run(
+                [
+                    "powershell.exe",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-Command",
+                    harness,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+            self.assertIn("disable-contract-ok", completed.stdout)
+
+    def test_installer_captures_final_registration_without_machine_mutation(self):
+        installer = (
+            Path(__file__).parents[1] / "scripts" / "install_pipeline_tasks.ps1"
+        ).resolve()
+        installer_ps = str(installer).replace("'", "''")
+        harness = r"""
+$ErrorActionPreference = 'Stop'
+$Global:Registrations = New-Object 'System.Collections.Generic.List[object]'
+function Get-Command { param([string]$Name, $ErrorAction) [pscustomobject]@{ Source=('C:\Windows\System32\' + $Name) } }
+function New-ScheduledTaskPrincipal { param($UserId, $LogonType, $RunLevel) [pscustomobject]@{ UserId=$UserId; LogonType=$LogonType; RunLevel=$RunLevel } }
+function New-ScheduledTaskAction { param($Execute, $Argument, $WorkingDirectory) [pscustomobject]@{ Execute=$Execute; Argument=$Argument; WorkingDirectory=$WorkingDirectory } }
+function New-ScheduledTaskTrigger {
+    param([switch]$Daily, [switch]$Weekly, $DaysOfWeek, [datetime]$At)
+    [pscustomobject]@{ Kind=$(if ($Daily) {'Daily'} else {'Weekly'}); DaysOfWeek=$DaysOfWeek; At=$At }
+}
+function New-ScheduledTaskSettingsSet {
+    param([timespan]$ExecutionTimeLimit, $MultipleInstances, $RestartCount, [timespan]$RestartInterval)
+    [pscustomobject]@{ ExecutionTimeLimit=$ExecutionTimeLimit; MultipleInstances=$MultipleInstances; RestartCount=$RestartCount; RestartInterval=$RestartInterval; StartWhenAvailable=$false; WakeToRun=$false }
+}
+function Register-ScheduledTask {
+    param($TaskName, $Action, $Trigger, $Settings, $Principal, [string]$Xml, [switch]$Force)
+    $Global:Registrations.Add([pscustomobject]@{ TaskName=$TaskName; Action=$Action; Trigger=$Trigger; Settings=$Settings; Principal=$Principal; Xml=$Xml })
+}
+function schtasks {
+    return '<?xml version="1.0" encoding="UTF-16"?><Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task"><Triggers><CalendarTrigger><StartBoundary>2026-08-24T17:10:00</StartBoundary><ScheduleByDay><DaysInterval>1</DaysInterval></ScheduleByDay></CalendarTrigger></Triggers></Task>'
+}
+""" + f". '{installer_ps}' -DataRoot 'D:\\AbsorbData' -WeeklyDay Saturday\n" + r"""
+$full = @($Global:Registrations | Where-Object { $_.TaskName -eq 'ABSORB-FullBacktest' })
+if ($full.Count -ne 1) { throw 'FullBacktest was not registered exactly once' }
+$registration = $full[0]
+if ($registration.Trigger.Kind -ne 'Daily' -or $registration.Trigger.At.ToString('HH:mm') -ne '22:30') { throw 'FullBacktest trigger is not daily at 22:30' }
+if ($registration.Settings.ExecutionTimeLimit -ne [TimeSpan]::FromMinutes(225)) { throw 'FullBacktest limit is not PT3H45M' }
+if ($registration.Xml -or $registration.Trigger.PSObject.Properties.Name -contains 'Repetition') { throw 'FullBacktest gained repetition' }
+if ([IO.Path]::GetFileName($registration.Action.Execute) -ne 'wscript.exe') { throw 'FullBacktest does not use wscript' }
+foreach ($required in @('//B','//NoLogo','run_hidden.vbs','-WindowStyle','Hidden','invoke_pipeline_task.ps1')) {
+    if ($registration.Action.Argument -notmatch [regex]::Escape($required)) { throw "hidden action is missing $required" }
+}
+$postXml = @($Global:Registrations | Where-Object { $_.TaskName -eq 'ABSORB-TW-PostClose' -and $_.Xml })
+if ($postXml.Count -ne 1 -or $postXml[0].Xml -notmatch '<Interval>PT20M</Interval>' -or $postXml[0].Xml -notmatch '<Duration>PT4H50M</Duration>') { throw 'final post-close XML repetition was not captured' }
+[Console]::WriteLine('installer-capture-ok')
+"""
+        completed = subprocess.run(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                harness,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+        self.assertIn("installer-capture-ok", completed.stdout)
+
     def test_full_backtest_completed_checkpoint_exits_before_yfinance_import(self):
         cli_root = Path(__file__).parents[1].resolve()
         with tempfile.TemporaryDirectory() as temporary:
@@ -402,13 +769,13 @@ try {{
                 "import sys\n"
                 "import types\n"
                 "from types import SimpleNamespace\n"
-                "from stock_papi.batch import full_backtest_cli\n"
                 "_real_import = builtins.__import__\n"
                 "def _blocked(name, *args, **kwargs):\n"
                 "    if name == 'yfinance' or name.startswith('yfinance.'):\n"
                 "        raise ModuleNotFoundError('deliberately unavailable yfinance')\n"
                 "    return _real_import(name, *args, **kwargs)\n"
                 "builtins.__import__ = _blocked\n"
+                "from stock_papi.batch import full_backtest_cli\n"
                 "local_quant = types.ModuleType('local_quant')\n"
                 "def load_stock_pipeline(_root):\n"
                 "    import yfinance\n"
@@ -532,7 +899,7 @@ if ($fullBacktest.Count -ne 1) {{ throw 'full backtest definition was not unique
             "Invoke-NativeProcessStreaming",
             ".exit_code",
             "-LogPath $LogPath",
-            "success = $false",
+            "$TaskSucceeded = $false",
         ):
             with self.subTest(required=required):
                 self.assertIn(required, source)
@@ -542,7 +909,7 @@ if ($fullBacktest.Count -ne 1) {{ throw 'full backtest definition was not unique
         )
         self.assertNotIn("Invoke-NativeProcessCaptured", source)
         self.assertIn("$Checkpoint.status -eq 'completed'", source)
-        self.assertIn("mutexes = $MutexReceipts", source)
+        self.assertIn("mutexes = @($MutexReceipts.ToArray())", source)
         self.assertIn("wait_milliseconds", source)
         self.assertIn("waited_milliseconds", source)
         for forbidden in (
