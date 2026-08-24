@@ -13,7 +13,8 @@ function Get-AbsorbPipelineTaskDefinitions {
   $DefaultExecutionTimeLimit = New-TimeSpan -Hours 4
   return @(
     @{ Name='ABSORB-TW-PostClose'; Job='TW-PostClose'; Time='17:10'; RepetitionInterval='PT20M'; RepetitionDuration='PT4H50M'; ExecutionTimeLimit=$DefaultExecutionTimeLimit },
-    @{ Name='ABSORB-TW-PreMarket'; Job='TW-PreMarket'; Time='07:30'; ExecutionTimeLimit=$DefaultExecutionTimeLimit },
+    @{ Name='ABSORB-TW-PreMarket'; Job='TW-PreMarket'; Time='07:30'; RepetitionInterval='PT10M'; RepetitionDuration='PT1H20M'; ExecutionTimeLimit=$DefaultExecutionTimeLimit },
+    @{ Name='ABSORB-TW-ObservationRecovery'; Job='TW-ObservationRecovery'; Time='06:15'; RepetitionInterval='PT10M'; RepetitionDuration='PT15M'; ExecutionTimeLimit=$DefaultExecutionTimeLimit },
     @{ Name='ABSORB-FullBacktest'; Job='FullBacktest'; Time='22:30'; ExecutionTimeLimit=(New-TimeSpan -Minutes 225) },
     @{ Name='ABSORB-US-Daily'; Job='US-Daily'; Time='05:30'; ExecutionTimeLimit=$DefaultExecutionTimeLimit },
     @{ Name='ABSORB-US-PostClose'; Job='US-PostClose'; Time='05:00'; RepetitionInterval='PT20M'; RepetitionDuration='PT4H00M'; ExecutionTimeLimit=$DefaultExecutionTimeLimit },
@@ -64,25 +65,43 @@ foreach ($Definition in $Definitions) {
   $Settings.WakeToRun = $true
   if ($PSCmdlet.ShouldProcess($Definition.Name, 'Register shadow pipeline task')) {
     Register-ScheduledTask -TaskName $Definition.Name -Action $Action -Trigger $Trigger -Settings $Settings -Principal $Principal -Force | Out-Null
-    if ($Definition.RepetitionInterval -and $Definition.RepetitionDuration) {
-      $TaskXml = [xml](schtasks /query /tn "\$($Definition.Name)" /xml)
-      $Namespace = New-Object Xml.XmlNamespaceManager($TaskXml.NameTable)
-      $Namespace.AddNamespace('t', 'http://schemas.microsoft.com/windows/2004/02/mit/task')
-      $TriggerNode = $TaskXml.SelectSingleNode('//t:CalendarTrigger', $Namespace)
-      if ($TriggerNode -and -not $TaskXml.SelectSingleNode('//t:Repetition', $Namespace)) {
-        $RepetitionNode = $TaskXml.CreateElement('Repetition', 'http://schemas.microsoft.com/windows/2004/02/mit/task')
-        $IntervalNode = $TaskXml.CreateElement('Interval', 'http://schemas.microsoft.com/windows/2004/02/mit/task')
-        $IntervalNode.InnerText = $Definition.RepetitionInterval
-        $DurationNode = $TaskXml.CreateElement('Duration', 'http://schemas.microsoft.com/windows/2004/02/mit/task')
-        $DurationNode.InnerText = $Definition.RepetitionDuration
-        $StopNode = $TaskXml.CreateElement('StopAtDurationEnd', 'http://schemas.microsoft.com/windows/2004/02/mit/task')
-        $StopNode.InnerText = 'true'
-        $RepetitionNode.AppendChild($IntervalNode) | Out-Null
-        $RepetitionNode.AppendChild($DurationNode) | Out-Null
-        $RepetitionNode.AppendChild($StopNode) | Out-Null
-        $TriggerNode.AppendChild($RepetitionNode) | Out-Null
-        Register-ScheduledTask -TaskName $Definition.Name -Xml $TaskXml.OuterXml -Force | Out-Null
+    $TaskXml = [xml](schtasks /query /tn "\$($Definition.Name)" /xml)
+    $Namespace = New-Object Xml.XmlNamespaceManager($TaskXml.NameTable)
+    $Namespace.AddNamespace('t', 'http://schemas.microsoft.com/windows/2004/02/mit/task')
+    $Changed = $false
+    $TriggerNode = $TaskXml.SelectSingleNode('//t:CalendarTrigger', $Namespace)
+    if ($TriggerNode -and $Definition.RepetitionInterval -and $Definition.RepetitionDuration -and -not $TaskXml.SelectSingleNode('//t:Repetition', $Namespace)) {
+      $RepetitionNode = $TaskXml.CreateElement('Repetition', 'http://schemas.microsoft.com/windows/2004/02/mit/task')
+      $IntervalNode = $TaskXml.CreateElement('Interval', 'http://schemas.microsoft.com/windows/2004/02/mit/task')
+      $IntervalNode.InnerText = $Definition.RepetitionInterval
+      $DurationNode = $TaskXml.CreateElement('Duration', 'http://schemas.microsoft.com/windows/2004/02/mit/task')
+      $DurationNode.InnerText = $Definition.RepetitionDuration
+      $StopNode = $TaskXml.CreateElement('StopAtDurationEnd', 'http://schemas.microsoft.com/windows/2004/02/mit/task')
+      $StopNode.InnerText = 'true'
+      $RepetitionNode.AppendChild($IntervalNode) | Out-Null
+      $RepetitionNode.AppendChild($DurationNode) | Out-Null
+      $RepetitionNode.AppendChild($StopNode) | Out-Null
+      $TriggerNode.AppendChild($RepetitionNode) | Out-Null
+      $Changed = $true
+    }
+    $SettingsNode = $TaskXml.SelectSingleNode('//t:Settings', $Namespace)
+    if ($null -eq $SettingsNode) { throw 'Scheduled task settings node is missing' }
+    foreach ($BatteryNodeName in @('DisallowStartIfOnBatteries', 'StopIfGoingOnBatteries')) {
+      $BatteryNode = $SettingsNode.SelectSingleNode("t:$BatteryNodeName", $Namespace)
+      if ($null -eq $BatteryNode) {
+        $BatteryNode = $TaskXml.CreateElement($BatteryNodeName, 'http://schemas.microsoft.com/windows/2004/02/mit/task')
+        $ExecutionTimeLimitNode = $SettingsNode.SelectSingleNode('t:ExecutionTimeLimit', $Namespace)
+        if ($null -eq $ExecutionTimeLimitNode) { throw 'Scheduled task execution limit node is missing' }
+        $SettingsNode.InsertBefore($BatteryNode, $ExecutionTimeLimitNode) | Out-Null
+        $Changed = $true
       }
+      if ([string]$BatteryNode.InnerText -ne 'false') {
+        $BatteryNode.InnerText = 'false'
+        $Changed = $true
+      }
+    }
+    if ($Changed) {
+      Register-ScheduledTask -TaskName $Definition.Name -Xml $TaskXml.OuterXml -Force | Out-Null
     }
   }
 }

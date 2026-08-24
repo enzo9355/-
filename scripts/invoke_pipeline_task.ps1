@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet('TW-PostClose', 'TW-PreMarket', 'US-PostClose', 'US-PreMarket', 'FullBacktest', 'US-Daily', 'WeeklyModel', 'ReportUploadRecovery')]
+    [ValidateSet('TW-PostClose', 'TW-PreMarket', 'TW-ObservationRecovery', 'US-PostClose', 'US-PreMarket', 'FullBacktest', 'US-Daily', 'WeeklyModel', 'ReportUploadRecovery')]
     [string]$Job,
     [string]$DataRoot = 'D:\AbsorbData'
 )
@@ -24,13 +24,22 @@ function Get-AbsorbPipelineMutexPlan {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
-        [ValidateSet('TW-PostClose', 'TW-PreMarket', 'US-PostClose', 'US-PreMarket', 'FullBacktest', 'US-Daily', 'WeeklyModel', 'ReportUploadRecovery')]
+        [ValidateSet('TW-PostClose', 'TW-PreMarket', 'TW-ObservationRecovery', 'US-PostClose', 'US-PreMarket', 'FullBacktest', 'US-Daily', 'WeeklyModel', 'ReportUploadRecovery')]
         [string]$Job
     )
 
     # Market writer locks cover computation. Publication serialization is
     # acquired by upload_local_quant.ps1 only around the shared transaction.
+    #
+    # TW-ObservationRecovery deliberately acquires NO mutex here: its child
+    # (run_tw_observation_recovery.ps1 -> catch_up_latest_completed_session.ps1)
+    # acquires Global\ABSORB-TW-Observation-Writer itself. Wrapping the same
+    # named mutex around the child would self-lock, because a child process
+    # can never acquire a mutex the wrapper already holds.
     $Plan = New-Object 'System.Collections.Generic.List[object]'
+    if ($Job -eq 'TW-ObservationRecovery') {
+        return @()
+    }
     $Market = switch ($Job) {
         { $_ -in @('TW-PostClose', 'TW-PreMarket') } { 'TW'; break }
         { $_ -in @('US-PostClose', 'US-PreMarket', 'US-Daily') } { 'US'; break }
@@ -193,7 +202,7 @@ function Invoke-AbsorbPipelineTask {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
-        [ValidateSet('TW-PostClose', 'TW-PreMarket', 'US-PostClose', 'US-PreMarket', 'FullBacktest', 'US-Daily', 'WeeklyModel', 'ReportUploadRecovery')]
+        [ValidateSet('TW-PostClose', 'TW-PreMarket', 'TW-ObservationRecovery', 'US-PostClose', 'US-PreMarket', 'FullBacktest', 'US-Daily', 'WeeklyModel', 'ReportUploadRecovery')]
         [string]$Job,
         [Parameter(Mandatory)][string]$DataRoot,
         [Parameter(Mandatory)][string]$ScriptPath,
@@ -293,6 +302,7 @@ function Invoke-AbsorbPipelineTask {
 $Definitions = @{
     'TW-PostClose' = @{ Script = 'run_tw_post_close_pipeline.ps1'; Arguments = @('-PublishObservation') }
     'TW-PreMarket' = @{ Script = 'run_tw_pre_market_pipeline.ps1'; Arguments = @() }
+    'TW-ObservationRecovery' = @{ Script = 'run_tw_observation_recovery.ps1'; Arguments = @() }
     'US-PostClose' = @{ Script = 'run_us_post_close_pipeline.ps1'; Arguments = @('-PublishObservation') }
     'US-PreMarket' = @{ Script = 'run_us_pre_market_pipeline.ps1'; Arguments = @() }
     'FullBacktest' = @{ Script = 'run_full_backtest.ps1'; Arguments = @('-MaxItems', '500') }
