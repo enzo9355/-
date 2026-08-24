@@ -45,7 +45,7 @@ function Get-AbsorbPipelineMutexPlan {
 function Enter-AbsorbPipelineMutexPlan {
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory)][object[]]$Plan,
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Plan,
         [System.Collections.Generic.List[object]]$Receipts = (New-Object 'System.Collections.Generic.List[object]')
     )
 
@@ -90,6 +90,7 @@ function Enter-AbsorbPipelineMutexPlan {
                     $Receipt.acquisition_reason = 'abandoned_mutex_acquired'
                 } catch {
                     $Receipt.failure_reason = 'wait_failed'
+                    try { $Mutex.Dispose() } catch { }
                     throw 'Pipeline mutex wait failed'
                 }
             } finally {
@@ -158,14 +159,29 @@ function Disable-AbsorbCompletedFullBacktestTask {
         throw 'Unable to disable the completed FullBacktest scheduled task'
     }
     try {
-        $ReadBack = Get-ScheduledTask -TaskName 'ABSORB-FullBacktest' -ErrorAction Stop
+        [xml]$RegistrationXml = Export-ScheduledTask -TaskName 'ABSORB-FullBacktest' -ErrorAction Stop
+        $EnabledNode = $RegistrationXml.SelectSingleNode(
+            "/*[local-name()='Task']/*[local-name()='Settings']/*[local-name()='Enabled']"
+        )
     } catch {
-        throw 'Unable to verify the completed FullBacktest scheduled task'
+        throw 'Unable to verify the completed FullBacktest scheduled task registration'
     }
-    if ([string]$ReadBack.State -ne 'Disabled') {
-        throw 'Completed FullBacktest scheduled task did not become disabled'
+    if ($null -eq $EnabledNode) {
+        throw 'Unable to verify the completed FullBacktest scheduled task registration'
     }
-    return [pscustomobject]@{ disabled = $true; already_disabled = $false }
+    $RegistrationEnabled = ([string]$EnabledNode.InnerText).Trim().ToLowerInvariant()
+    if ($RegistrationEnabled -eq 'true') {
+        throw 'Completed FullBacktest scheduled task registration remains enabled'
+    }
+    if ($RegistrationEnabled -ne 'false') {
+        throw 'Unable to verify the completed FullBacktest scheduled task registration'
+    }
+    return [pscustomobject]@{
+        disabled = $true
+        already_disabled = $false
+        registration_enabled = $false
+        operational_state = [string]$ScheduledTask.State
+    }
 }
 
 function Invoke-AbsorbPipelineTask {
@@ -191,6 +207,7 @@ function Invoke-AbsorbPipelineTask {
     $TaskExitCode = 1
     $TaskSucceeded = $false
     $SafeError = $null
+    $SafeFailureStage = $null
     $FullBacktestTask = $null
 
     try {
@@ -223,7 +240,9 @@ function Invoke-AbsorbPipelineTask {
                 }
                 if ($null -ne $Checkpoint -and $Checkpoint.status -eq 'completed') {
                     # Disable and verify before a success receipt is committed.
+                    $SafeFailureStage = 'full_backtest_disable'
                     $FullBacktestTask = Disable-AbsorbCompletedFullBacktestTask
+                    $SafeFailureStage = $null
                 }
             }
             $TaskSucceeded = $true
@@ -233,7 +252,8 @@ function Invoke-AbsorbPipelineTask {
         $SafeError = 'Pipeline mutex acquisition timed out'
     } catch {
         $TaskExitCode = 1
-        $SafeError = if ($_.Exception.Message -like 'Unable to * FullBacktest scheduled task' -or $_.Exception.Message -eq 'Completed FullBacktest scheduled task did not become disabled') {
+        $SafeError = if ($SafeFailureStage -eq 'full_backtest_disable') {
+            # The helper converts every cmdlet/XML failure into a fixed safe message.
             $_.Exception.Message
         } else {
             'Pipeline task failed before successful completion'

@@ -177,16 +177,75 @@ class CatchUpScriptContractTests(unittest.TestCase):
             Path(__file__).parents[1]
             / "scripts"
             / "invoke_pipeline_task.ps1"
-        ).read_text(encoding="utf-8")
-        self.assertIn("Global\\ABSORB-TW-Observation-Writer", task_wrapper)
+        )
+        task_wrapper_source = task_wrapper.read_text(encoding="utf-8")
         for job in (
             "'TW-PostClose'",
             "'TW-PreMarket'",
+            "'US-PostClose'",
+            "'US-PreMarket'",
+            "'US-Daily'",
             "'WeeklyModel'",
             "'ReportUploadRecovery'",
         ):
-            self.assertIn(job, task_wrapper)
-        self.assertIn("WaitOne(0)", task_wrapper)
+            self.assertIn(job, task_wrapper_source)
+        self.assertNotIn("WaitOne(0)", task_wrapper_source)
+        self.assertIn("wait_milliseconds", task_wrapper_source)
+
+        powershell = shutil.which("powershell.exe")
+        self.assertIsNotNone(powershell)
+        wrapper_path = str(task_wrapper.resolve()).replace("'", "''")
+        harness = f"""
+$ErrorActionPreference = 'Stop'
+$tokens = $null
+$errors = $null
+$ast = [Management.Automation.Language.Parser]::ParseFile('{wrapper_path}', [ref]$tokens, [ref]$errors)
+if ($errors.Count -ne 0) {{ throw 'pipeline wrapper did not parse' }}
+$definition = @($ast.FindAll({{ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-AbsorbPipelineMutexPlan' }}, $true))[0]
+if ($null -eq $definition) {{ throw 'market-specific mutex plan helper was not found' }}
+Invoke-Expression $definition.Extent.Text
+$result = [ordered]@{{}}
+foreach ($job in @('TW-PostClose','TW-PreMarket','US-PostClose','US-PreMarket','US-Daily','ReportUploadRecovery')) {{
+    $result[$job] = @(Get-AbsorbPipelineMutexPlan -Job $job)
+}}
+$result | ConvertTo-Json -Depth 6 -Compress
+"""
+        completed = subprocess.run(
+            [
+                powershell,
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                harness,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+        plans = json.loads(completed.stdout)
+        tw_post = plans["TW-PostClose"]
+        tw_pre = plans["TW-PreMarket"]
+        us_post = plans["US-PostClose"]
+        us_pre = plans["US-PreMarket"]
+        us_daily = plans["US-Daily"]
+        recovery = plans["ReportUploadRecovery"]
+        self.assertEqual([item["scope"] for item in tw_post], ["market", "publication"])
+        self.assertEqual([item["scope"] for item in us_post], ["market", "publication"])
+        self.assertEqual([item["scope"] for item in us_daily], ["market", "publication"])
+        self.assertEqual([item["scope"] for item in tw_pre], ["market"])
+        self.assertEqual([item["scope"] for item in us_pre], ["market"])
+        self.assertEqual([item["scope"] for item in recovery], ["publication"])
+        self.assertEqual(tw_post[0]["mutex_name"], tw_pre[0]["mutex_name"])
+        self.assertEqual(us_post[0]["mutex_name"], us_pre[0]["mutex_name"])
+        self.assertEqual(us_post[0]["mutex_name"], us_daily[0]["mutex_name"])
+        self.assertNotEqual(tw_post[0]["mutex_name"], us_post[0]["mutex_name"])
+        for plan in plans.values():
+            for lock in plan:
+                self.assertGreater(lock["wait_milliseconds"], 0)
+                self.assertLessEqual(lock["wait_milliseconds"], 600000)
 
     def test_normal_historical_publish_guard_remains_unchanged(self):
         source = (

@@ -1,6 +1,7 @@
 import datetime
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -23,6 +24,45 @@ foreach ($definition in @($ast.FindAll({{ param($node) $node -is [Management.Aut
     Invoke-Expression $definition.Extent.Text
 }}
 """
+
+    @staticmethod
+    def _write_top_level_probe_wrapper(root):
+        scripts = Path(__file__).parents[1] / "scripts"
+        source_path = scripts / "invoke_pipeline_task.ps1"
+        source = source_path.read_text(encoding="utf-8")
+        data_root = str(root).replace("'", "''")
+        token = os.urandom(8).hex()
+        replacements = (
+            ("'D:\\AbsorbData'", f"'{data_root}'", 2),
+            ("'run_us_daily.ps1'", "'exit_probe.ps1'", 1),
+            (
+                '"Global\\ABSORB-$Market-Observation-Writer"',
+                f'"Local\\ABSORB-Round2-{token}-$Market"',
+                1,
+            ),
+            (
+                "'Global\\ABSORB-Observation-Publication-Writer'",
+                f"'Local\\ABSORB-Round2-{token}-Publication'",
+                1,
+            ),
+        )
+        for old, new, expected_count in replacements:
+            actual_count = source.count(old)
+            if actual_count != expected_count:
+                raise AssertionError(
+                    f"unsafe top-level test substitution count for {old}: "
+                    f"expected {expected_count}, got {actual_count}"
+                )
+            source = source.replace(old, new)
+        if "Global\\ABSORB" in source:
+            raise AssertionError("temporary wrapper retained a production mutex name")
+
+        wrapper = root / "invoke_pipeline_task.ps1"
+        wrapper.write_text(source, encoding="utf-8-sig")
+        shutil.copy2(scripts / "native_process.ps1", root / "native_process.ps1")
+        probe = root / "exit_probe.ps1"
+        probe.write_text("param([string]$DataRoot)\nexit 73\n", encoding="utf-8-sig")
+        return wrapper, (scripts / "run_hidden.vbs").resolve()
 
     def test_historical_target_with_publish_fails_before_data_access(self):
         script = (
@@ -567,36 +607,100 @@ try {
         self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
         self.assertIn("cleanup-ok", completed.stdout)
 
-    def test_hidden_task_wrapper_preserves_distinctive_native_exit_code_and_receipt(self):
-        scripts = Path(__file__).parents[1] / "scripts"
-        invoke_script = (scripts / "invoke_pipeline_task.ps1").resolve()
-        native_helper = (scripts / "native_process.ps1").resolve()
-        hidden_launcher = (scripts / "run_hidden.vbs").resolve()
+    def test_generic_mutex_wait_failure_disposes_unleased_handle(self):
+        script = (
+            Path(__file__).parents[1] / "scripts" / "invoke_pipeline_task.ps1"
+        ).resolve()
+        escaped = str(script).replace("'", "''")
+        harness = rf"""
+$ErrorActionPreference = 'Stop'
+$tokens = $null
+$errors = $null
+$ast = [Management.Automation.Language.Parser]::ParseFile('{escaped}', [ref]$tokens, [ref]$errors)
+if ($errors.Count -ne 0) {{ throw 'invoke wrapper did not parse' }}
+$exitDefinition = @($ast.FindAll({{ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Exit-AbsorbPipelineMutexPlan' }}, $true))[0]
+$enterDefinition = @($ast.FindAll({{ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Enter-AbsorbPipelineMutexPlan' }}, $true))[0]
+Invoke-Expression $exitDefinition.Extent.Text
+$constructor = '[Threading.Mutex]::new($false, [string]$Entry.mutex_name)'
+$instrumented = $enterDefinition.Extent.Text.Replace($constructor, '(New-TestFailingMutex)')
+if ($instrumented -eq $enterDefinition.Extent.Text) {{ throw 'mutex constructor seam was not instrumented' }}
+Invoke-Expression $instrumented
+$Global:DisposeCalls = 0
+$Global:FakeMutex = [pscustomobject]@{{}}
+$Global:FakeMutex | Add-Member -MemberType ScriptMethod -Name WaitOne -Value {{ param($Milliseconds) throw 'controlled WaitOne failure' }}
+$Global:FakeMutex | Add-Member -MemberType ScriptMethod -Name Dispose -Value {{ $Global:DisposeCalls++ }}
+function New-TestFailingMutex {{ return $Global:FakeMutex }}
+$receipts = New-Object 'System.Collections.Generic.List[object]'
+$plan = @([pscustomobject]@{{ scope='market'; market='US'; mutex_name='Local\ABSORB-Round2-FailingWait'; wait_milliseconds=100 }})
+$failed = $false
+try {{ Enter-AbsorbPipelineMutexPlan -Plan $plan -Receipts $receipts | Out-Null }}
+catch {{
+    $failed = $true
+    if ($_.Exception.Message -ne 'Pipeline mutex wait failed') {{ throw }}
+}}
+if (-not $failed) {{ throw 'generic WaitOne failure was accepted' }}
+if ($Global:DisposeCalls -ne 1) {{ throw "unleased mutex dispose count was $Global:DisposeCalls" }}
+if ($receipts.Count -ne 1 -or $receipts[0].failure_reason -ne 'wait_failed' -or $receipts[0].ever_acquired -or $receipts[0].released) {{ throw 'generic wait failure receipt is inaccurate' }}
+[Console]::WriteLine('wait-failure-disposed')
+"""
+        completed = subprocess.run(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                harness,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+        self.assertIn("wait-failure-disposed", completed.stdout)
+
+    def test_production_top_level_preserves_distinctive_native_exit_code_and_receipt(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            native_helper_ps = str(native_helper).replace("'", "''")
-            root_ps = str(root).replace("'", "''")
-            probe = root / "exit_probe.ps1"
-            probe.write_text("param([string]$DataRoot)\nexit 73\n", encoding="utf-8-sig")
-            probe_ps = str(probe).replace("'", "''")
-            logs_ps = str(root / "logs").replace("'", "''")
-            harness = root / "invoke_probe.ps1"
-            harness.write_text(
-                "$ErrorActionPreference = 'Stop'\n"
-                + self._powershell_function_import(invoke_script)
-                + f". '{native_helper_ps}'\n"
-                + (
-                    "$code = Invoke-AbsorbPipelineTask "
-                    "-Job 'US-Daily' "
-                    f"-DataRoot '{root_ps}' "
-                    f"-ScriptPath '{probe_ps}' "
-                    "-ScriptArguments @() "
-                    f"-LogDirectory '{logs_ps}' "
-                    "-PowerShellExe (Get-Command powershell.exe -ErrorAction Stop).Source\n"
-                    "exit $code\n"
-                ),
-                encoding="utf-8-sig",
+            wrapper, _ = self._write_top_level_probe_wrapper(root)
+            completed = subprocess.run(
+                [
+                    r"C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    str(wrapper),
+                    "-Job",
+                    "US-Daily",
+                    "-DataRoot",
+                    str(root),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
             )
+            self.assertEqual(completed.returncode, 73, completed.stdout + completed.stderr)
+            receipt = json.loads(
+                (root / "logs" / "tasks" / "current-US-Daily.json").read_text(
+                    encoding="utf-8-sig"
+                )
+            )
+            self.assertFalse(receipt["success"])
+            self.assertEqual(receipt["exit_code"], 73)
+            self.assertEqual(len(receipt["mutexes"]), 2)
+            for mutex in receipt["mutexes"]:
+                self.assertTrue(mutex["mutex_name"].startswith("Local\\ABSORB-Round2-"))
+                self.assertNotIn("Global\\", mutex["mutex_name"])
+                self.assertTrue(mutex["ever_acquired"])
+                self.assertTrue(mutex["released"])
+
+    def test_hidden_vbs_preserves_production_top_level_exit_code_when_available(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            wrapper, hidden_launcher = self._write_top_level_probe_wrapper(root)
             completed = subprocess.run(
                 [
                     "cscript.exe",
@@ -609,22 +713,38 @@ try {
                     "-ExecutionPolicy",
                     "Bypass",
                     "-File",
-                    str(harness),
+                    str(wrapper),
+                    "-Job",
+                    "US-Daily",
+                    "-DataRoot",
+                    str(root),
                 ],
                 capture_output=True,
                 text=True,
                 timeout=30,
             )
+            wsh_output = (completed.stdout + completed.stderr).strip()
+            wsh_acl_denial = (
+                "CScript Error: Loading your settings failed. (Access is denied. )"
+            )
+            if completed.returncode == 1 and wsh_output == wsh_acl_denial:
+                self.skipTest("Windows Script Host settings ACL denied this leg")
             self.assertEqual(completed.returncode, 73, completed.stdout + completed.stderr)
             receipt = json.loads(
-                (root / "logs" / "current-US-Daily.json").read_text(
+                (root / "logs" / "tasks" / "current-US-Daily.json").read_text(
                     encoding="utf-8-sig"
                 )
             )
             self.assertFalse(receipt["success"])
             self.assertEqual(receipt["exit_code"], 73)
             self.assertTrue(receipt["mutexes"])
-            self.assertTrue(all(item["released"] for item in receipt["mutexes"] if item["ever_acquired"]))
+            self.assertTrue(
+                all(
+                    item["released"]
+                    for item in receipt["mutexes"]
+                    if item["ever_acquired"]
+                )
+            )
 
     def test_full_backtest_disable_is_idempotent_and_failure_is_task_failure(self):
         scripts = Path(__file__).parents[1] / "scripts"
@@ -647,36 +767,54 @@ try {
                 + f". '{native_helper_ps}'\n"
                 + r"""
 $Global:TaskState = 'Disabled'
+$Global:RegistrationEnabled = $false
 $Global:DisableCalls = 0
+$Global:ExportCalls = 0
 $Global:DisableMode = 'ok'
 function Get-ScheduledTask { param([string]$TaskName, $ErrorAction) [pscustomobject]@{ TaskName=$TaskName; State=$Global:TaskState } }
 function Disable-ScheduledTask {
     param([string]$TaskName, $ErrorAction)
     $Global:DisableCalls++
     if ($Global:DisableMode -eq 'permission') { throw [UnauthorizedAccessException]::new('sensitive permission detail') }
-    $Global:TaskState = 'Disabled'
+    if ($Global:DisableMode -ne 'enabled') { $Global:RegistrationEnabled = $false }
+}
+function Export-ScheduledTask {
+    param([string]$TaskName, $ErrorAction)
+    $Global:ExportCalls++
+    if ($Global:DisableMode -eq 'export_failure') { throw 'sensitive export detail' }
+    $enabled = if ($Global:RegistrationEnabled) { 'true' } else { 'false' }
+    return ('<?xml version="1.0"?><Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task"><Settings><Enabled>' + $enabled + '</Enabled></Settings></Task>')
 }
 $already = Disable-AbsorbCompletedFullBacktestTask
-if (-not $already.already_disabled -or $Global:DisableCalls -ne 0) { throw 'already-disabled task was not idempotent' }
-$Global:TaskState = 'Ready'
+if (-not $already.already_disabled -or $Global:DisableCalls -ne 0 -or $Global:ExportCalls -ne 0) { throw 'already-disabled task was not idempotent' }
+$Global:TaskState = 'Running'
+$Global:RegistrationEnabled = $true
 $disabled = Disable-AbsorbCompletedFullBacktestTask
-if ($disabled.already_disabled -or -not $disabled.disabled -or $Global:DisableCalls -ne 1) { throw 'enabled task was not disabled and verified' }
-$Global:TaskState = 'Ready'
-$Global:DisableMode = 'permission'
+if ($disabled.already_disabled -or -not $disabled.disabled -or $disabled.registration_enabled -or $disabled.operational_state -ne 'Running' -or $Global:DisableCalls -ne 1 -or $Global:ExportCalls -ne 1 -or $Global:TaskState -ne 'Running') { throw 'running task registration was not disabled and verified' }
 """
                 + (
-                    "$code = Invoke-AbsorbPipelineTask "
+                    "$expectedErrors = @{\n"
+                    "  enabled = 'Completed FullBacktest scheduled task registration remains enabled'\n"
+                    "  export_failure = 'Unable to verify the completed FullBacktest scheduled task registration'\n"
+                    "  permission = 'Unable to disable the completed FullBacktest scheduled task'\n"
+                    "}\n"
+                    "foreach ($mode in @('enabled','export_failure','permission')) {\n"
+                    "  $Global:TaskState = 'Running'\n"
+                    "  $Global:RegistrationEnabled = $true\n"
+                    "  $Global:DisableMode = $mode\n"
+                    "  $code = Invoke-AbsorbPipelineTask "
                     "-Job 'FullBacktest' "
                     f"-DataRoot '{root_ps}' "
                     f"-ScriptPath '{probe_ps}' "
                     "-ScriptArguments @('-MaxItems', '500') "
                     f"-LogDirectory '{logs_ps}' "
                     "-PowerShellExe (Get-Command powershell.exe -ErrorAction Stop).Source\n"
-                    "$receipt = Get-Content -LiteralPath '"
+                    "  $receipt = Get-Content -LiteralPath '"
                     + str(root / "logs" / "current-FullBacktest.json").replace("'", "''")
                     + "' -Raw -Encoding utf8 | ConvertFrom-Json\n"
-                    "if ($code -eq 0 -or $receipt.success -or $receipt.exit_code -eq 0) { throw 'disable failure was reported as success' }\n"
-                    "if ([string]$receipt.error -match 'sensitive permission detail') { throw 'unsafe disable error leaked' }\n"
+                    "  if ($code -eq 0 -or $receipt.success -or $receipt.exit_code -eq 0) { throw \"$mode failure was reported as success\" }\n"
+                    "  if ([string]$receipt.error -ne $expectedErrors[$mode]) { throw \"$mode failure receipt was unsafe or inaccurate: $($receipt.error)\" }\n"
+                    "}\n"
                     "[Console]::WriteLine('disable-contract-ok')\n"
                 )
             )
