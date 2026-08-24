@@ -176,6 +176,7 @@ class WebProductTests(unittest.TestCase):
         self.assertIn('"Avenir Next",Avenir,"Noto Sans TC"', css)
         self.assertIn(".research-command", css)
         self.assertIn(".market-switch a{display:grid;min-height:44px", css)
+        self.assertIn(".quick-ask-backdrop[hidden]{display:none}", css)
         self.assertIn(".quick-ask-header button{display:grid;width:44px;height:44px", css)
         version = re.search(r'/static/app\.css\?v=([0-9a-f]{12})', html)
         self.assertIsNotNone(version)
