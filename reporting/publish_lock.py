@@ -20,6 +20,21 @@ _DEFAULT_POLL_SECONDS = 0.05
 _LOGGER = logging.getLogger(__name__)
 
 
+def _silence_unusable_stdout() -> None:
+    """Redirect a broken process stdout fd so interpreter shutdown stays zero."""
+    try:
+        stdout_fd = sys.stdout.fileno()
+        devnull_fd = os.open(os.devnull, os.O_WRONLY)
+    except (AttributeError, OSError, ValueError):
+        return
+    try:
+        os.dup2(devnull_fd, stdout_fd)
+    except OSError:
+        return
+    finally:
+        os.close(devnull_fd)
+
+
 def _emit_lock_receipt(
     event: str,
     *,
@@ -41,9 +56,14 @@ def _emit_lock_receipt(
             + "\n"
         )
         sys.stdout.flush()
-    except (AttributeError, OSError, ValueError):
+    except OSError:
         # Closed pipes and detached stdout are observation failures only. The
-        # lock lifecycle and publisher exit result remain authoritative.
+        # lock lifecycle and publisher exit result remain authoritative. A
+        # real broken pipe must also be replaced before interpreter shutdown,
+        # otherwise CPython changes an otherwise-successful exit code to 120.
+        _silence_unusable_stdout()
+        return
+    except (AttributeError, ValueError):
         return
 
 

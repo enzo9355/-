@@ -172,6 +172,60 @@ class ReportV2PublishLockTests(unittest.TestCase):
         self.assertTrue(receipt["released"])
         self.assertFalse(self.lock_path.exists())
 
+    def test_real_closed_pipe_keeps_success_exit_code_and_releases_lock(self):
+        context = multiprocessing.get_context("spawn")
+        ready = context.Event()
+        release = context.Event()
+        holder = context.Process(
+            target=_hold_publish_lock,
+            args=(str(self.root), ready, release),
+        )
+        completed_marker = self.root / "publisher-completed"
+        script = (
+            "import sys; "
+            "from pathlib import Path; "
+            "from reporting.publish_lock import report_v2_publish_lock; "
+            "root = Path(sys.argv[1]); marker = Path(sys.argv[2]); "
+            "manager = report_v2_publish_lock(root); "
+            "manager.__enter__(); marker.write_text('completed', encoding='ascii'); "
+            "manager.__exit__(None, None, None)"
+        )
+        publisher = None
+
+        holder.start()
+        try:
+            self.assertTrue(ready.wait(10))
+            publisher = subprocess.Popen(
+                [sys.executable, "-c", script, str(self.root), str(completed_marker)],
+                cwd=Path(__file__).resolve().parents[1],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+            )
+            first_line = publisher.stdout.readline()
+            self.assertEqual(json.loads(first_line)["event"], "waiting")
+            publisher.stdout.close()
+            release.set()
+            publisher.wait(timeout=20)
+            stderr = publisher.stderr.read()
+            publisher.stderr.close()
+        finally:
+            release.set()
+            holder.join(10)
+            if holder.is_alive():
+                holder.terminate()
+                holder.join(10)
+            if publisher is not None and publisher.poll() is None:
+                publisher.terminate()
+                publisher.wait(10)
+
+        self.assertEqual(holder.exitcode, 0)
+        self.assertEqual(publisher.returncode, 0, stderr)
+        self.assertEqual(completed_marker.read_text(encoding="ascii"), "completed")
+        self.assertFalse(self.lock_path.exists())
+        self.assertNotIn("Exception ignored", stderr)
+
     def test_batch_publisher_emits_structured_lock_receipts_with_default_logging(self):
         context = multiprocessing.get_context("spawn")
         ready = context.Event()
