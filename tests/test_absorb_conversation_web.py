@@ -1,5 +1,7 @@
 import os
+import json
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 os.environ.setdefault("LINE_CHANNEL_ACCESS_TOKEN", "test")
@@ -8,6 +10,7 @@ os.environ.setdefault("LINE_CHANNEL_SECRET", "test")
 import app as stock_app
 
 from absorb.conversation.schemas import ConversationAnswer
+from absorb.conversation.context import MemoryContextStore
 
 
 class AbsorbConversationWebTests(unittest.TestCase):
@@ -33,6 +36,21 @@ class AbsorbConversationWebTests(unittest.TestCase):
         self.assertEqual(kwargs["access"], "public")
         self.assertEqual(kwargs["market_context"], "TW")
         self.assertEqual(kwargs["page_context"], "home")
+
+    def test_legacy_question_only_payload_defaults_to_tw_home(self):
+        client = stock_app.app.test_client()
+        with patch.object(
+            stock_app,
+            "run_absorb_conversation",
+            return_value=ConversationAnswer("ok"),
+        ) as converse:
+            response = client.post(
+                "/api/conversation", json={"question": "今天市場如何？"}
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(converse.call_args.kwargs["market_context"], "TW")
+        self.assertEqual(converse.call_args.kwargs["page_context"], "home")
 
     def test_authenticated_web_conversation_gets_server_side_action_executor(self):
         client = stock_app.app.test_client()
@@ -134,6 +152,71 @@ class AbsorbConversationWebTests(unittest.TestCase):
         fetch.assert_called_once_with("2330")
         report_lookup.assert_not_called()
         self.assertIn("台積電（2330）", answer.text)
+
+    def test_same_cookie_us_page_clears_prior_tw_stock_context_in_production_mode(self):
+        from tests.test_absorb_conversation import stock_data
+
+        class Provider:
+            def __init__(self):
+                self.plans = []
+
+            def plan(inner_self, prompt):
+                payload = json.loads(prompt.split("規劃資料：\n", 1)[1])
+                inner_self.plans.append(payload)
+                if "台積電" in payload["question"]:
+                    calls = [{
+                        "name": "get_stock_analysis",
+                        "arguments": {"market": "TW", "symbol": "2330"},
+                    }]
+                else:
+                    calls = [{
+                        "name": "get_latest_post_close_report",
+                        "arguments": {"market": "US"},
+                    }]
+                return json.dumps({"tool_calls": calls}, ensure_ascii=False)
+
+            def answer(inner_self, _prompt):
+                return "已驗證資料已整理。"
+
+        provider = Provider()
+        client = stock_app.app.test_client()
+        capability = SimpleNamespace(mode="production")
+        report = {
+            "market": "US",
+            "report_type": "post_close",
+            "data_quality": "available",
+            "source_market_date": "2026-08-21",
+            "summary": ["S&P 500 收高"],
+        }
+        with (
+            patch.object(stock_app, "prediction_capability", capability),
+            patch.object(stock_app, "conversation_context_store", MemoryContextStore()),
+            patch.object(stock_app, "_conversation_provider", return_value=provider),
+            patch.object(
+                stock_app,
+                "_conversation_search_stock",
+                side_effect=lambda query: (
+                    ("2330", "台積電") if "台積電" in query else (None, None)
+                ),
+            ),
+            patch.object(stock_app, "analyze", return_value=stock_data()),
+            patch.object(stock_app, "_conversation_report_lookup", return_value=report),
+        ):
+            first = client.post(
+                "/api/conversation",
+                json=self._payload("台積電現在如何？", market="TW", page="stock"),
+            )
+            second = client.post(
+                "/api/conversation",
+                json=self._payload("今天市場如何？", market="US", page="market"),
+            )
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        second_context = provider.plans[1]["context"]
+        self.assertEqual(second_context["market"], "US")
+        self.assertIsNone(second_context["symbol"])
+        self.assertEqual(second_context["comparison_symbols"], [])
 
     def test_browser_clients_receive_isolated_principals(self):
         principals = []

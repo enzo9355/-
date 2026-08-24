@@ -13,9 +13,16 @@ def register_conversation_routes(app, *, converse, resolve_authenticated_identit
         if not request.is_json:
             return _private(jsonify({"error": "JSON body required"}), 415)
         payload = request.get_json(silent=True)
-        if not isinstance(payload, dict) or set(payload) != {"question", "market", "page"}:
+        allowed_fields = {"question", "market", "page"}
+        if (
+            not isinstance(payload, dict)
+            or "question" not in payload
+            or not set(payload) <= allowed_fields
+        ):
             return _private(jsonify({"error": "invalid request"}), 400)
-        if payload.get("market") not in {"TW", "US"} or payload.get("page") not in {
+        market = payload.get("market", "TW")
+        page = payload.get("page", "home")
+        if market not in {"TW", "US"} or page not in {
             "home", "market", "industries", "stocks", "reports", "stock", "ask", "learn"
         }:
             return _private(jsonify({"error": "invalid context"}), 400)
@@ -31,7 +38,7 @@ def register_conversation_routes(app, *, converse, resolve_authenticated_identit
             principal, access = f"web:{cookie_value}", "public"
         answer = converse(
             principal=principal, question=payload["question"], access=access,
-            market_context=payload["market"], page_context=payload["page"],
+            market_context=market, page_context=page,
         )
         response = _private(jsonify(render_web(answer)))
         if set_cookie:

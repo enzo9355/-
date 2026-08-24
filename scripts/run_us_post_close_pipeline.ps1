@@ -9,6 +9,7 @@ if ($DataRoot -notin @('D:\AbsorbData', 'D:\StockPapiData')) { throw 'Data root 
 
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 . (Join-Path $PSScriptRoot 'python_runtime.ps1')
+. (Join-Path $PSScriptRoot 'us_pipeline_native.ps1')
 $PythonExe = Resolve-AbsorbPythonExecutable -RepoRoot $RepoRoot
 Assert-AbsorbPythonRuntime -PythonExe $PythonExe -RepoRoot $RepoRoot
 $env:PYTHONPATH = [string]::Join(
@@ -81,14 +82,14 @@ if ($CalendarCheckCode -ne 0) { exit $CalendarCheckCode }
 
 # Run US observation data collection & publish
 Write-Output "Running US PostClose observation pipeline for $TargetDate..."
-& $PythonExe -m stock_papi.batch.us_official_post_close_cli `
-    --root $DataRoot `
-    --target-market-date $TargetDate
-
-if ($LASTEXITCODE -ne 0) {
-    Write-Error "US PostClose pipeline failed with exit code $LASTEXITCODE"
-    exit $LASTEXITCODE
-}
+Invoke-AbsorbUsPipelineNativeCommand `
+    -PythonExe $PythonExe `
+    -Arguments @(
+        '-m', 'stock_papi.batch.us_official_post_close_cli',
+        '--root', $DataRoot,
+        '--target-market-date', $TargetDate
+    ) `
+    -FailureLabel 'US PostClose pipeline'
 
 Write-Output "US PostClose observation pipeline completed successfully for $TargetDate."
 

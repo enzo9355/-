@@ -151,8 +151,6 @@ class ConversationOrchestrator:
             return ConversationAnswer("已清除這個工作階段的股票與產業上下文。")
 
         context = self.context_store.get(principal)
-        if market_context in {"TW", "US"} and context.current_symbol is None:
-            context.current_market = market_context
         if question.startswith("確認") and context.pending_confirmation is None:
             return ConversationAnswer("目前沒有待確認操作；未執行任何變更。")
         confirmation = self._handle_confirmation(principal, question, context, access)
@@ -164,6 +162,24 @@ class ConversationOrchestrator:
             return ConversationAnswer("這項查詢需要先使用 LINE 登入；目前未讀取任何私人資料。")
 
         entities = resolve_entities(question, self.search_stock)
+        if entities:
+            context.current_market = entities[0]["market"]
+            context.current_entity_type = (
+                "market" if entities[0]["symbol"] == "TAIEX" else "stock"
+            )
+            context.current_symbol = entities[0]["symbol"]
+            context.current_industry_id = None
+            context.comparison_symbols = tuple(
+                item["symbol"] for item in entities
+            )
+        elif market_context in {"TW", "US"}:
+            previous_market = context.current_market
+            context.current_market = market_context
+            if previous_market != market_context:
+                context.current_entity_type = "market"
+                context.current_symbol = None
+                context.current_industry_id = None
+                context.comparison_symbols = ()
         if not entities and context.comparison_symbols and "第二檔" in question:
             symbol = context.comparison_symbols[1] if len(context.comparison_symbols) > 1 else None
             if symbol:

@@ -176,7 +176,10 @@ class TestRegressionPublisherRollback(unittest.TestCase):
         first_published = threading.Event()
         release_first = threading.Event()
         first_thread = None
+        second_thread = None
         first_errors = []
+        second_errors = []
+        second_completed = threading.Event()
         impl_threads = []
 
         def controlled_impl(*args, **kwargs):
@@ -194,6 +197,14 @@ class TestRegressionPublisherRollback(unittest.TestCase):
             except BaseException as exc:
                 first_errors.append(exc)
 
+        def publish_second():
+            try:
+                self.publish()
+            except BaseException as exc:
+                second_errors.append(exc)
+            finally:
+                second_completed.set()
+
         with mock.patch(
             "reporting.publisher._publish_report_v2_impl",
             side_effect=controlled_impl,
@@ -208,8 +219,12 @@ class TestRegressionPublisherRollback(unittest.TestCase):
                     if path.is_file() and self.lock_path not in path.parents
                 }
 
-                with self.assertRaisesRegex(ReportPublishError, "already held"):
-                    self.publish()
+                second_thread = threading.Thread(target=publish_second)
+                second_thread.start()
+                self.assertFalse(
+                    second_completed.wait(0.25),
+                    "contending publisher did not wait for the transaction lock",
+                )
 
                 contended_state = {
                     path.relative_to(self.publish_dir): path.read_bytes()
@@ -221,10 +236,14 @@ class TestRegressionPublisherRollback(unittest.TestCase):
             finally:
                 release_first.set()
                 first_thread.join(10)
+                if second_thread is not None:
+                    second_thread.join(10)
 
             self.assertFalse(first_thread.is_alive())
+            self.assertIsNotNone(second_thread)
+            self.assertFalse(second_thread.is_alive())
             self.assertEqual(first_errors, [])
-            self.assertEqual(self.publish(), self.latest_path)
+            self.assertEqual(second_errors, [])
 
         self.assertEqual(len(impl_threads), 2)
         self.assertFalse(self.lock_path.exists())

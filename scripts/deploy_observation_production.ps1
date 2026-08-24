@@ -279,6 +279,46 @@ function Invoke-ObservationSmoke {
         }) | Out-Null
     }
 
+    foreach ($Search in @(
+        [ordered]@{ market = 'TW'; query = '2330'; path = '/stock/2330'; symbol = '2330' }
+        [ordered]@{ market = 'US'; query = 'AAPL'; path = '/stock/AAPL'; symbol = 'AAPL' }
+    )) {
+        $SearchPath = '/search?market=' + $Search.market + '&q=' + $Search.query
+        $Response = Invoke-WebRequest `
+            -Uri ($BaseUrl.TrimEnd('/') + $SearchPath) `
+            -UseBasicParsing `
+            -MaximumRedirection 5 `
+            -TimeoutSec 45
+        $FinalUri = $null
+        if ($null -ne $Response.BaseResponse.ResponseUri) {
+            $FinalUri = $Response.BaseResponse.ResponseUri
+        } elseif ($null -ne $Response.BaseResponse.RequestMessage.RequestUri) {
+            $FinalUri = $Response.BaseResponse.RequestMessage.RequestUri
+        }
+        $Body = [string]$Response.Content
+        if (
+            [int]$Response.StatusCode -ne 200 -or
+            $null -eq $FinalUri -or
+            [string]$FinalUri.AbsolutePath -ne [string]$Search.path
+        ) {
+            throw "Observation search final URL is invalid: $SearchPath"
+        }
+        if (
+            $Body -notmatch ('data-market="' + [regex]::Escape([string]$Search.market) + '"') -or
+            $Body -notmatch [regex]::Escape([string]$Search.symbol)
+        ) {
+            throw "Observation search market or symbol identity is invalid: $SearchPath"
+        }
+        $Results.Add([ordered]@{
+            path = $SearchPath
+            status = [int]$Response.StatusCode
+            final_url = [string]$FinalUri.AbsoluteUri
+            body_sha256 = Get-TextSha256 $Body
+            market = [string]$Search.market
+            symbol = [string]$Search.symbol
+        }) | Out-Null
+    }
+
     $AssetVersion = $null
     foreach ($AssetPrefix in @('/static/app.css?v=', '/static/app.js?v=')) {
         $Pattern = [regex]::Escape($AssetPrefix) + '(?<version>[0-9a-f]{12})'

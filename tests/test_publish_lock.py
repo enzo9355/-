@@ -3,6 +3,7 @@
 import multiprocessing
 from pathlib import Path
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -20,6 +21,35 @@ def _hold_publish_lock(root, ready, release):
             raise RuntimeError("timed out waiting to release publish lock")
 
 
+def _publish_market(root, market, ready, release, attempting, completed, failed):
+    import reporting.publisher as publisher
+    from tests.test_report_schema_v2 import metadata
+
+    document = metadata("pre_market")
+    document["market"] = market
+    document["source_manifest"] = (
+        f"quant/v1/manifests/{market}-20260714T090000Z-aaaaaaaaaaaa.json"
+    )
+    original = publisher._publish_report_v2_impl
+
+    def gated(*args, **kwargs):
+        if ready is not None:
+            ready.set()
+            if not release.wait(10):
+                raise RuntimeError("timed out holding report publisher")
+        return original(*args, **kwargs)
+
+    publisher._publish_report_v2_impl = gated
+    try:
+        attempting.set()
+        publisher.publish_report_v2(Path(root), document)
+    except BaseException:
+        failed.set()
+        raise
+    finally:
+        completed.set()
+
+
 class ReportV2PublishLockTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -29,31 +59,88 @@ class ReportV2PublishLockTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
-    def test_lock_is_cross_process_visible_and_fails_closed_without_waiting(self):
+    def test_lock_wait_is_bounded_and_stale_lock_remains_fail_closed(self):
+        self.lock_path.mkdir(parents=True)
+        owner_file = self.lock_path / "owner-token"
+        owner_file.write_text("stale-owner", encoding="ascii")
+
+        started = time.monotonic()
+        with self.assertRaisesRegex(ReportPublishError, "timed out"):
+            with report_v2_publish_lock(
+                self.root, wait_seconds=0.12, poll_seconds=0.01
+            ):
+                self.fail("stale lock was bypassed")
+        elapsed = time.monotonic() - started
+
+        self.assertGreaterEqual(elapsed, 0.10)
+        self.assertLess(elapsed, 1.0)
+        self.assertTrue(self.lock_path.is_dir())
+        self.assertEqual(owner_file.read_text(encoding="ascii"), "stale-owner")
+
+    def test_tw_and_us_publishers_serialize_across_real_processes(self):
         context = multiprocessing.get_context("spawn")
         ready = context.Event()
         release = context.Event()
-        process = context.Process(
-            target=_hold_publish_lock,
-            args=(str(self.root), ready, release),
+        tw_attempting = context.Event()
+        us_attempting = context.Event()
+        tw_completed = context.Event()
+        us_completed = context.Event()
+        tw_failed = context.Event()
+        us_failed = context.Event()
+        tw_process = context.Process(
+            target=_publish_market,
+            args=(
+                str(self.root), "TW", ready, release, tw_attempting,
+                tw_completed, tw_failed,
+            ),
         )
-        process.start()
+        us_process = context.Process(
+            target=_publish_market,
+            args=(
+                str(self.root), "US", None, release, us_attempting,
+                us_completed, us_failed,
+            ),
+        )
+        tw_process.start()
         try:
             self.assertTrue(ready.wait(10))
-            with self.assertRaisesRegex(ReportPublishError, "already held"):
-                with report_v2_publish_lock(self.root):
-                    self.fail("contending publisher entered the lock")
+            us_process.start()
+            self.assertTrue(us_attempting.wait(10))
+            self.assertFalse(
+                us_completed.wait(0.25),
+                "US publisher did not wait for the TW transaction",
+            )
+            release.set()
+            self.assertTrue(tw_completed.wait(10))
+            self.assertTrue(us_completed.wait(10))
         finally:
             release.set()
-            process.join(10)
-            if process.is_alive():
-                process.terminate()
+            for process in (tw_process, us_process):
+                if process.pid is None:
+                    continue
                 process.join(10)
+                if process.is_alive():
+                    process.terminate()
+                    process.join(10)
 
-        self.assertEqual(process.exitcode, 0)
-        with report_v2_publish_lock(self.root):
-            self.assertTrue(self.lock_path.is_dir())
+        self.assertEqual(tw_process.exitcode, 0)
+        self.assertEqual(us_process.exitcode, 0)
+        self.assertFalse(tw_failed.is_set())
+        self.assertFalse(us_failed.is_set())
+        report_root = self.root / "publish" / "reports" / "v2"
+        self.assertTrue((report_root / "index-TW.json").is_file())
+        self.assertTrue((report_root / "index-US.json").is_file())
         self.assertFalse(self.lock_path.exists())
+
+    def test_wait_acquire_and_release_are_observable(self):
+        with self.assertLogs("reporting.publish_lock", level="INFO") as captured:
+            with report_v2_publish_lock(self.root):
+                pass
+
+        events = "\n".join(captured.output)
+        self.assertIn("event=acquired", events)
+        self.assertIn("waited_milliseconds=", events)
+        self.assertIn("event=released", events)
 
     def test_success_uses_unique_owner_tokens_and_releases_lock(self):
         owner_tokens = []
@@ -104,8 +191,10 @@ class ReportV2PublishLockTests(unittest.TestCase):
         owner_file = self.lock_path / "owner-token"
         owner_file.write_text("stale-owner", encoding="ascii")
 
-        with self.assertRaisesRegex(ReportPublishError, "already held"):
-            with report_v2_publish_lock(self.root):
+        with self.assertRaisesRegex(ReportPublishError, "timed out"):
+            with report_v2_publish_lock(
+                self.root, wait_seconds=0.05, poll_seconds=0.01
+            ):
                 self.fail("stale lock was removed automatically")
 
         self.assertTrue(self.lock_path.is_dir())
@@ -125,8 +214,10 @@ class ReportV2PublishLockTests(unittest.TestCase):
                     pass
 
         self.assertTrue(self.lock_path.is_dir())
-        with self.assertRaisesRegex(ReportPublishError, "already held"):
-            with report_v2_publish_lock(self.root):
+        with self.assertRaisesRegex(ReportPublishError, "timed out"):
+            with report_v2_publish_lock(
+                self.root, wait_seconds=0.05, poll_seconds=0.01
+            ):
                 self.fail("cleanup failure lock was bypassed")
 
 

@@ -19,6 +19,89 @@ CHECKLIST = REPOSITORY_ROOT / "docs" / "absorb-cutover-checklist.md"
 
 
 class ObservationDeployScriptTests(unittest.TestCase):
+    def _run_smoke_harness(self, *, us_final_path="/stock/AAPL"):
+        powershell = shutil.which("powershell.exe")
+        if powershell is None:
+            self.skipTest("Windows PowerShell is unavailable")
+        deploy = str(DEPLOY.resolve()).replace("'", "''")
+        final_path = us_final_path.replace("'", "''")
+        harness = rf"""
+$ErrorActionPreference = 'Stop'
+$script:ForbiddenPredictionKeys = [Collections.Generic.HashSet[string]]::new(
+    [StringComparer]::OrdinalIgnoreCase
+)
+foreach ($key in @(
+    'forecast_probability', 'probability', 'ranking_score',
+    'model_version', 'backtest_version', 'recommendation'
+)) {{ [void]$script:ForbiddenPredictionKeys.Add($key) }}
+$tokens = $null
+$errors = $null
+$ast = [Management.Automation.Language.Parser]::ParseFile('{deploy}', [ref]$tokens, [ref]$errors)
+if ($errors.Count -ne 0) {{ throw 'deploy script did not parse' }}
+foreach ($name in @('Assert-NoPredictionKeys', 'Get-TextSha256', 'Invoke-ObservationSmoke')) {{
+    $definition = @($ast.FindAll({{ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name }}, $true))[0]
+    if ($null -eq $definition) {{ throw "missing function: $name" }}
+    Invoke-Expression $definition.Extent.Text
+}}
+$script:Requests = New-Object System.Collections.Generic.List[string]
+function New-SmokeResponse {{
+    param([string]$Content, [string]$FinalUri)
+    return [pscustomobject]@{{
+        StatusCode = 200
+        Content = $Content
+        BaseResponse = [pscustomobject]@{{
+            ResponseUri = [Uri]$FinalUri
+            RequestMessage = [pscustomobject]@{{ RequestUri = [Uri]$FinalUri }}
+        }}
+    }}
+}}
+function Invoke-WebRequest {{
+    param(
+        [string]$Uri,
+        [switch]$UseBasicParsing,
+        [int]$MaximumRedirection,
+        [int]$TimeoutSec
+    )
+    [void]$script:Requests.Add($Uri)
+    $request = [Uri]$Uri
+    $key = $request.PathAndQuery
+    $content = switch -Regex ($key) {{
+        '^/health/data$' {{ '{{"service":{{"status":"ok"}},"markets":{{"TW":{{"status":"current"}},"US":{{"status":"current"}}}}}}'; break }}
+        '^/api/dashboard$' {{ '{{"product_mode":"observation","market_observation":{{}},"industry_observations":[],"data_quality":{{}}}}'; break }}
+        '^/$' {{ '<html><body data-market="TW"><link href="/static/app.css?v=abcdef123456"><script src="/static/app.js?v=abcdef123456"></script></body></html>'; break }}
+        '^/reports$' {{ '<body data-market="TW"><a href="/reports/2026-08-21/post-close">post</a><a href="/reports/2026-08-21/pre-market">pre</a></body>'; break }}
+        '^/reports/2026-08-21/post-close$' {{ '<body data-market="TW"><div class="professional-report">market-actuals-title</div></body>'; break }}
+        '^/reports/2026-08-21/pre-market$' {{ '<body data-market="TW"><div id="overnight-title"></div></body>'; break }}
+        '^/reports/us$' {{ '<body data-market="US"><a href="/reports/us/2026-08-21/post-close">us</a></body>'; break }}
+        '^/reports/us/2026-08-21/post-close$' {{ '<body data-market="US"><div class="professional-report">AAPL</div></body>'; break }}
+        '^/search\?market=TW&q=2330$' {{ return New-SmokeResponse '<body data-market="TW"><h1>2330</h1></body>' 'https://candidate.example/stock/2330' }}
+        '^/search\?market=US&q=AAPL$' {{ return New-SmokeResponse '<body data-market="US"><h1>AAPL</h1></body>' 'https://candidate.example{final_path}' }}
+        '^/static/app\.(?:css|js)\?v=abcdef123456$' {{ 'asset'; break }}
+        '^/us(?:/.*)?$' {{ '<body data-market="US">AAPL</body>'; break }}
+        '^/stock/AAPL$' {{ '<body data-market="US">AAPL</body>'; break }}
+        '^/(?:health|market|industries|stocks|ask|learn|market-map|stock/2330)$' {{ '<body data-market="TW">2330</body>'; break }}
+        default {{ throw "unexpected smoke request: $key" }}
+    }}
+    return New-SmokeResponse ([string]$content) $Uri
+}}
+$results = @(Invoke-ObservationSmoke -BaseUrl 'https://candidate.example')
+@{{ requests = @($script:Requests); results = $results }} | ConvertTo-Json -Depth 8 -Compress
+"""
+        return subprocess.run(
+            [
+                powershell,
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                harness,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
     def test_path_allowlist_read_is_not_suppressed_by_whatif(self) -> None:
         source = COMMON.read_text(encoding="utf-8")
         path_guard = source[
@@ -558,6 +641,37 @@ $Results -join ';'
         ):
             with self.subTest(contract=contract):
                 self.assertIn(contract, smoke)
+
+    def test_no_traffic_smoke_executes_tw_and_us_search_redirect_contract(self) -> None:
+        completed = self._run_smoke_harness()
+
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+        evidence = json.loads(completed.stdout)
+        self.assertIn(
+            "https://candidate.example/search?market=TW&q=2330",
+            evidence["requests"],
+        )
+        self.assertIn(
+            "https://candidate.example/search?market=US&q=AAPL",
+            evidence["requests"],
+        )
+        search_results = [
+            item for item in evidence["results"]
+            if str(item.get("path", "")).startswith("/search?")
+        ]
+        self.assertEqual(
+            [item["final_url"] for item in search_results],
+            [
+                "https://candidate.example/stock/2330",
+                "https://candidate.example/stock/AAPL",
+            ],
+        )
+
+    def test_no_traffic_smoke_rejects_wrong_search_final_url(self) -> None:
+        completed = self._run_smoke_harness(us_final_path="/us")
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("search final URL", completed.stdout + completed.stderr)
 
     def test_no_traffic_smoke_verifies_revisioned_static_assets(self) -> None:
         source = DEPLOY.read_text(encoding="utf-8")

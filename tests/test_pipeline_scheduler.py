@@ -757,6 +757,46 @@ if ($receipts.Count -ne 1 -or $receipts[0].failure_reason -ne 'wait_failed' -or 
                 self.assertTrue(mutex["ever_acquired"])
                 self.assertTrue(mutex["released"])
 
+    def test_us_pipeline_wrappers_preserve_native_exit_73_after_failure_logging(self):
+        scripts = Path(__file__).parents[1] / "scripts"
+        helper = scripts / "us_pipeline_native.ps1"
+        wrappers = (
+            scripts / "run_us_post_close_pipeline.ps1",
+            scripts / "run_us_pre_market_pipeline.ps1",
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            probe = Path(temporary) / "exit-73.cmd"
+            probe.write_text("@exit /b 73\n", encoding="ascii")
+            escaped_helper = str(helper.resolve()).replace("'", "''")
+            escaped_probe = str(probe.resolve()).replace("'", "''")
+            harness = (
+                f". '{escaped_helper}'; "
+                f"Invoke-AbsorbUsPipelineNativeCommand -PythonExe '{escaped_probe}' "
+                "-Arguments @() -FailureLabel 'US probe'"
+            )
+            completed = subprocess.run(
+                [
+                    "powershell.exe",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-Command",
+                    harness,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+
+        self.assertEqual(completed.returncode, 73, completed.stdout + completed.stderr)
+        self.assertIn("US probe failed with exit code 73", completed.stderr)
+        for wrapper in wrappers:
+            with self.subTest(wrapper=wrapper.name):
+                source = wrapper.read_text(encoding="utf-8")
+                self.assertIn("us_pipeline_native.ps1", source)
+                self.assertIn("Invoke-AbsorbUsPipelineNativeCommand", source)
+
     def test_hidden_vbs_preserves_production_top_level_exit_code_when_available(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

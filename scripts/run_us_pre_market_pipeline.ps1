@@ -9,6 +9,7 @@ if ($DataRoot -notin @('D:\AbsorbData', 'D:\StockPapiData')) { throw 'Data root 
 
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 . (Join-Path $PSScriptRoot 'python_runtime.ps1')
+. (Join-Path $PSScriptRoot 'us_pipeline_native.ps1')
 $PythonExe = Resolve-AbsorbPythonExecutable -RepoRoot $RepoRoot
 Assert-AbsorbPythonRuntime -PythonExe $PythonExe -RepoRoot $RepoRoot
 $env:PYTHONPATH = [string]::Join(
@@ -31,14 +32,14 @@ print(cur.isoformat())
 }
 
 Write-Output "Running US PreMarket observation pipeline for $TargetDate..."
-& $PythonExe -m stock_papi.batch.us_pre_market_cli `
-    --root $DataRoot `
-    --target-market-date $TargetDate
-
-if ($LASTEXITCODE -ne 0) {
-    Write-Error "US PreMarket pipeline failed with exit code $LASTEXITCODE"
-    exit $LASTEXITCODE
-}
+Invoke-AbsorbUsPipelineNativeCommand `
+    -PythonExe $PythonExe `
+    -Arguments @(
+        '-m', 'stock_papi.batch.us_pre_market_cli',
+        '--root', $DataRoot,
+        '--target-market-date', $TargetDate
+    ) `
+    -FailureLabel 'US PreMarket pipeline'
 
 Write-Output "US PreMarket observation pipeline completed successfully for $TargetDate."
 
