@@ -224,6 +224,7 @@ function updateAccountInterface(data) {
 }
 
 async function loadAccountState() {
+  if (document.body.dataset.accountSession !== "present") return;
   try {
     const response = await fetch("/api/account/state", { headers: { Accept: "application/json" } });
     if (!response.ok) return;
@@ -435,6 +436,27 @@ function initStockChart() {
 }
 
 document.addEventListener("click", (event) => {
+  const reportRetry = event.target.closest("[data-report-retry]");
+  if (reportRetry) {
+    window.location.reload();
+    return;
+  }
+
+  const reportFilter = event.target.closest("[data-report-filter]");
+  if (reportFilter) {
+    const controls = reportFilter.closest("[data-report-filters]");
+    const selectedType = reportFilter.dataset.reportFilter;
+    controls.querySelectorAll("[data-report-filter]").forEach((item) => {
+      const active = item === reportFilter;
+      item.classList.toggle("active", active);
+      item.setAttribute("aria-pressed", String(active));
+    });
+    document.querySelectorAll("[data-report-type]").forEach((lane) => {
+      lane.hidden = selectedType !== "all" && lane.dataset.reportType !== selectedType;
+    });
+    return;
+  }
+
   const watchlist = event.target.closest("[data-watchlist-toggle]");
   if (watchlist) {
     toggleWatchlist(watchlist);

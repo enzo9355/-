@@ -18,32 +18,51 @@
   </header>
 
   <section class="panel" aria-labelledby="report-history-title">
-    <div class="section-heading">
+    <div class="report-history-head">
       <div>
         <p class="eyebrow">{{ 'US MARKET' if is_us else 'TW INDUSTRY' }}</p>
         <h2 id="report-history-title">歷史報告</h2>
+        <p>盤前與盤後分流排列，依發布時間由新到舊閱讀。</p>
       </div>
+      {% if reports_v2 %}
+      <div class="report-filters" data-report-filters role="group" aria-label="篩選報告類型">
+        <button class="active" type="button" data-report-filter="all" aria-pressed="true">全部</button>
+        <button type="button" data-report-filter="pre_market" aria-pressed="false">盤前</button>
+        <button type="button" data-report-filter="post_close" aria-pressed="false">盤後</button>
+      </div>
+      {% endif %}
     </div>
     {% if reports_v2 %}
-      <div class="report-list">
-        {% for report in reports_v2 %}
-          <article class="report-card">
-            <div>
-              <p class="eyebrow">{{ {'post_close': '盤後觀察', 'pre_market': '盤前風險更新'}.get(report.report_type, report.report_type) }}</p>
-              <h3>{{ report.title }}</h3>
-              <p>{{ report.summary|join('；') }}</p>
-              <p class="muted small">資料基準日 {{ report.source_market_date }}｜適用交易日 {{ report.applicable_trading_date }}（下一交易日）</p>
-            </div>
-            <div class="report-actions">
-              {% if report.report_type == 'weekly_model' %}
-                <a class="button" href="{{ url_for('weekly_report_page', week_id=report.week_id) }}">閱讀週報</a>
-              {% elif report.report_type == 'post_close' %}
-                <a class="button" href="{{ url_for(post_close_endpoint, trading_date=report.source_market_date) }}">閱讀盤後觀察</a>
-              {% else %}
-                <a class="button" href="{{ url_for(pre_market_endpoint, trading_date=report.applicable_trading_date) }}">閱讀盤前更新</a>
-              {% endif %}
-            </div>
-          </article>
+      <div class="report-lanes" data-report-lanes>
+        {% for report_type, lane_title, lane_description in [('pre_market', '盤前風險更新', '開盤前確認隔夜訊號與資料限制'), ('post_close', '盤後市場觀察', '收盤後整理市場、產業與異常事件')] %}
+        {% set lane_reports = reports_v2|selectattr('report_type', 'equalto', report_type)|list %}
+        <section class="report-lane" data-report-type="{{ report_type }}" aria-labelledby="report-lane-{{ report_type }}">
+          <header class="report-lane-header">
+            <div><h3 id="report-lane-{{ report_type }}">{{ lane_title }}</h3><p>{{ lane_description }}</p></div>
+            <span>{{ lane_reports|length }} 份</span>
+          </header>
+          <div class="report-lane-list">
+            {% for report in lane_reports %}
+            <article class="report-card report-card-{{ report_type }}">
+              <div>
+                <p class="report-date">{{ report.applicable_trading_date if report_type == 'pre_market' else report.source_market_date }}</p>
+                <h3>{{ report.title }}</h3>
+                <p class="report-summary">{{ report.summary|join('；') }}</p>
+                <p class="muted small">資料基準日 {{ report.source_market_date }}｜適用交易日 {{ report.applicable_trading_date }}</p>
+              </div>
+              <div class="report-actions">
+                {% if report_type == 'post_close' %}
+                  <a class="button button-secondary" href="{{ url_for(post_close_endpoint, trading_date=report.source_market_date) }}">閱讀盤後觀察</a>
+                {% else %}
+                  <a class="button button-secondary" href="{{ url_for(pre_market_endpoint, trading_date=report.applicable_trading_date) }}">閱讀盤前更新</a>
+                {% endif %}
+              </div>
+            </article>
+            {% else %}
+            <div class="empty-state" role="status"><p>目前沒有已通過發布驗證的{{ lane_title }}。</p></div>
+            {% endfor %}
+          </div>
+        </section>
         {% endfor %}
       </div>
     {% endif %}

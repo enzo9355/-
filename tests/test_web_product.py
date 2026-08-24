@@ -178,6 +178,18 @@ class WebProductTests(unittest.TestCase):
         self.assertIn(".market-switch a{display:grid;min-height:44px", css)
         self.assertIn(".quick-ask-backdrop[hidden]{display:none}", css)
         self.assertIn(".quick-ask-header button{display:grid;width:44px;height:44px", css)
+        self.assertIn("--command-content-max:1760px", css)
+        self.assertIn("--command-muted:#536575", css)
+        self.assertIn(".evidence-canvas{", css)
+        self.assertIn("background:var(--command-accent-surface)", css)
+        self.assertIn(".brand-wordmark:hover{", css)
+        self.assertIn("rotate(-1.5deg)", css)
+        self.assertIn("@view-transition{navigation:auto}", css)
+        self.assertIn("button,input,select,textarea{font:inherit}", css)
+        self.assertIn(".button{display:inline-flex", css)
+        self.assertIn(".command-metrics{grid-column:1/-1;grid-template-columns:repeat(4,minmax(0,1fr))", css)
+        self.assertNotIn("border-left:4px", css.replace(" ", ""))
+        self.assertNotIn("border-top:3px", css.replace(" ", ""))
         version = re.search(r'/static/app\.css\?v=([0-9a-f]{12})', html)
         self.assertIsNotNone(version)
         self.assertIn(f'/static/app.js?v={version.group(1)}', html)
@@ -314,6 +326,28 @@ class WebProductTests(unittest.TestCase):
             with self.subTest(marker=marker):
                 self.assertIn(marker, script)
         self.assertNotIn(".innerHTML", script)
+
+    def test_public_pages_only_request_private_account_state_when_session_cookie_exists(self):
+        html = stock_app.app.test_client().get("/dashboard").get_data(as_text=True)
+        script = Path(stock_app.app.static_folder, "app.js").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn('data-account-session="anonymous"', html)
+        self.assertIn('document.body.dataset.accountSession !== "present"', script)
+
+    def test_report_filters_and_retry_control_have_progressive_enhancement(self):
+        script = Path(stock_app.app.static_folder, "app.js").read_text(
+            encoding="utf-8"
+        )
+        unavailable = Path("templates/report_unavailable.html").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("[data-report-filter]", script)
+        self.assertIn("[data-report-type]", script)
+        self.assertIn("data-report-retry", unavailable)
+        self.assertIn("window.location.reload()", script)
 
     def test_dashboard_has_route_based_section_navigation(self):
         html = stock_app.app.test_client().get(

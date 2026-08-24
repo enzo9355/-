@@ -24,7 +24,7 @@
   <script type="application/ld+json">{"@context":"https://schema.org","@type":"SoftwareApplication","name":"ABSORB","applicationCategory":"FinanceApplication","operatingSystem":"Web, LINE","description":"已驗證市場觀察"}</script>
   {% block head %}{% endblock %}
 </head>
-<body>
+<body data-account-session="{{ 'present' if request.cookies.get('stock_papi_session') else 'anonymous' }}">
   {% set endpoint = request.endpoint or '' %}
   {% set dashboard_active = endpoint == 'dashboard_page' %}
   {% set market_active = endpoint == 'market_page' %}
