@@ -1,10 +1,34 @@
 import hashlib
+import json
 import unittest
 
+from reporting.exceptions import ReportWebError
 from stock_papi.repositories.report_store import load_report_index, load_report_pdf
 
 
 class ReportRepositoryTests(unittest.TestCase):
+    def test_v2_index_market_must_match_requested_object(self):
+        for requested_market, document_market in (("US", "TW"), ("TW", "US")):
+            with self.subTest(
+                requested_market=requested_market,
+                document_market=document_market,
+            ):
+                content = json.dumps({
+                    "schema_version": 2,
+                    "kind": "absorb-report-index",
+                    "market": document_market,
+                    "updated_at": "2026-08-24T12:00:00Z",
+                    "reports": [],
+                }).encode("utf-8")
+
+                with self.assertRaises(ReportWebError):
+                    load_report_index(
+                        load_object=lambda *_: content,
+                        max_bytes=1234,
+                        version="v2",
+                        market=requested_market,
+                    )
+
     def test_v2_index_uses_fixed_allowlisted_prefix(self):
         calls = []
         self.assertIsNone(

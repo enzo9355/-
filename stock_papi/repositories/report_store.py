@@ -20,7 +20,11 @@ def load_report_index(*, load_object, max_bytes, version="v1", market="TW"):
     return (
         None
         if content is None
-        else validate_report_index(content, expected_version=int(version[1:]))
+        else validate_report_index(
+            content,
+            expected_version=int(version[1:]),
+            expected_market=market,
+        )
     )
 
 

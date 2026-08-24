@@ -336,7 +336,9 @@ def _publish_report_v2_impl(
     previous_index = index_path.read_bytes() if index_path.exists() else None
     if previous_index is not None:
         try:
-            reports = validate_report_index(previous_index, settings)
+            reports = validate_report_index(
+                previous_index, settings, expected_market=market
+            )
         except Exception as exc:
             raise ReportPublishError("existing v2 report index is invalid") from exc
     else:
@@ -663,7 +665,9 @@ def publish_report(
     index_path = publish / "index-TW.json"
     if index_path.exists():
         try:
-            reports = validate_report_index(index_path.read_bytes(), settings)
+            reports = validate_report_index(
+                index_path.read_bytes(), settings, expected_market="TW"
+            )
         except Exception as exc:
             raise ReportPublishError("existing report index is invalid") from exc
     else:

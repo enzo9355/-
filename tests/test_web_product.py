@@ -256,6 +256,64 @@ class WebProductTests(unittest.TestCase):
 
     @patch.object(stock_app, "_published_dashboard_snapshot")
     @patch.object(stock_app, "_published_report_index_v2")
+    def test_tw_dashboard_omits_explicitly_mismatched_daily_card(
+        self, load_index, load_dashboard
+    ):
+        load_dashboard.return_value = observation_dashboard()
+        load_index.return_value = [{
+            "market": "US",
+            "report_type": "post_close",
+            "source_market_date": "2026-08-19",
+            "applicable_trading_date": "2026-08-20",
+            "title": "MISMATCHED US DAILY CARD",
+            "summary": ["MISMATCHED US SUMMARY"],
+        }]
+
+        response = stock_app.app.test_client().get("/dashboard")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        self.assertNotIn("MISMATCHED US DAILY CARD", html)
+        self.assertNotIn("MISMATCHED US SUMMARY", html)
+        self.assertNotIn("/reports/2026-08-19/post-close", html)
+
+    @patch.object(stock_app, "_published_dashboard_snapshot")
+    @patch.object(stock_app, "_published_report_index_v2")
+    def test_data_health_uses_one_utc_instant_for_both_markets(
+        self, load_index, load_dashboard
+    ):
+        load_dashboard.return_value = {
+            "market": "TW",
+            "observation_as_of": "2026-08-24",
+        }
+
+        def reports_for(market="TW"):
+            date = "2026-08-24" if market == "TW" else "2026-08-23"
+            return [{
+                "market": market,
+                "report_type": "post_close",
+                "source_market_date": date,
+                "applicable_trading_date": date,
+            }]
+
+        load_index.side_effect = reports_for
+        instants = (
+            dt.datetime(2026, 8, 24, 3, 30, tzinfo=dt.timezone.utc),
+            dt.datetime(2026, 8, 24, 16, 30, tzinfo=dt.timezone.utc),
+        )
+        with patch.object(
+            web_routes.system, "_utc_now", side_effect=instants
+        ) as clock:
+            response = stock_app.app.test_client().get("/health/data")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["markets"]["TW"]["status"], "current")
+        self.assertEqual(payload["markets"]["US"]["status"], "current")
+        self.assertEqual(clock.call_count, 1)
+
+    @patch.object(stock_app, "_published_dashboard_snapshot")
+    @patch.object(stock_app, "_published_report_index_v2")
     def test_data_health_keeps_service_ok_separate_from_stale_market_data(
         self, load_index, load_dashboard
     ):

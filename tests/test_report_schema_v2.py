@@ -33,6 +33,32 @@ def metadata(report_type):
 
 
 class ReportSchemaV2Tests(unittest.TestCase):
+    def test_publisher_rejects_existing_index_with_wrong_top_level_market(self):
+        for published_market, wrong_market in (("TW", "US"), ("US", "TW")):
+            with self.subTest(
+                published_market=published_market,
+                wrong_market=wrong_market,
+            ), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                document = metadata("pre_market")
+                document["market"] = published_market
+                publish_report_v2(root, document)
+                index_path = (
+                    root
+                    / "publish"
+                    / "reports"
+                    / "v2"
+                    / f"index-{published_market}.json"
+                )
+                index = json.loads(index_path.read_text(encoding="utf-8"))
+                index["market"] = wrong_market
+                index_path.write_text(
+                    json.dumps(index, ensure_ascii=False), encoding="utf-8"
+                )
+
+                with self.assertRaises(ReportPublishError):
+                    publish_report_v2(root, document)
+
     def test_v1_index_maps_explicitly_to_post_close(self):
         pdf = b"%PDF v1"
         digest = hashlib.sha256(pdf).hexdigest()

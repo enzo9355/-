@@ -190,6 +190,7 @@ def validate_report_index(
     config: ReportConfig | None = None,
     *,
     expected_version: int | None = None,
+    expected_market: str | None = None,
 ) -> list[dict]:
     """同時接受嚴格驗證的 v1 與 v2 index。"""
     settings = config or ReportConfig()
@@ -201,6 +202,11 @@ def validate_report_index(
         raise ReportWebError("報告索引格式不合法") from exc
     if not isinstance(document, dict):
         raise ReportWebError("報告索引必須是 JSON object")
+    if (
+        expected_market is not None
+        and document.get("market") != expected_market
+    ):
+        raise ReportWebError("報告索引市場不符")
     version = document.get("schema_version")
     if expected_version is not None and version != expected_version:
         raise ReportWebError("報告索引 schema 版本不符")

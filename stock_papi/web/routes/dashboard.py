@@ -22,6 +22,11 @@ def register_dashboard_page(
             reports = load_report_index_v2(market="TW") or []
         except ReportWebError:
             reports = []
+        reports = [
+            item
+            for item in reports
+            if isinstance(item, dict) and item.get("market", "TW") == "TW"
+        ]
         daily_cards = {
             report_type: next(
                 (item for item in reports if item.get("report_type") == report_type),

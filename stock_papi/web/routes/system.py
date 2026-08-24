@@ -144,7 +144,13 @@ def create_data_freshness_loader(
             next_session=None,
         )
 
-    def load(market, *, reports=_UNSET, snapshot=_UNSET):
+    def load(
+        market,
+        *,
+        reports=_UNSET,
+        snapshot=_UNSET,
+        reference_now=_UNSET,
+    ):
         if market not in _MARKET_TIMEZONES:
             return unavailable()
 
@@ -180,7 +186,12 @@ def create_data_freshness_loader(
                 applicable = None
 
         try:
-            reference = market_local_date(market, now=(now or _utc_now)())
+            instant = (
+                (now or _utc_now)()
+                if reference_now is _UNSET
+                else reference_now
+            )
+            reference = market_local_date(market, now=instant)
         except Exception:
             return unavailable(source, applicable)
 
@@ -195,13 +206,22 @@ def create_data_freshness_loader(
     return load
 
 
-def register_system_routes(app, *, search_stock, load_data_freshness):
+def register_system_routes(
+    app, *, search_stock, load_data_freshness, now=None
+):
     def healthz():
         return "ok", 200
 
     def data_health():
+        try:
+            reference_now = (now or _utc_now)()
+        except Exception:
+            reference_now = None
         markets = {
-            market: load_data_freshness(market) for market in ("TW", "US")
+            market: load_data_freshness(
+                market, reference_now=reference_now
+            )
+            for market in ("TW", "US")
         }
         return jsonify({"service": {"status": "ok"}, "markets": markets})
 
