@@ -184,6 +184,9 @@ function ConvertTo-CanonicalJsonValue {
     param($Value)
 
     if ($null -eq $Value) { return $null }
+    if ($Value -is [string] -or $Value -is [int] -or $Value -is [long] -or $Value -is [double] -or $Value -is [bool] -or $Value -is [decimal]) {
+        return $Value
+    }
     if ($Value -is [Collections.IDictionary]) {
         $Normalized = [ordered]@{}
         foreach ($Key in @($Value.Keys | Sort-Object)) {
@@ -1152,9 +1155,20 @@ function Assert-ObservationReportIndexCatchUpDelta {
         throw 'TargetDate report index entry is not bound to the promoted report'
     }
 
+    function Normalize-ReportIndexEntryKey {
+        param($Entry)
+        $Doc = ConvertTo-CanonicalJsonValue -Value $Entry
+        if ($Doc -is [Collections.IDictionary]) {
+            if (-not $Doc.Contains("market") -or $null -eq $Doc["market"]) {
+                $Doc["market"] = "TW"
+            }
+        }
+        return (Get-CanonicalJson -Value $Doc)
+    }
+
     $ExpectedCounts = @{}
     foreach ($Entry in $CapturedEntries) {
-        $Key = Get-CanonicalJson -Value $Entry
+        $Key = Normalize-ReportIndexEntryKey -Entry $Entry
         $ExpectedCounts[$Key] = 1 + [int]($ExpectedCounts[$Key])
     }
     $ActualCounts = @{}
@@ -1165,7 +1179,7 @@ function Assert-ObservationReportIndexCatchUpDelta {
             [string]$_.source_market_date -eq $TargetDate
         )
     })) {
-        $Key = Get-CanonicalJson -Value $Entry
+        $Key = Normalize-ReportIndexEntryKey -Entry $Entry
         $ActualCounts[$Key] = 1 + [int]($ActualCounts[$Key])
     }
     if ($ExpectedCounts.Count -ne $ActualCounts.Count) {
