@@ -133,6 +133,7 @@ class ConversationOrchestrator:
     def handle(
         self, *, principal: str, question: str, access="public",
         market_context: str | None = None, page_context: str | None = None,
+        symbol_context: str | None = None,
     ) -> ConversationAnswer:
         correlation_id = secrets.token_hex(8)
         self.metrics.increment("natural_language_requests")
@@ -163,6 +164,23 @@ class ConversationOrchestrator:
 
         entities = resolve_entities(question, self.search_stock)
         page_market = market_context if market_context in {"TW", "US"} else None
+
+        page_stock_entity = None
+        if page_context == "stock" and isinstance(symbol_context, str) and symbol_context.strip():
+            try:
+                code, name = self.search_stock(symbol_context.strip())
+            except Exception:
+                code, name = None, None
+            if code:
+                code = str(code).upper()
+                canonical_market = "TW" if code == "TAIEX" or code.isdigit() else "US"
+                if page_market is None or canonical_market == page_market:
+                    page_stock_entity = {
+                        "market": canonical_market,
+                        "symbol": code,
+                        "name": str(name or code),
+                    }
+
         page_changed = False
         if entities:
             context.current_market = entities[0]["market"]
@@ -174,6 +192,13 @@ class ConversationOrchestrator:
             context.comparison_symbols = tuple(
                 item["symbol"] for item in entities
             )
+        elif page_stock_entity is not None:
+            context.current_market = page_stock_entity["market"]
+            context.current_entity_type = "stock"
+            context.current_symbol = page_stock_entity["symbol"]
+            context.current_industry_id = None
+            context.comparison_symbols = (page_stock_entity["symbol"],)
+            entities = [page_stock_entity]
         elif page_market is not None:
             page_changed = (
                 context.last_page_market is not None
@@ -193,9 +218,9 @@ class ConversationOrchestrator:
                 context.current_entity_type = "market"
         if page_market is not None:
             context.last_page_market = page_market
-        if page_changed:
-            # A real page transition is authoritative even when a pronoun-only
-            # question returns before the normal end-of-request save.
+        if page_changed or page_stock_entity is not None or entities:
+            # An explicit entity, page entity, or real page transition is authoritative
+            # even when a pronoun-only question returns before the normal end-of-request save.
             self.context_store.save(principal, context)
         if not entities and context.comparison_symbols and "第二檔" in question:
             symbol = context.comparison_symbols[1] if len(context.comparison_symbols) > 1 else None

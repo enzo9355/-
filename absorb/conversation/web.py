@@ -1,3 +1,4 @@
+import re
 import secrets
 
 from flask import jsonify, make_response, request
@@ -6,6 +7,7 @@ from absorb.conversation.renderers import render_web
 
 
 COOKIE_NAME = "absorb_conversation"
+_SYMBOL_PATTERN = re.compile(r"^[A-Za-z0-9.-]{1,12}$")
 
 
 def register_conversation_routes(app, *, converse, resolve_authenticated_identity):
@@ -13,7 +15,7 @@ def register_conversation_routes(app, *, converse, resolve_authenticated_identit
         if not request.is_json:
             return _private(jsonify({"error": "JSON body required"}), 415)
         payload = request.get_json(silent=True)
-        allowed_fields = {"question", "market", "page"}
+        allowed_fields = {"question", "market", "page", "symbol"}
         if (
             not isinstance(payload, dict)
             or "question" not in payload
@@ -22,6 +24,7 @@ def register_conversation_routes(app, *, converse, resolve_authenticated_identit
             return _private(jsonify({"error": "invalid request"}), 400)
         market = payload.get("market", "TW")
         page = payload.get("page", "home")
+        raw_symbol = payload.get("symbol")
         if not all(
             isinstance(value, str)
             for value in (payload["question"], market, page)
@@ -31,6 +34,12 @@ def register_conversation_routes(app, *, converse, resolve_authenticated_identit
             "home", "market", "industries", "stocks", "reports", "stock", "ask", "learn"
         }:
             return _private(jsonify({"error": "invalid context"}), 400)
+        symbol = None
+        if raw_symbol is not None:
+            if not isinstance(raw_symbol, str) or not _SYMBOL_PATTERN.fullmatch(raw_symbol.strip()):
+                return _private(jsonify({"error": "invalid request"}), 400)
+            if page == "stock":
+                symbol = raw_symbol.strip()
         identity = resolve_authenticated_identity(request)
         cookie_value = request.cookies.get(COOKIE_NAME, "")
         set_cookie = False
@@ -43,7 +52,7 @@ def register_conversation_routes(app, *, converse, resolve_authenticated_identit
             principal, access = f"web:{cookie_value}", "public"
         answer = converse(
             principal=principal, question=payload["question"], access=access,
-            market_context=market, page_context=page,
+            market_context=market, page_context=page, symbol_context=symbol,
         )
         response = _private(jsonify(render_web(answer)))
         if set_cookie:

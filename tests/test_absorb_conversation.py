@@ -670,6 +670,231 @@ class AbsorbConversationTests(unittest.TestCase):
         self.assertIn("相對強弱", answer.text)
         self.assertEqual(provider.answer_count, 1)
 
+    def test_fresh_stock_page_pronoun_resolves_page_symbol_aapl(self):
+        def search_multi(query):
+            mapping = {
+                "2330": ("2330", "台積電"),
+                "台積電": ("2330", "台積電"),
+                "AAPL": ("AAPL", "Apple"),
+                "NVDA": ("NVDA", "NVIDIA"),
+            }
+            return mapping.get(query.upper(), (None, None))
+
+        store = MemoryContextStore()
+        provider = FakeProvider(
+            calls=[{"name": "get_stock_analysis", "arguments": {"market": "US", "symbol": "AAPL"}}],
+            answer="Apple 目前表現穩健。",
+        )
+        orchestrator = ConversationOrchestrator(
+            context_store=store,
+            tool_registry=build_registry(analyze=lambda symbol: {**stock_data(symbol), "market": "US", "code": "AAPL", "name": "Apple"}),
+            search_stock=search_multi,
+            provider=provider,
+        )
+        answer = orchestrator.handle(
+            principal="web:fresh_session_token_1",
+            question="這檔現在怎麼樣？",
+            market_context="US",
+            page_context="stock",
+            symbol_context="AAPL",
+        )
+        self.assertEqual(provider.plan_count, 1)
+        saved = store.get("web:fresh_session_token_1")
+        self.assertEqual(saved.current_market, "US")
+        self.assertEqual(saved.current_symbol, "AAPL")
+        self.assertIn("Apple", answer.text)
+
+    def test_fresh_stock_page_pronoun_resolves_page_symbol_2330(self):
+        def search_multi(query):
+            mapping = {
+                "2330": ("2330", "台積電"),
+                "台積電": ("2330", "台積電"),
+            }
+            return mapping.get(query.upper(), (None, None))
+
+        store = MemoryContextStore()
+        provider = FakeProvider(
+            calls=[{"name": "get_stock_analysis", "arguments": {"market": "TW", "symbol": "2330"}}],
+            answer="台積電均線多頭排列。",
+        )
+        orchestrator = ConversationOrchestrator(
+            context_store=store,
+            tool_registry=build_registry(analyze=lambda symbol: stock_data(symbol)),
+            search_stock=search_multi,
+            provider=provider,
+        )
+        answer = orchestrator.handle(
+            principal="web:fresh_session_token_2",
+            question="這檔今天如何？",
+            market_context="TW",
+            page_context="stock",
+            symbol_context="2330",
+        )
+        self.assertEqual(provider.plan_count, 1)
+        saved = store.get("web:fresh_session_token_2")
+        self.assertEqual(saved.current_market, "TW")
+        self.assertEqual(saved.current_symbol, "2330")
+        self.assertIn("台積電", answer.text)
+
+    def test_prior_aapl_memory_overridden_when_navigating_to_nvda(self):
+        def search_multi(query):
+            mapping = {
+                "AAPL": ("AAPL", "Apple"),
+                "NVDA": ("NVDA", "NVIDIA"),
+            }
+            return mapping.get(query.upper(), (None, None))
+
+        store = MemoryContextStore()
+        provider = FakeProvider(
+            calls=[{"name": "get_stock_analysis", "arguments": {"market": "US", "symbol": "NVDA"}}],
+            answer="NVIDIA 動能強勁。",
+        )
+        orchestrator = ConversationOrchestrator(
+            context_store=store,
+            tool_registry=build_registry(analyze=lambda symbol: {**stock_data(symbol), "market": "US", "code": symbol, "name": symbol}),
+            search_stock=search_multi,
+            provider=provider,
+        )
+        # 1. Establish AAPL in memory
+        orchestrator.handle(
+            principal="web:session_navigate_12345",
+            question="這檔怎麼樣？",
+            market_context="US",
+            page_context="stock",
+            symbol_context="AAPL",
+        )
+        self.assertEqual(store.get("web:session_navigate_12345").current_symbol, "AAPL")
+
+        # 2. Navigate to /stock/NVDA and ask "這檔" -> NVDA must win!
+        answer = orchestrator.handle(
+            principal="web:session_navigate_12345",
+            question="這檔怎麼樣？",
+            market_context="US",
+            page_context="stock",
+            symbol_context="NVDA",
+        )
+        saved = store.get("web:session_navigate_12345")
+        self.assertEqual(saved.current_symbol, "NVDA")
+        self.assertIn("NVIDIA", answer.text)
+
+    def test_explicit_question_entity_2330_overrides_aapl_page_context(self):
+        def search_multi(query):
+            mapping = {
+                "2330": ("2330", "台積電"),
+                "AAPL": ("AAPL", "Apple"),
+            }
+            return mapping.get(query.upper(), (None, None))
+
+        store = MemoryContextStore()
+        provider = FakeProvider(
+            calls=[{"name": "get_stock_analysis", "arguments": {"market": "TW", "symbol": "2330"}}],
+            answer="台積電表現優於大盤。",
+        )
+        orchestrator = ConversationOrchestrator(
+            context_store=store,
+            tool_registry=build_registry(analyze=lambda symbol: stock_data(symbol)),
+            search_stock=search_multi,
+            provider=provider,
+        )
+        # On /stock/AAPL, ask explicit "2330 怎麼樣？" -> 2330/TW wins
+        answer = orchestrator.handle(
+            principal="web:session_override_12345",
+            question="2330 怎麼樣？",
+            market_context="US",
+            page_context="stock",
+            symbol_context="AAPL",
+        )
+        saved = store.get("web:session_override_12345")
+        self.assertEqual(saved.current_market, "TW")
+        self.assertEqual(saved.current_symbol, "2330")
+
+    def test_explicit_question_entity_aapl_overrides_2330_page_context(self):
+        def search_multi(query):
+            mapping = {
+                "2330": ("2330", "台積電"),
+                "AAPL": ("AAPL", "Apple"),
+            }
+            return mapping.get(query.upper(), (None, None))
+
+        store = MemoryContextStore()
+        provider = FakeProvider(
+            calls=[{"name": "get_stock_analysis", "arguments": {"market": "US", "symbol": "AAPL"}}],
+            answer="Apple 目前表現穩健。",
+        )
+        orchestrator = ConversationOrchestrator(
+            context_store=store,
+            tool_registry=build_registry(analyze=lambda symbol: {**stock_data(symbol), "market": "US", "code": "AAPL", "name": "Apple"}),
+            search_stock=search_multi,
+            provider=provider,
+        )
+        # On /stock/2330, ask explicit "AAPL 怎麼樣？" -> AAPL/US wins
+        answer = orchestrator.handle(
+            principal="web:session_override_67890",
+            question="AAPL 怎麼樣？",
+            market_context="TW",
+            page_context="stock",
+            symbol_context="2330",
+        )
+        saved = store.get("web:session_override_67890")
+        self.assertEqual(saved.current_market, "US")
+        self.assertEqual(saved.current_symbol, "AAPL")
+
+    def test_us_stock_page_symbol_with_hyphen_brk_b(self):
+        def search_multi(query):
+            mapping = {
+                "BRK-B": ("BRK-B", "Berkshire Hathaway"),
+            }
+            return mapping.get(query.upper(), (None, None))
+
+        store = MemoryContextStore()
+        provider = FakeProvider(
+            calls=[{"name": "get_stock_analysis", "arguments": {"market": "US", "symbol": "BRK-B"}}],
+            answer="Berkshire Hathaway 表現穩健。",
+        )
+        orchestrator = ConversationOrchestrator(
+            context_store=store,
+            tool_registry=build_registry(analyze=lambda symbol: {**stock_data(symbol), "market": "US", "code": "BRK-B", "name": "Berkshire"}),
+            search_stock=search_multi,
+            provider=provider,
+        )
+        answer = orchestrator.handle(
+            principal="web:session_hyphen_123456",
+            question="這檔現在如何？",
+            market_context="US",
+            page_context="stock",
+            symbol_context="BRK-B",
+        )
+        saved = store.get("web:session_hyphen_123456")
+        self.assertEqual(saved.current_market, "US")
+        self.assertEqual(saved.current_symbol, "BRK-B")
+
+    def test_non_stock_page_ignores_injected_page_symbol(self):
+        def search_multi(query):
+            mapping = {
+                "2330": ("2330", "台積電"),
+            }
+            return mapping.get(query.upper(), (None, None))
+
+        store = MemoryContextStore()
+        provider = FakeProvider(calls=[], answer="大盤目前平穩。")
+        orchestrator = ConversationOrchestrator(
+            context_store=store,
+            tool_registry=build_registry(analyze=lambda symbol: stock_data(symbol)),
+            search_stock=search_multi,
+            provider=provider,
+        )
+        # On market overview page, symbol_context="2330" must NOT establish stock context
+        answer = orchestrator.handle(
+            principal="web:session_nonstock_1234",
+            question="這檔怎麼樣？",
+            market_context="TW",
+            page_context="market",
+            symbol_context="2330",
+        )
+        self.assertIn("哪一檔", answer.text)
+        saved = store.get("web:session_nonstock_1234")
+        self.assertIsNone(saved.current_symbol)
+
 
 if __name__ == "__main__":
     unittest.main()

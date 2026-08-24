@@ -259,14 +259,18 @@ function initConversations() {
       const headers = { Accept: "application/json", "Content-Type": "application/json" };
       if (window.absorbAccount?.csrf_token) headers["X-CSRF-Token"] = window.absorbAccount.csrf_token;
       try {
+        const payload = {
+          question,
+          market: panel.dataset.marketContext,
+          page: panel.dataset.pageContext,
+        };
+        if (panel.dataset.symbolContext) {
+          payload.symbol = panel.dataset.symbolContext;
+        }
         const response = await fetch(panel.dataset.conversationEndpoint, {
           method: "POST",
           headers,
-          body: JSON.stringify({
-            question,
-            market: panel.dataset.marketContext,
-            page: panel.dataset.pageContext,
-          }),
+          body: JSON.stringify(payload),
         });
         const data = await response.json();
         appendConversationMessage(log, "assistant", response.ok ? data.text : "自然語言分析暫時無法使用，請稍後再試。");

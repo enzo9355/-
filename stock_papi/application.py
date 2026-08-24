@@ -997,7 +997,10 @@ def _observation_signed(value, digits=2, suffix="%"):
     return f"{float(value):+.{digits}f}{suffix}"
 
 
-def _observation_conversation(*, question, access, market_context="TW", page_context="home"):
+def _observation_conversation(
+    *, question, access, market_context="TW", page_context="home",
+    symbol_context=None,
+):
     try:
         question = validate_question(question)
     except InputRejected as exc:
@@ -1025,6 +1028,14 @@ def _observation_conversation(*, question, access, market_context="TW", page_con
         )
 
     entities = resolve_entities(question, _conversation_search_stock)
+    if not entities and page_context == "stock" and symbol_context:
+        code, name = _conversation_search_stock(symbol_context.strip())
+        if code:
+            code = str(code).upper()
+            canonical_market = "TW" if code == "TAIEX" or code.isdigit() else "US"
+            if market_context in (None, canonical_market):
+                entities = [{"market": canonical_market, "symbol": code, "name": name or code}]
+
     if entities:
         entity = entities[0]
         symbol = entity["symbol"]
@@ -1130,12 +1141,13 @@ def _observation_conversation(*, question, access, market_context="TW", page_con
 
 def run_absorb_conversation(
     *, principal, question, access="public", action_executor=None,
-    market_context="TW", page_context="home",
+    market_context="TW", page_context="home", symbol_context=None,
 ):
     if prediction_capability.mode == "research":
         return _observation_conversation(
             question=question, access=access,
             market_context=market_context, page_context=page_context,
+            symbol_context=symbol_context,
         )
     state_lookup = (lambda: _conversation_user_state(principal)) if access == "authenticated" else None
     orchestrator = ConversationOrchestrator(
@@ -1156,11 +1168,13 @@ def run_absorb_conversation(
     return orchestrator.handle(
         principal=principal, question=question, access=access,
         market_context=market_context, page_context=page_context,
+        symbol_context=symbol_context,
     )
 
 
 def run_absorb_web_conversation(
-    *, principal, question, access="public", market_context="TW", page_context="home"
+    *, principal, question, access="public", market_context="TW", page_context="home",
+    symbol_context=None,
 ):
     action_executor = None
     if access == "authenticated" and principal.startswith("line:"):
@@ -1172,6 +1186,7 @@ def run_absorb_web_conversation(
         action_executor=action_executor,
         market_context=market_context,
         page_context=page_context,
+        symbol_context=symbol_context,
     )
 
 

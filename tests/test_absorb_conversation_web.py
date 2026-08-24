@@ -169,6 +169,35 @@ class AbsorbConversationWebTests(unittest.TestCase):
         report_lookup.assert_not_called()
         self.assertIn("台積電（2330）", answer.text)
 
+    def test_observation_mode_stock_page_pronoun_resolves_symbol_context(self):
+        observation = {
+            "name": "Apple",
+            "code": "AAPL",
+            "price": 220.0,
+            "rsi": 55.0,
+            "trend_observation": "above_ma20",
+            "volume_ratio": 1.1,
+            "risk_events": [],
+            "as_of": "2026-08-21",
+        }
+        with patch.object(
+            stock_app, "_conversation_search_stock", return_value=("AAPL", "Apple")
+        ), patch.object(
+            stock_app, "fetch_published_quant_snapshot", return_value={"market": "US"}
+        ) as fetch, patch.object(
+            stock_app, "build_stock_observation", return_value=observation
+        ):
+            answer = stock_app._observation_conversation(
+                question="這檔現在如何？",
+                access="public",
+                market_context="US",
+                page_context="stock",
+                symbol_context="AAPL",
+            )
+
+        fetch.assert_called_once_with("AAPL")
+        self.assertIn("Apple（AAPL）", answer.text)
+
     def test_same_cookie_us_page_clears_prior_tw_stock_context_in_production_mode(self):
         from tests.test_absorb_conversation import stock_data
 
@@ -310,6 +339,59 @@ class AbsorbConversationWebTests(unittest.TestCase):
             stock_app.app.test_client().post("/api/conversation", json=self._payload("RSI 是什麼？"))
             stock_app.app.test_client().post("/api/conversation", json=self._payload("RSI 是什麼？"))
         self.assertNotEqual(principals[0], principals[1])
+
+    def test_web_conversation_accepts_valid_symbol_on_stock_page(self):
+        client = stock_app.app.test_client()
+        with patch.object(
+            stock_app,
+            "run_absorb_conversation",
+            return_value=ConversationAnswer("ok"),
+        ) as converse:
+            response = client.post(
+                "/api/conversation",
+                json={"question": "這檔怎麼樣？", "market": "US", "page": "stock", "symbol": "AAPL"},
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(converse.call_args.kwargs["market_context"], "US")
+        self.assertEqual(converse.call_args.kwargs["page_context"], "stock")
+        self.assertEqual(converse.call_args.kwargs["symbol_context"], "AAPL")
+
+    def test_web_conversation_rejects_malformed_symbols(self):
+        client = stock_app.app.test_client()
+        malformed_symbols = (
+            "../etc/passwd",
+            "<script>",
+            "AAPL; DROP TABLE",
+            "TOOLONGSYMBOLNAMETHATEXCEEDS12CHARS",
+            " ",
+            123,
+            [],
+            {},
+        )
+        with patch.object(stock_app, "run_absorb_conversation") as converse:
+            for bad_symbol in malformed_symbols:
+                with self.subTest(symbol=bad_symbol):
+                    response = client.post(
+                        "/api/conversation",
+                        json={"question": "這檔如何？", "market": "US", "page": "stock", "symbol": bad_symbol},
+                    )
+                    self.assertEqual(response.status_code, 400)
+        converse.assert_not_called()
+
+    def test_web_conversation_ignores_symbol_on_non_stock_page(self):
+        client = stock_app.app.test_client()
+        with patch.object(
+            stock_app,
+            "run_absorb_conversation",
+            return_value=ConversationAnswer("ok"),
+        ) as converse:
+            response = client.post(
+                "/api/conversation",
+                json={"question": "市場如何？", "market": "TW", "page": "market", "symbol": "2330"},
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(converse.call_args.kwargs["page_context"], "market")
+        self.assertIsNone(converse.call_args.kwargs["symbol_context"])
 
 
 if __name__ == "__main__":
