@@ -5,6 +5,7 @@ import datetime
 import hashlib
 import json
 import os
+import sys
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -30,6 +31,17 @@ def render_status(root):
             f"date={date_value or '-'} error={error}"
         )
     return "\n".join(rows) if rows else "尚無 pipeline status。"
+
+
+class PreMarketRefusal(RuntimeError):
+    """Machine-readable pre-market refusal with a safe category."""
+
+    def __init__(self, category, safe_message):
+        super().__init__(safe_message)
+        self.category = str(category)
+
+    def __str__(self):
+        return f"{self.category}: {self.args[0]}"
 
 
 def _load_json(path):
@@ -78,6 +90,17 @@ def _publish_v2_receipt(root, metadata):
 def run_pre_market(args):
     from stock_papi.batch.pre_market import PreMarketPipeline
 
+    calendars = None
+    required_base_session = None
+    if args.calendar_artifact:
+        from stock_papi.batch.calendar import TradingCalendarSet
+
+        documents = [_load_json(path) for path in args.calendar_artifact]
+        calendars = TradingCalendarSet.from_documents(documents)
+        required_base_session = calendars.latest_session_on_or_before(
+            args.applicable_trading_date - datetime.timedelta(days=1)
+        )
+
     loaders = []
     for source_file in args.source_file:
         path = Path(source_file)
@@ -95,6 +118,18 @@ def run_pre_market(args):
             "reason": "notification delivery is performed after uploader verification",
         },
     )
+    if calendars is not None:
+        base = pipeline.load_base()
+        base_source = str(base["metadata"].get("source_market_date") or "")
+        if base_source != required_base_session.isoformat():
+            raise PreMarketRefusal(
+                "stale_post_close_base",
+                (
+                    f"post-close base source_market_date {base_source} does not "
+                    f"match the required completed session "
+                    f"{required_base_session.isoformat()}"
+                ),
+            )
     result = pipeline.run(now=datetime.datetime.now(datetime.timezone.utc))
     print(json.dumps(result, ensure_ascii=False))
     return 0
@@ -158,6 +193,24 @@ def run_calendar_check(args):
     return 0 if is_session else 3
 
 
+def run_calendar_latest_session(args):
+    from stock_papi.batch.calendar import TradingCalendarSet
+
+    documents = [_load_json(path) for path in args.calendar_artifact]
+    calendars = TradingCalendarSet.from_documents(documents)
+    latest = calendars.latest_session_on_or_before(args.before)
+    print(
+        json.dumps(
+            {
+                "before": args.before.isoformat(),
+                "latest_session": latest.isoformat(),
+            },
+            ensure_ascii=False,
+        )
+    )
+    return 0
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="ABSORB batch operations")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -173,6 +226,7 @@ def main(argv=None):
         required=True,
     )
     pre_market.add_argument("--source-file", action="append", default=[])
+    pre_market.add_argument("--calendar-artifact", type=Path, action="append", default=[])
     notify = subparsers.add_parser("notify", help="推送已驗證的公開報告連結")
     notify.add_argument("--root", default=r"D:\AbsorbData")
     notify.add_argument(
@@ -188,16 +242,32 @@ def main(argv=None):
     )
     calendar.add_argument("--calendar-artifact", type=Path, action="append", required=True)
     calendar.add_argument("--date", type=datetime.date.fromisoformat, required=True)
+    calendar_latest = subparsers.add_parser(
+        "calendar-latest-session",
+        help="以已驗證 TWSE artifact 計算基準日（含）前最近的交易日",
+    )
+    calendar_latest.add_argument(
+        "--calendar-artifact", type=Path, action="append", required=True
+    )
+    calendar_latest.add_argument(
+        "--before", type=datetime.date.fromisoformat, required=True
+    )
     args = parser.parse_args(argv)
     if args.command == "status":
         print(render_status(Path(args.root)))
         return 0
     if args.command == "pre-market":
-        return run_pre_market(args)
+        try:
+            return run_pre_market(args)
+        except PreMarketRefusal as exc:
+            print(f"TW pre-market refused: {exc}", file=sys.stderr)
+            return 4
     if args.command == "notify":
         return run_notification(args)
     if args.command == "calendar-check":
         return run_calendar_check(args)
+    if args.command == "calendar-latest-session":
+        return run_calendar_latest_session(args)
     return 2
 
 

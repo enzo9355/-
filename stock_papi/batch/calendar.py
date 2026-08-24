@@ -170,3 +170,13 @@ class TradingCalendarSet:
                 result += datetime.timedelta(days=direction)
         return result
 
+    def latest_session_on_or_before(self, value):
+        if not isinstance(value, datetime.date) or isinstance(value, datetime.datetime):
+            raise CalendarError("基準日必須是 date")
+        candidate = value
+        for _ in range(31):
+            if self.is_session(candidate):
+                return candidate
+            candidate -= datetime.timedelta(days=1)
+        raise CalendarError("31 天內找不到交易日")
+

@@ -132,11 +132,21 @@ def _params(source_id: str, target_date: _datetime.date) -> dict[str, str]:
     raise ValueError("unknown historical source")
 
 
+class OfficialSourceNotReady(ValueError):
+    """Raised when an official endpoint responds but its data is not ready yet.
+
+    This is a transient upstream condition (for example TWSE returns a
+    non-OK ``stat`` before intraday margin/after-hours tables are finalized).
+    It must still fail closed; it is classified separately so schedulers and
+    receipts can distinguish it from schema or contract defects.
+    """
+
+
 def _status_date(payload: Any, target_date: _datetime.date, label: str) -> Mapping[str, Any]:
     if not isinstance(payload, dict):
         raise ValueError(f"{label} schema is invalid")
     if str(payload.get("stat") or "").upper() != "OK":
-        raise ValueError(f"{label} status is invalid")
+        raise OfficialSourceNotReady(f"{label} status is invalid")
     if normalize_market_date(payload.get("date")) != target_date:
         raise ValueError(f"{label} target date mismatch")
     return payload
@@ -518,6 +528,18 @@ def build_historical_daily_snapshot(
                     sleep_fn=sleep_fn,
                 )
                 request_count += attempts
+                if (
+                    not isinstance(payload, dict)
+                    or str(payload.get("stat") or "").upper() != "OK"
+                ):
+                    raise OfficialSourceFailure(
+                        source_id,
+                        "official_source_not_ready",
+                        safe_message=(
+                            f"{definition.market} {definition.dataset} "
+                            "status is invalid"
+                        ),
+                    )
                 try:
                     raw_cached = store_cached_raw_source(
                         root,
@@ -549,6 +571,12 @@ def build_historical_daily_snapshot(
                     )
                 minimum = minimum_for_source(source_id, definition)
                 symbol_count = _coverage(definition.dataset, rows, int(minimum))
+            except OfficialSourceNotReady as exc:
+                raise OfficialSourceFailure(
+                    source_id,
+                    "official_source_not_ready",
+                    safe_message=str(exc),
+                ) from None
             except (KeyError, TypeError, ValueError) as exc:
                 raise OfficialSourceFailure(source_id, "schema_validation", safe_message=str(exc)) from None
             for symbol, status in statuses.items():
@@ -592,6 +620,12 @@ def build_historical_daily_snapshot(
                 rows = HISTORICAL_PARSERS[source_id](payload, target_date)
                 minimum = minimum_for_source(source_id, definition)
                 symbol_count = _coverage(definition.dataset, rows, int(minimum))
+            except OfficialSourceNotReady as exc:
+                raise OfficialSourceFailure(
+                    source_id,
+                    "official_source_not_ready",
+                    safe_message=str(exc),
+                ) from None
             except (KeyError, TypeError, ValueError) as exc:
                 raise OfficialSourceFailure(source_id, "schema_validation", safe_message=str(exc)) from None
             cached = store_cached_source(
