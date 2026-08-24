@@ -1,5 +1,6 @@
 import hashlib
 import json
+import re
 import subprocess
 import tempfile
 import unittest
@@ -205,7 +206,10 @@ class LocalQuantTaskTests(unittest.TestCase):
 
             self.assertNotEqual(result.returncode, 0)
             self.assertFalse(call_log.exists(), result.stdout + result.stderr)
-            self.assertIn("Object path hash mismatch", result.stdout + result.stderr)
+            cleaned_output = re.sub(
+                r"\s+", "", (result.stdout + result.stderr).lower()
+            )
+            self.assertIn("objectpathhashmismatch", cleaned_output)
 
     def test_uploader_valid_v3_passes_without_gcloud_copy(self):
         with tempfile.TemporaryDirectory() as temporary:

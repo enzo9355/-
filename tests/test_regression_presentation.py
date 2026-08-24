@@ -99,6 +99,7 @@ class TestRegressionPresentation(unittest.TestCase):
             "market_page",
             "reports_page",
             "stocks_page",
+            "us_reports_page",
         ):
             app.add_url_rule(f"/_test/{endpoint}", endpoint, lambda: "")
 
