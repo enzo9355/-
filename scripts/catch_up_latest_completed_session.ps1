@@ -576,8 +576,10 @@ function Get-RemotePointer {
             source_date = $EffectiveDate.ToString('yyyy-MM-dd', $Invariant)
             source_manifest = $Manifest
             source_manifest_sha256 = $ManifestHash
+            generated_at = [string]$Document.generated_at
             path = $Object
             sha256 = $ObjectHash
+            size = [long]$Document.size
         }
     }
     elseif ($Definition.kind -eq 'reports-latest') {
