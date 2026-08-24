@@ -15,7 +15,7 @@ function Get-AbsorbPipelineTaskDefinitions {
     @{ Name='ABSORB-TW-PostClose'; Job='TW-PostClose'; Time='17:10'; RepetitionInterval='PT20M'; RepetitionDuration='PT4H50M'; ExecutionTimeLimit=$DefaultExecutionTimeLimit },
     @{ Name='ABSORB-TW-PreMarket'; Job='TW-PreMarket'; Time='07:30'; RepetitionInterval='PT10M'; RepetitionDuration='PT1H20M'; ExecutionTimeLimit=$DefaultExecutionTimeLimit },
     @{ Name='ABSORB-TW-ObservationRecovery'; Job='TW-ObservationRecovery'; Time='06:15'; RepetitionInterval='PT10M'; RepetitionDuration='PT15M'; ExecutionTimeLimit=$DefaultExecutionTimeLimit },
-    @{ Name='ABSORB-FullBacktest'; Job='FullBacktest'; Time='22:30'; ExecutionTimeLimit=(New-TimeSpan -Minutes 225) },
+    @{ Name='ABSORB-FullBacktest'; Job='FullBacktest'; Time='22:30'; ExecutionTimeLimit=(New-TimeSpan -Minutes 225); Enabled=$false },
     @{ Name='ABSORB-US-Daily'; Job='US-Daily'; Time='05:30'; ExecutionTimeLimit=$DefaultExecutionTimeLimit },
     @{ Name='ABSORB-US-PostClose'; Job='US-PostClose'; Time='05:00'; RepetitionInterval='PT20M'; RepetitionDuration='PT4H00M'; ExecutionTimeLimit=$DefaultExecutionTimeLimit },
     @{ Name='ABSORB-US-PreMarket'; Job='US-PreMarket'; Time='20:30'; ExecutionTimeLimit=$DefaultExecutionTimeLimit },
@@ -102,6 +102,29 @@ foreach ($Definition in $Definitions) {
     }
     if ($Changed) {
       Register-ScheduledTask -TaskName $Definition.Name -Xml $TaskXml.OuterXml -Force | Out-Null
+    }
+    if ($Definition.ContainsKey('Enabled') -and $Definition.Enabled -eq $false) {
+      try {
+        Disable-ScheduledTask -TaskName $Definition.Name -ErrorAction Stop | Out-Null
+      }
+      catch {
+        throw "Unable to disable completed scheduled task $($Definition.Name)"
+      }
+      try {
+        [xml]$RegistrationXml = schtasks /query /tn "\$($Definition.Name)" /xml
+        $EnabledNode = $RegistrationXml.SelectSingleNode(
+          "/*[local-name()='Task']/*[local-name()='Settings']/*[local-name()='Enabled']"
+        )
+      }
+      catch {
+        throw "Unable to verify completed scheduled task registration $($Definition.Name)"
+      }
+      if (
+        $null -eq $EnabledNode -or
+        ([string]$EnabledNode.InnerText).Trim().ToLowerInvariant() -ne 'false'
+      ) {
+        throw "Scheduled task $($Definition.Name) must remain disabled"
+      }
     }
   }
 }

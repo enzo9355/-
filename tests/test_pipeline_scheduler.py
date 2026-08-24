@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import uuid
 from pathlib import Path
 
 UTC = datetime.timezone.utc
@@ -944,6 +945,7 @@ if ($disabled.already_disabled -or -not $disabled.disabled -or $disabled.registr
         harness = r"""
 $ErrorActionPreference = 'Stop'
 $Global:Registrations = New-Object 'System.Collections.Generic.List[object]'
+$Global:DisabledTasks = New-Object 'System.Collections.Generic.List[string]'
 function Get-Command { param([string]$Name, $ErrorAction) [pscustomobject]@{ Source=('C:\Windows\System32\' + $Name) } }
 function New-ScheduledTaskPrincipal { param($UserId, $LogonType, $RunLevel) [pscustomobject]@{ UserId=$UserId; LogonType=$LogonType; RunLevel=$RunLevel } }
 function New-ScheduledTaskAction { param($Execute, $Argument, $WorkingDirectory) [pscustomobject]@{ Execute=$Execute; Argument=$Argument; WorkingDirectory=$WorkingDirectory } }
@@ -959,8 +961,19 @@ function Register-ScheduledTask {
     param($TaskName, $Action, $Trigger, $Settings, $Principal, [string]$Xml, [switch]$Force)
     $Global:Registrations.Add([pscustomobject]@{ TaskName=$TaskName; Action=$Action; Trigger=$Trigger; Settings=$Settings; Principal=$Principal; Xml=$Xml })
 }
+function Disable-ScheduledTask {
+    param($TaskName, $ErrorAction)
+    $Global:DisabledTasks.Add([string]$TaskName) | Out-Null
+    [pscustomobject]@{ State='Disabled' }
+}
 function schtasks {
-    return '<?xml version="1.0" encoding="UTF-16"?><Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task"><Settings><DisallowStartIfOnBatteries>true</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>true</StopIfGoingOnBatteries><ExecutionTimeLimit>PT4H</ExecutionTimeLimit></Settings><Triggers><CalendarTrigger><StartBoundary>2026-08-24T17:10:00</StartBoundary><ScheduleByDay><DaysInterval>1</DaysInterval></ScheduleByDay></CalendarTrigger></Triggers></Task>'
+    $taskName = ''
+    for ($index = 0; $index -lt $args.Count - 1; $index++) {
+        if ($args[$index] -eq '/tn') { $taskName = [string]$args[$index + 1].TrimStart('\') }
+    }
+    $enabledText = 'true'
+    if ($Global:DisabledTasks -contains $taskName) { $enabledText = 'false' }
+    return '<?xml version="1.0" encoding="UTF-16"?><Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task"><Settings><DisallowStartIfOnBatteries>true</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>true</StopIfGoingOnBatteries><Enabled>' + $enabledText + '</Enabled><ExecutionTimeLimit>PT4H</ExecutionTimeLimit></Settings><Triggers><CalendarTrigger><StartBoundary>2026-08-24T17:10:00</StartBoundary><ScheduleByDay><DaysInterval>1</DaysInterval></ScheduleByDay></CalendarTrigger></Triggers></Task>'
 }
 """ + f". '{installer_ps}' -DataRoot 'D:\\AbsorbData' -WeeklyDay Saturday\n" + r"""
 $full = @($Global:Registrations | Where-Object { $_.TaskName -eq 'ABSORB-FullBacktest' -and -not $_.Xml })
@@ -983,6 +996,7 @@ $preXml = @($Global:Registrations | Where-Object { $_.TaskName -eq 'ABSORB-TW-Pr
 if ($preXml.Count -ne 1 -or $preXml[0].Xml -notmatch '<Interval>PT10M</Interval>' -or $preXml[0].Xml -notmatch '<Duration>PT1H20M</Duration>') { throw 'final pre-market XML repetition was not captured' }
 $recoveryRegistration = @($Global:Registrations | Where-Object { $_.TaskName -eq 'ABSORB-TW-ObservationRecovery' })
 if ($recoveryRegistration.Count -lt 1) { throw 'TW observation recovery task was not registered' }
+if ($Global:DisabledTasks.Count -ne 1 -or $Global:DisabledTasks[0] -ne 'ABSORB-FullBacktest') { throw 'only the completed FullBacktest task may be disabled' }
 [Console]::WriteLine('installer-capture-ok')
 """
         completed = subprocess.run(
@@ -1655,6 +1669,198 @@ if ($usPlan.Count -ne 1 -or $usPlan[0].mutex_name -ne 'Global\\ABSORB-US-Observa
             self.assertNotIn(forbidden, source)
         self.assertIn("no-op", source)
         self.assertIn("exit 0", source)
+
+
+class InstallerFullBacktestDormancyTests(unittest.TestCase):
+    SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
+
+    def test_fullbacktest_definition_is_explicitly_disabled_and_others_default_enabled(self):
+        installer = (self.SCRIPTS / "install_pipeline_tasks.ps1").resolve()
+        harness = f"""
+$ErrorActionPreference = 'Stop'
+$tokens = $null
+$errors = $null
+$ast = [Management.Automation.Language.Parser]::ParseFile('{str(installer).replace("'", "''")}', [ref]$tokens, [ref]$errors)
+if ($errors.Count -ne 0) {{ throw 'install_pipeline_tasks.ps1 did not parse' }}
+$definition = @($ast.FindAll({{ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-AbsorbPipelineTaskDefinitions' }}, $true))[0]
+if ($null -eq $definition) {{ throw 'task definition helper was not found' }}
+Invoke-Expression $definition.Extent.Text
+$definitions = @(Get-AbsorbPipelineTaskDefinitions -WeeklyDay Saturday)
+$fullBacktest = @($definitions | Where-Object {{ $_.Name -eq 'ABSORB-FullBacktest' }})
+if ($fullBacktest.Count -ne 1) {{ throw 'FullBacktest definition was not unique' }}
+if (-not $fullBacktest[0].ContainsKey('Enabled') -or $fullBacktest[0].Enabled -ne $false) {{ throw 'FullBacktest is not explicitly disabled' }}
+$others = @($definitions | Where-Object {{ $_.Name -ne 'ABSORB-FullBacktest' }})
+foreach ($item in $others) {{
+    if ($item.ContainsKey('Enabled')) {{ throw "unexpected Enabled property on $($item.Name)" }}
+}}
+if ($others.Count -ne 8) {{ throw 'unexpected task definition count' }}
+@{{ fullbacktest_enabled = $fullBacktest[0].Enabled; count = $others.Count }} | ConvertTo-Json -Compress
+"""
+        completed = subprocess.run(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                harness,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+        receipt = json.loads(completed.stdout)
+        self.assertIs(receipt["fullbacktest_enabled"], False)
+        self.assertEqual(receipt["count"], 8)
+
+    def test_installer_probe_keeps_fullbacktest_disabled_and_idempotent(self):
+        token = uuid.uuid4().hex[:12]
+        prefix = f"ABSORB-Probe-{token}-"
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        staging = Path(temporary.name)
+        source_path = self.SCRIPTS / "install_pipeline_tasks.ps1"
+        source = source_path.read_text(encoding="utf-8")
+        expected_count = 9
+        actual_count = source.count("ABSORB-")
+        if actual_count != expected_count:
+            raise AssertionError(
+                f"unsafe installer probe substitution count: "
+                f"expected {expected_count}, got {actual_count}"
+            )
+        probe_source = source.replace("ABSORB-", prefix)
+        probe_installer = staging / "install_pipeline_tasks.ps1"
+        probe_installer.write_text(probe_source, encoding="utf-8-sig")
+        for helper in ("invoke_pipeline_task.ps1", "run_hidden.vbs"):
+            (staging / helper).write_bytes((self.SCRIPTS / helper).read_bytes())
+
+        probe_tasks = [
+            "TW-PostClose",
+            "TW-PreMarket",
+            "TW-ObservationRecovery",
+            "FullBacktest",
+            "US-Daily",
+            "US-PostClose",
+            "US-PreMarket",
+            "WeeklyModel",
+            "ReportUploadRecovery",
+        ]
+
+        def cleanup():
+            subprocess.run(
+                [
+                    "powershell.exe",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    "; ".join(
+                        f"Unregister-ScheduledTask -TaskName '{prefix}{name}' -Confirm:$false -ErrorAction SilentlyContinue"
+                        for name in probe_tasks
+                    ),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=300,
+            )
+
+        self.addCleanup(cleanup)
+
+        def run_installer():
+            return subprocess.run(
+                [
+                    "powershell.exe",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    str(probe_installer),
+                    "-DataRoot",
+                    r"D:\AbsorbData",
+                    "-WeeklyDay",
+                    "Saturday",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=600,
+            )
+
+        for _round in (1, 2):
+            completed = run_installer()
+            self.assertEqual(
+                completed.returncode, 0,
+                f"probe installer round {_round}: {completed.stdout} {completed.stderr}",
+            )
+            for name in probe_tasks:
+                task_name = f"{prefix}{name}"
+                info = subprocess.run(
+                    [
+                        "powershell.exe",
+                        "-NoProfile",
+                        "-NonInteractive",
+                        "-Command",
+                        f"(Get-ScheduledTask -TaskName '{task_name}').State",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                )
+                self.assertEqual(info.returncode, 0, info.stdout + info.stderr)
+                state = info.stdout.strip()
+                if name == "FullBacktest":
+                    self.assertEqual(
+                        state, "Disabled",
+                        f"round {_round}: probe FullBacktest state={state}",
+                    )
+                    xml = subprocess.run(
+                        [
+                            "schtasks.exe",
+                            "/query",
+                            "/tn",
+                            task_name,
+                            "/xml",
+                        ],
+                        capture_output=True,
+                        text=True,
+                        timeout=60,
+                    )
+                    self.assertEqual(xml.returncode, 0, xml.stdout + xml.stderr)
+                    self.assertIn("<Enabled>false</Enabled>", xml.stdout)
+                    run_info = subprocess.run(
+                        [
+                            "powershell.exe",
+                            "-NoProfile",
+                            "-NonInteractive",
+                            "-Command",
+                            f"(Get-ScheduledTaskInfo -TaskName '{task_name}').LastRunTime.ToString('yyyy-MM-dd')",
+                        ],
+                        capture_output=True,
+                        text=True,
+                        timeout=60,
+                    )
+                    self.assertEqual(
+                        run_info.stdout.strip(), "1999-11-30",
+                        "probe FullBacktest unexpectedly executed",
+                    )
+                else:
+                    self.assertEqual(
+                        state, "Ready",
+                        f"round {_round}: {name} state={state}",
+                    )
+
+        cleanup()
+
+    def test_installer_source_never_touches_fullbacktest_checkpoint(self):
+        installer = (self.SCRIPTS / "install_pipeline_tasks.ps1").read_text(
+            encoding="utf-8"
+        )
+        for forbidden in ("checkpoint", "Checkpoint", "Start-ScheduledTask", "Get-ScheduledTaskInfo"):
+            self.assertNotIn(forbidden, installer)
+        self.assertIn("Enabled=$false", installer)
+        self.assertIn("Disable-ScheduledTask -TaskName $Definition.Name", installer)
+        self.assertIn("must remain disabled", installer)
 
 
 if __name__ == "__main__":
