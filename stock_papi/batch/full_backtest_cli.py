@@ -33,7 +33,6 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     from reporting.source_loader import load_report_source
-    from stock_papi.batch.backtest_store import BacktestStoreError
     from stock_papi.batch.backtest_worker import FullBacktestWorker
     from stock_papi.batch.runtime import job_namespace
     from stock_papi.batch.status import PipelineStatusWriter
@@ -56,13 +55,7 @@ def main(argv=None):
         cutoff=manifest.market_as_of,
         items=items,
     )
-    try:
-        completed_for_current_source = worker.verify_completed_checkpoint()
-    except BacktestStoreError:
-        if not worker.has_archivable_stale_completed_checkpoint():
-            raise
-        completed_for_current_source = False
-    if completed_for_current_source:
+    if worker.verify_completed_checkpoint():
         print("full backtest checkpoint is already completed; skipping execution")
         return 0
     if args.verify_completion:
@@ -129,11 +122,7 @@ def main(argv=None):
 
     writer.record("backtest", details={"processed": 0}, now=datetime.datetime.now(datetime.timezone.utc))
     try:
-        result = worker.run(
-            run_item,
-            max_items=args.max_items,
-            archive_stale_completed=True,
-        )
+        result = worker.run(run_item, max_items=args.max_items)
     except Exception as exc:
         writer.record(
             "failed",

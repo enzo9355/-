@@ -110,88 +110,6 @@ class FullBacktestWorker:
             raise BacktestStoreError("full backtest completed checkpoint identity mismatch")
         return True
 
-    def has_archivable_stale_completed_checkpoint(self):
-        """Return True only for a self-consistent completed prior-source checkpoint."""
-        if not self.checkpoint_path.exists():
-            return False
-        try:
-            raw = self.checkpoint_path.read_bytes()
-            checkpoint = json.loads(raw.decode("utf-8"))
-        except (OSError, UnicodeError, ValueError) as exc:
-            raise BacktestStoreError("full backtest checkpoint is invalid") from exc
-        if not isinstance(checkpoint, dict):
-            raise BacktestStoreError("full backtest checkpoint is invalid")
-        if all(checkpoint.get(key) == value for key, value in self._identity().items()):
-            return False
-        completed_items = checkpoint.get("completed_items")
-        item_count = checkpoint.get("item_count")
-        next_index = checkpoint.get("next_index")
-        dataset_manifest = checkpoint.get("dataset_manifest")
-        dataset_sha256 = checkpoint.get("dataset_sha256")
-        model_version = checkpoint.get("model_version")
-        feature_schema_version = checkpoint.get("feature_schema_version")
-        cutoff = checkpoint.get("cutoff")
-        items_sha256 = checkpoint.get("items_sha256")
-        manifest_match = re.fullmatch(
-            r"quant/v1/manifests/TW-[0-9]{8}T[0-9]{6}Z-([0-9a-f]{12})\.json",
-            str(dataset_manifest),
-        )
-        try:
-            parsed_cutoff = datetime.date.fromisoformat(str(cutoff))
-        except ValueError:
-            parsed_cutoff = None
-        computed_items_sha256 = None
-        if isinstance(completed_items, list):
-            computed_items_sha256 = hashlib.sha256(
-                json.dumps(tuple(completed_items), separators=(",", ":")).encode("utf-8")
-            ).hexdigest()
-        if (
-            checkpoint.get("schema_version") != 1
-            or checkpoint.get("job_type") != "full_backtest"
-            or checkpoint.get("status") != "completed"
-            or manifest_match is None
-            or re.fullmatch(r"[0-9a-f]{64}", str(dataset_sha256)) is None
-            or manifest_match.group(1) != str(dataset_sha256)[:12]
-            or not isinstance(model_version, str)
-            or not 1 <= len(model_version) <= 100
-            or type(feature_schema_version) is not int
-            or feature_schema_version < 1
-            or parsed_cutoff is None
-            or parsed_cutoff.isoformat() != cutoff
-            or re.fullmatch(r"[0-9a-f]{64}", str(items_sha256)) is None
-            or type(item_count) is not int
-            or item_count < 1
-            or next_index != item_count
-            or not isinstance(completed_items, list)
-            or len(completed_items) != item_count
-            or len(completed_items) != len(set(completed_items))
-            or not all(
-                isinstance(item, str)
-                and re.fullmatch(r"[A-Z0-9.-]{1,12}", item)
-                for item in completed_items
-            )
-            or computed_items_sha256 != items_sha256
-        ):
-            raise BacktestStoreError(
-                "full backtest stale completed checkpoint is not self-consistent"
-            )
-        return True
-
-    def _archive_stale_completed_checkpoint(self):
-        if not self.has_archivable_stale_completed_checkpoint():
-            return False
-        raw = self.checkpoint_path.read_bytes()
-        archive_dir = self.checkpoint_path.parent / "archive"
-        archive_dir.mkdir(parents=True, exist_ok=True)
-        archive_path = archive_dir / f"completed-{hashlib.sha256(raw).hexdigest()}.json"
-        if archive_path.exists():
-            if archive_path.read_bytes() != raw:
-                raise BacktestStoreError("full backtest checkpoint archive collision")
-            self.checkpoint_path.unlink()
-        else:
-            self.checkpoint_path.rename(archive_path)
-        return True
-
     def _load_or_create(self, checked_at):
         identity = self._identity()
         if self.checkpoint_path.exists():
@@ -231,20 +149,11 @@ class FullBacktestWorker:
         _write_atomic(self.checkpoint_path, checkpoint)
         return checkpoint
 
-    def run(
-        self,
-        run_item,
-        *,
-        max_items=None,
-        now=None,
-        archive_stale_completed=False,
-    ):
+    def run(self, run_item, *, max_items=None, now=None):
         if not callable(run_item):
             raise TypeError("run_item must be callable")
         if max_items is not None and (type(max_items) is not int or max_items < 1):
             raise ValueError("max_items must be a positive integer")
-        if type(archive_stale_completed) is not bool:
-            raise ValueError("archive_stale_completed must be boolean")
         checked_at = now or datetime.datetime.now(datetime.timezone.utc)
         if checked_at.tzinfo is None or checked_at.utcoffset() is None:
             raise ValueError("now must be timezone-aware")
@@ -255,8 +164,6 @@ class FullBacktestWorker:
             self.cutoff,
             now=checked_at,
         ):
-            if archive_stale_completed:
-                self._archive_stale_completed_checkpoint()
             checkpoint = self._load_or_create(checked_at)
 
             def save(reason=None):

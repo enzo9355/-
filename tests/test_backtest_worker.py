@@ -132,49 +132,6 @@ class BacktestWorkerTests(unittest.TestCase):
                     now=datetime.datetime(2026, 7, 16, 12, tzinfo=UTC),
                 )
 
-    def test_explicit_rotation_archives_self_consistent_completed_stale_checkpoint(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            old = FullBacktestWorker(
-                root,
-                dataset_manifest="quant/v1/manifests/TW-20260714T090000Z-aaaaaaaaaaaa.json",
-                dataset_sha256="a" * 64,
-                model_version="lgbm-5d-v1",
-                feature_schema_version=1,
-                cutoff=datetime.date(2026, 7, 14),
-                items=("2330", "2317"),
-            )
-            old.run(
-                lambda _item: None,
-                now=datetime.datetime(2026, 7, 14, 12, tzinfo=UTC),
-            )
-            old_document = json.loads(old.checkpoint_path.read_text(encoding="utf-8"))
-            current = FullBacktestWorker(
-                root,
-                dataset_manifest="quant/v1/manifests/TW-20260824T090000Z-bbbbbbbbbbbb.json",
-                dataset_sha256="b" * 64,
-                model_version="lgbm-5d-v1",
-                feature_schema_version=1,
-                cutoff=datetime.date(2026, 8, 24),
-                items=("2330", "2317"),
-            )
-
-            self.assertTrue(current.has_archivable_stale_completed_checkpoint())
-            calls = []
-            result = current.run(
-                calls.append,
-                archive_stale_completed=True,
-                now=datetime.datetime(2026, 8, 25, 12, tzinfo=UTC),
-            )
-
-            self.assertEqual(calls, ["2330", "2317"])
-            self.assertEqual(result["status"], "completed")
-            archives = list(old.checkpoint_path.parent.glob("archive/completed-*.json"))
-            self.assertEqual(len(archives), 1)
-            self.assertEqual(json.loads(archives[0].read_text(encoding="utf-8")), old_document)
-            active = json.loads(old.checkpoint_path.read_text(encoding="utf-8"))
-            self.assertEqual(active["dataset_sha256"], "b" * 64)
-
     def test_worker_yields_to_daily_lock_before_next_item(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
