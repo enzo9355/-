@@ -1119,7 +1119,6 @@ if ($postXml.Count -ne 1 -or $postXml[0].Xml -notmatch '<Interval>PT20M</Interva
                     "model_version": "model-v1",
                     "feature_schema_version": 1,
                     "cutoff": "2026-08-21",
-                    "run_id": "20260821T000000Z-bbbbbbbb",
                     "items_sha256": hashlib.sha256(
                         json.dumps(items, separators=(",", ":")).encode("utf-8")
                     ).hexdigest(),
@@ -1127,8 +1126,6 @@ if ($postXml.Count -ne 1 -or $postXml[0].Xml -notmatch '<Interval>PT20M</Interva
                     "next_index": 1,
                     "completed_items": ["2330"],
                     "status": "completed",
-                    "started_at": "2026-08-22T00:00:00Z",
-                    "updated_at": "2026-08-22T01:00:00Z",
                 }),
                 encoding="utf-8",
             )

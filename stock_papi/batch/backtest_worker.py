@@ -5,7 +5,6 @@ import hashlib
 import json
 import os
 import re
-import stat
 from pathlib import Path
 
 from stock_papi.batch.backtest_store import BacktestStoreError
@@ -28,24 +27,6 @@ def _write_atomic(path, document):
         stream.flush()
         os.fsync(stream.fileno())
     os.replace(temporary, path)
-
-
-def _is_reparse_point(path):
-    metadata = Path(path).lstat()
-    return bool(
-        getattr(metadata, "st_file_attributes", 0)
-        & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
-    ) or Path(path).is_symlink()
-
-
-def _parse_utc_timestamp(value):
-    if not isinstance(value, str) or not value.endswith("Z"):
-        return None
-    try:
-        parsed = datetime.datetime.fromisoformat(value[:-1] + "+00:00")
-    except ValueError:
-        return None
-    return parsed if parsed.utcoffset() == datetime.timedelta(0) else None
 
 
 class FullBacktestWorker:
@@ -129,10 +110,10 @@ class FullBacktestWorker:
             raise BacktestStoreError("full backtest completed checkpoint identity mismatch")
         return True
 
-    def _read_archivable_stale_completed_checkpoint(self):
+    def has_archivable_stale_completed_checkpoint(self):
+        """Return True only for a self-consistent completed prior-source checkpoint."""
         if not self.checkpoint_path.exists():
-            return None
-        self._assert_checkpoint_paths_are_plain()
+            return False
         try:
             raw = self.checkpoint_path.read_bytes()
             checkpoint = json.loads(raw.decode("utf-8"))
@@ -141,7 +122,7 @@ class FullBacktestWorker:
         if not isinstance(checkpoint, dict):
             raise BacktestStoreError("full backtest checkpoint is invalid")
         if all(checkpoint.get(key) == value for key, value in self._identity().items()):
-            return None
+            return False
         completed_items = checkpoint.get("completed_items")
         item_count = checkpoint.get("item_count")
         next_index = checkpoint.get("next_index")
@@ -151,24 +132,6 @@ class FullBacktestWorker:
         feature_schema_version = checkpoint.get("feature_schema_version")
         cutoff = checkpoint.get("cutoff")
         items_sha256 = checkpoint.get("items_sha256")
-        allowed_keys = {
-            "schema_version",
-            "job_type",
-            "run_id",
-            "dataset_manifest",
-            "dataset_sha256",
-            "model_version",
-            "feature_schema_version",
-            "cutoff",
-            "items_sha256",
-            "item_count",
-            "next_index",
-            "completed_items",
-            "status",
-            "started_at",
-            "updated_at",
-            "last_error_type",
-        }
         manifest_match = re.fullmatch(
             r"quant/v1/manifests/TW-[0-9]{8}T[0-9]{6}Z-([0-9a-f]{12})\.json",
             str(dataset_manifest),
@@ -186,7 +149,6 @@ class FullBacktestWorker:
             checkpoint.get("schema_version") != 1
             or checkpoint.get("job_type") != "full_backtest"
             or checkpoint.get("status") != "completed"
-            or not set(checkpoint).issubset(allowed_keys)
             or manifest_match is None
             or re.fullmatch(r"[0-9a-f]{64}", str(dataset_sha256)) is None
             or manifest_match.group(1) != str(dataset_sha256)[:12]
@@ -196,24 +158,9 @@ class FullBacktestWorker:
             or feature_schema_version < 1
             or parsed_cutoff is None
             or parsed_cutoff.isoformat() != cutoff
-            or checkpoint.get("run_id")
-            != f"{parsed_cutoff.strftime('%Y%m%d')}T000000Z-{str(dataset_sha256)[:8]}"
-            or _parse_utc_timestamp(checkpoint.get("started_at")) is None
-            or _parse_utc_timestamp(checkpoint.get("updated_at")) is None
-            or _parse_utc_timestamp(checkpoint.get("updated_at"))
-            < _parse_utc_timestamp(checkpoint.get("started_at"))
-            or (
-                "last_error_type" in checkpoint
-                and (
-                    not isinstance(checkpoint["last_error_type"], str)
-                    or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,99}", checkpoint["last_error_type"])
-                    is None
-                )
-            )
             or re.fullmatch(r"[0-9a-f]{64}", str(items_sha256)) is None
             or type(item_count) is not int
             or item_count < 1
-            or type(next_index) is not int
             or next_index != item_count
             or not isinstance(completed_items, list)
             or len(completed_items) != item_count
@@ -228,90 +175,21 @@ class FullBacktestWorker:
             raise BacktestStoreError(
                 "full backtest stale completed checkpoint is not self-consistent"
             )
-        return raw
-
-    def has_archivable_stale_completed_checkpoint(self):
-        """Return True only for a self-consistent completed prior-source checkpoint."""
-        return self._read_archivable_stale_completed_checkpoint() is not None
-
-    def _assert_checkpoint_paths_are_plain(self):
-        root = Path(os.path.abspath(self.root))
-        checkpoint = Path(os.path.abspath(self.checkpoint_path))
-        try:
-            relative = checkpoint.relative_to(root)
-        except ValueError as exc:
-            raise BacktestStoreError("full backtest checkpoint escaped data root") from exc
-        current = root
-        candidates = [current]
-        for part in relative.parts:
-            current = current / part
-            candidates.append(current)
-        for candidate in candidates:
-            if candidate.exists() and _is_reparse_point(candidate):
-                raise BacktestStoreError(
-                    "full backtest checkpoint path contains a reparse point"
-                )
-
-    @staticmethod
-    def _write_archive_exclusive(path, raw):
-        try:
-            descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        except FileExistsError:
-            if _is_reparse_point(path):
-                raise BacktestStoreError(
-                    "full backtest checkpoint archive target is a reparse point"
-                )
-            if Path(path).read_bytes() != raw:
-                raise BacktestStoreError("full backtest checkpoint archive collision")
-            return
-        try:
-            with os.fdopen(descriptor, "wb") as stream:
-                stream.write(raw)
-                stream.flush()
-                os.fsync(stream.fileno())
-        except BaseException:
-            try:
-                Path(path).unlink()
-            except OSError:
-                pass
-            raise
+        return True
 
     def _archive_stale_completed_checkpoint(self):
-        raw = self._read_archivable_stale_completed_checkpoint()
-        if raw is None:
+        if not self.has_archivable_stale_completed_checkpoint():
             return False
+        raw = self.checkpoint_path.read_bytes()
         archive_dir = self.checkpoint_path.parent / "archive"
         archive_dir.mkdir(parents=True, exist_ok=True)
-        self._assert_checkpoint_paths_are_plain()
-        if _is_reparse_point(archive_dir):
-            raise BacktestStoreError(
-                "full backtest checkpoint archive is a reparse point"
-            )
-        digest = hashlib.sha256(raw).hexdigest()
-        archive_path = archive_dir / f"completed-{digest}.json"
-        retiring_path = archive_dir / f".retiring-{digest}.json"
-        if retiring_path.exists():
-            raise BacktestStoreError("full backtest checkpoint retirement is pending")
-        self._write_archive_exclusive(archive_path, raw)
-        self.checkpoint_path.rename(retiring_path)
-        retired_raw = retiring_path.read_bytes()
-        if retired_raw != raw:
-            if not self.checkpoint_path.exists():
-                retiring_path.rename(self.checkpoint_path)
-            else:
-                rejected = archive_dir / (
-                    f"rejected-{hashlib.sha256(retired_raw).hexdigest()}.json"
-                )
-                if rejected.exists():
-                    if rejected.read_bytes() != retired_raw:
-                        raise BacktestStoreError(
-                            "full backtest checkpoint rejected archive collision"
-                        )
-                    retiring_path.unlink()
-                else:
-                    retiring_path.rename(rejected)
-            raise BacktestStoreError("full backtest checkpoint changed during archive")
-        retiring_path.unlink()
+        archive_path = archive_dir / f"completed-{hashlib.sha256(raw).hexdigest()}.json"
+        if archive_path.exists():
+            if archive_path.read_bytes() != raw:
+                raise BacktestStoreError("full backtest checkpoint archive collision")
+            self.checkpoint_path.unlink()
+        else:
+            self.checkpoint_path.rename(archive_path)
         return True
 
     def _load_or_create(self, checked_at):
