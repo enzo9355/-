@@ -960,21 +960,29 @@ function Register-ScheduledTask {
     $Global:Registrations.Add([pscustomobject]@{ TaskName=$TaskName; Action=$Action; Trigger=$Trigger; Settings=$Settings; Principal=$Principal; Xml=$Xml })
 }
 function schtasks {
-    return '<?xml version="1.0" encoding="UTF-16"?><Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task"><Triggers><CalendarTrigger><StartBoundary>2026-08-24T17:10:00</StartBoundary><ScheduleByDay><DaysInterval>1</DaysInterval></ScheduleByDay></CalendarTrigger></Triggers></Task>'
+    return '<?xml version="1.0" encoding="UTF-16"?><Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task"><Settings><DisallowStartIfOnBatteries>true</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>true</StopIfGoingOnBatteries><ExecutionTimeLimit>PT4H</ExecutionTimeLimit></Settings><Triggers><CalendarTrigger><StartBoundary>2026-08-24T17:10:00</StartBoundary><ScheduleByDay><DaysInterval>1</DaysInterval></ScheduleByDay></CalendarTrigger></Triggers></Task>'
 }
 """ + f". '{installer_ps}' -DataRoot 'D:\\AbsorbData' -WeeklyDay Saturday\n" + r"""
-$full = @($Global:Registrations | Where-Object { $_.TaskName -eq 'ABSORB-FullBacktest' })
+$full = @($Global:Registrations | Where-Object { $_.TaskName -eq 'ABSORB-FullBacktest' -and -not $_.Xml })
 if ($full.Count -ne 1) { throw 'FullBacktest was not registered exactly once' }
 $registration = $full[0]
 if ($registration.Trigger.Kind -ne 'Daily' -or $registration.Trigger.At.ToString('HH:mm') -ne '22:30') { throw 'FullBacktest trigger is not daily at 22:30' }
 if ($registration.Settings.ExecutionTimeLimit -ne [TimeSpan]::FromMinutes(225)) { throw 'FullBacktest limit is not PT3H45M' }
-if ($registration.Xml -or $registration.Trigger.PSObject.Properties.Name -contains 'Repetition') { throw 'FullBacktest gained repetition' }
+if ($registration.Trigger.PSObject.Properties.Name -contains 'Repetition') { throw 'FullBacktest gained repetition' }
 if ([IO.Path]::GetFileName($registration.Action.Execute) -ne 'wscript.exe') { throw 'FullBacktest does not use wscript' }
 foreach ($required in @('//B','//NoLogo','run_hidden.vbs','-WindowStyle','Hidden','invoke_pipeline_task.ps1')) {
     if ($registration.Action.Argument -notmatch [regex]::Escape($required)) { throw "hidden action is missing $required" }
 }
+$fullXml = @($Global:Registrations | Where-Object { $_.TaskName -eq 'ABSORB-FullBacktest' -and $_.Xml })
+if ($fullXml.Count -ne 1 -or $fullXml[0].Xml -notmatch '<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>') { throw 'full backtest final XML battery flags were not captured' }
 $postXml = @($Global:Registrations | Where-Object { $_.TaskName -eq 'ABSORB-TW-PostClose' -and $_.Xml })
 if ($postXml.Count -ne 1 -or $postXml[0].Xml -notmatch '<Interval>PT20M</Interval>' -or $postXml[0].Xml -notmatch '<Duration>PT4H50M</Duration>') { throw 'final post-close XML repetition was not captured' }
+if ($postXml[0].Xml -notmatch '<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>') { throw 'final post-close XML battery disallow was not disabled' }
+if ($postXml[0].Xml -notmatch '<StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>') { throw 'final post-close XML battery stop was not disabled' }
+$preXml = @($Global:Registrations | Where-Object { $_.TaskName -eq 'ABSORB-TW-PreMarket' -and $_.Xml })
+if ($preXml.Count -ne 1 -or $preXml[0].Xml -notmatch '<Interval>PT10M</Interval>' -or $preXml[0].Xml -notmatch '<Duration>PT1H20M</Duration>') { throw 'final pre-market XML repetition was not captured' }
+$recoveryRegistration = @($Global:Registrations | Where-Object { $_.TaskName -eq 'ABSORB-TW-ObservationRecovery' })
+if ($recoveryRegistration.Count -lt 1) { throw 'TW observation recovery task was not registered' }
 [Console]::WriteLine('installer-capture-ok')
 """
         completed = subprocess.run(
@@ -1434,6 +1442,219 @@ if ($fullBacktest.Count -ne 1) {{ throw 'full backtest definition was not unique
             latest_data = json.loads(latest_file.read_text(encoding="utf-8"))
             self.assertEqual(latest_data["source_market_date"], "2026-07-14")
             self.assertEqual(latest_data["applicable_trading_date"], "2026-07-15")
+
+
+class TwSchedulerReliabilityTests(unittest.TestCase):
+    SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
+
+    def test_premarket_bounded_repetition_and_recovery_window_in_installer(self):
+        installer = (self.SCRIPTS / "install_pipeline_tasks.ps1").resolve()
+        harness = f"""
+$ErrorActionPreference = 'Stop'
+$tokens = $null
+$errors = $null
+$ast = [Management.Automation.Language.Parser]::ParseFile('{str(installer).replace("'", "''")}', [ref]$tokens, [ref]$errors)
+if ($errors.Count -ne 0) {{ throw 'install_pipeline_tasks.ps1 did not parse' }}
+$definition = @($ast.FindAll({{ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-AbsorbPipelineTaskDefinitions' }}, $true))[0]
+if ($null -eq $definition) {{ throw 'task definition helper was not found' }}
+Invoke-Expression $definition.Extent.Text
+$definitions = @(Get-AbsorbPipelineTaskDefinitions -WeeklyDay Saturday)
+$preMarket = @($definitions | Where-Object {{ $_.Name -eq 'ABSORB-TW-PreMarket' }})
+$recovery = @($definitions | Where-Object {{ $_.Name -eq 'ABSORB-TW-ObservationRecovery' }})
+if ($preMarket.Count -ne 1 -or $recovery.Count -ne 1) {{ throw 'scheduler definitions were not unique' }}
+@{{ premarket_time = $preMarket[0].Time; premarket_interval = $preMarket[0].RepetitionInterval; premarket_duration = $preMarket[0].RepetitionDuration; recovery_time = $recovery[0].Time; recovery_interval = $recovery[0].RepetitionInterval; recovery_duration = $recovery[0].RepetitionDuration }} | ConvertTo-Json -Compress
+"""
+        completed = subprocess.run(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                harness,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+        definition = json.loads(completed.stdout)
+        self.assertEqual(definition["premarket_time"], "07:30")
+        self.assertEqual(definition["premarket_interval"], "PT10M")
+        self.assertEqual(definition["premarket_duration"], "PT1H20M")
+        self.assertEqual(definition["recovery_time"], "06:15")
+        self.assertEqual(definition["recovery_interval"], "PT10M")
+        self.assertEqual(definition["recovery_duration"], "PT15M")
+        source = installer.read_text(encoding="utf-8")
+        self.assertIn("'DisallowStartIfOnBatteries'", source)
+        self.assertIn("'StopIfGoingOnBatteries'", source)
+        self.assertIn("[string]$BatteryNode.InnerText -ne 'false'", source)
+
+    def test_observation_recovery_plan_holds_no_market_lock_while_catchup_owns_tw_lock(self):
+        script = (self.SCRIPTS / "invoke_pipeline_task.ps1").resolve()
+        harness = f"""
+$ErrorActionPreference = 'Stop'
+$tokens = $null
+$errors = $null
+$ast = [Management.Automation.Language.Parser]::ParseFile('{str(script).replace("'", "''")}', [ref]$tokens, [ref]$errors)
+if ($errors.Count -ne 0) {{ throw 'invoke_pipeline_task.ps1 did not parse' }}
+$definition = @($ast.FindAll({{ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-AbsorbPipelineMutexPlan' }}, $true))[0]
+if ($null -eq $definition) {{ throw 'mutex plan helper was not found' }}
+Invoke-Expression $definition.Extent.Text
+$recoveryPlan = @(Get-AbsorbPipelineMutexPlan -Job 'TW-ObservationRecovery')
+$twPlan = @(Get-AbsorbPipelineMutexPlan -Job 'TW-PreMarket')
+$usPlan = @(Get-AbsorbPipelineMutexPlan -Job 'US-PreMarket')
+if ($recoveryPlan.Count -ne 0) {{ throw 'TW observation recovery must not hold a wrapper market lock (catch-up owns it)' }}
+if ($twPlan.Count -ne 1 -or $twPlan[0].mutex_name -ne 'Global\\ABSORB-TW-Observation-Writer') {{ throw 'TW market lock name is incorrect' }}
+if ($usPlan.Count -ne 1 -or $usPlan[0].mutex_name -ne 'Global\\ABSORB-US-Observation-Writer') {{ throw 'US market lock name is incorrect' }}
+@{{ tw = $twPlan[0].mutex_name; us = $usPlan[0].mutex_name; recovery = $recoveryPlan.Count }} | ConvertTo-Json -Compress
+"""
+        completed = subprocess.run(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                harness,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+        receipt = json.loads(completed.stdout)
+        self.assertEqual(receipt["tw"], r"Global\ABSORB-TW-Observation-Writer")
+        self.assertEqual(receipt["us"], r"Global\ABSORB-US-Observation-Writer")
+        self.assertEqual(receipt["recovery"], 0)
+
+    def test_computation_and_publication_locks_remain_separate(self):
+        wrapper = (self.SCRIPTS / "invoke_pipeline_task.ps1").read_text(
+            encoding="utf-8"
+        )
+        uploader = (self.SCRIPTS / "upload_local_quant.ps1").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(r"Global\ABSORB-$Market-Observation-Writer", wrapper)
+        self.assertIn(r"Global\ABSORB-Observation-Publication-Writer", uploader)
+        self.assertNotIn(r"ABSORB-Observation-Publication-Writer", wrapper)
+        self.assertNotIn(r"ABSORB-$Market-Observation-Writer", uploader)
+        self.assertIn(
+            "Set-GcloudMutablePointer", uploader
+        )
+
+    def test_premarket_completion_guard_requires_end_to_end_evidence(self):
+        guard = self.SCRIPTS / "pre_market_pipeline_guard.ps1"
+        self.assertTrue(guard.is_file())
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            pointer_dir = root / "publish" / "reports" / "v2"
+            pointer_path = pointer_dir / "latest-TW-pre_market.json"
+            status_dir = root / "logs" / "tasks"
+            status_path = status_dir / "current-TW-PreMarket.json"
+            pointer_dir.mkdir(parents=True, exist_ok=True)
+            status_dir.mkdir(parents=True, exist_ok=True)
+
+            def completed_now():
+                return subprocess.run(
+                    [
+                        "powershell.exe",
+                        "-NoProfile",
+                        "-NonInteractive",
+                        "-ExecutionPolicy",
+                        "Bypass",
+                        "-Command",
+                        (
+                            f". '{guard}'; "
+                            f"if (Test-PreMarketCompletion -DataRoot '{root}' "
+                            f"-TargetDate '2026-08-17') {{ exit 0 }} else {{ exit 1 }}"
+                        ),
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                ).returncode == 0
+
+            self.assertFalse(completed_now())
+            pointer_path.write_text(
+                json.dumps(
+                    {
+                        "report_type": "pre_market",
+                        "applicable_trading_date": "2026-08-17",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.assertFalse(completed_now())
+            status_path.write_text(
+                json.dumps(
+                    {
+                        "job": "TW-PreMarket",
+                        "started_at": "2026-08-17T07:30:00+08:00",
+                        "success": True,
+                        "exit_code": 0,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.assertTrue(completed_now())
+            status_path.write_text(
+                json.dumps(
+                    {
+                        "job": "TW-PreMarket",
+                        "started_at": "2026-08-17T07:30:00+08:00",
+                        "success": False,
+                        "exit_code": 4,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.assertFalse(completed_now())
+
+    def test_premarket_pipeline_calendar_gates_completion_and_freshness(self):
+        source = (self.SCRIPTS / "run_tw_pre_market_pipeline.ps1").read_text(
+            encoding="utf-8"
+        )
+        for required in (
+            "pre_market_pipeline_guard.ps1",
+            "Test-PreMarketCompletion",
+            "skipping duplicate execution",
+            "calendar-check",
+            "not a TW trading session; skipped",
+            "--applicable-trading-date', $TargetDate",
+            "stale_post_close_base",
+            "latest-TW-post_close.json",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, source)
+        self.assertLess(
+            source.index("calendar-check"),
+            source.index("Test-PreMarketCompletion"),
+        )
+        self.assertLess(
+            source.index("Test-PreMarketCompletion"),
+            source.index("'pre-market'"),
+        )
+        self.assertIn("--calendar-artifact", source)
+
+    def test_recovery_script_never_writes_pointers_directly(self):
+        source = (self.SCRIPTS / "run_tw_observation_recovery.ps1").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("calendar-latest-session", source)
+        self.assertIn("catch_up_latest_completed_session.ps1", source)
+        for forbidden in (
+            "Set-GcloudMutablePointer",
+            "gsutil",
+            "Copy-Item",
+            "Remove-Item",
+            "Move-Item",
+        ):
+            self.assertNotIn(forbidden, source)
+        self.assertIn("no-op", source)
+        self.assertIn("exit 0", source)
 
 
 if __name__ == "__main__":

@@ -682,5 +682,72 @@ class HistoricalStatusSnapshotTests(unittest.TestCase):
         self.assertEqual(context.exception.category, "unrecognized_missing_price")
 
 
+class NotReadyMarginSession(Session):
+    def __init__(self, not_ready_remaining):
+        super().__init__()
+        self.not_ready_remaining = not_ready_remaining
+
+    def get(self, url, *, params, headers, **kwargs):
+        response = super().get(url, params=params, headers=headers, **kwargs)
+        if self.calls[-1]["source_id"] == "twse_margin" and self.not_ready_remaining > 0:
+            self.not_ready_remaining -= 1
+            payload = json.loads(response.content.decode("utf-8"))
+            payload["stat"] = "很抱歉，目前尚無資料"
+            return Response(payload)
+        return response
+
+
+class OfficialSourceReadinessTests(unittest.TestCase):
+    def test_not_ready_margin_source_fails_closed_with_transient_category(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            session = NotReadyMarginSession(not_ready_remaining=99)
+            with self.assertRaises(OfficialSourceFailure) as context:
+                build_historical_daily_snapshot(
+                    Path(temporary),
+                    CONTRACT_TARGET,
+                    session=session,
+                    minimum_price_symbols={"TWSE": 2, "TPEx": 2},
+                    minimum_chip_symbols=1,
+                )
+        self.assertEqual(
+            context.exception.source_id, "twse_margin"
+        )
+        self.assertEqual(
+            context.exception.category, "official_source_not_ready"
+        )
+        self.assertIn("TWSE margin status is invalid", context.exception.safe_message)
+
+    def test_later_attempt_succeeds_once_valid_source_arrives_without_cache_poisoning(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            not_ready = NotReadyMarginSession(not_ready_remaining=1)
+            with self.assertRaises(OfficialSourceFailure) as context:
+                build_historical_daily_snapshot(
+                    Path(temporary),
+                    CONTRACT_TARGET,
+                    session=not_ready,
+                    minimum_price_symbols={"TWSE": 2, "TPEx": 2},
+                    minimum_chip_symbols=1,
+                )
+            self.assertEqual(context.exception.category, "official_source_not_ready")
+
+            ready = Session()
+            snapshot = build_historical_daily_snapshot(
+                Path(temporary),
+                CONTRACT_TARGET,
+                session=ready,
+                minimum_price_symbols={"TWSE": 2, "TPEx": 2},
+                minimum_chip_symbols=1,
+            )
+
+        self.assertEqual(
+            snapshot.margin_by_symbol["2330"]["MarginPurchaseTodayBalance"],
+            5000.0,
+        )
+        self.assertEqual(
+            {call["source_id"] for call in ready.calls},
+            {"twse_margin", "tpex_price", "tpex_institutional", "tpex_margin"},
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

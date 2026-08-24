@@ -2,6 +2,9 @@ import copy
 import datetime
 import hashlib
 import json
+import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -13,6 +16,7 @@ from stock_papi.integrations.market_data.overnight import (
     OvernightSourceSpec,
     fetch_overnight_source,
 )
+from tests.test_batch_calendar import calendar_document
 
 
 UTC = datetime.timezone.utc
@@ -204,6 +208,107 @@ class PreMarketPipelineTests(unittest.TestCase):
             self.assertEqual(result["status"], "completed")
             core_after = published[0]["content"]["core"]
             self.assertEqual(raw_core_before, core_after)
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+class PreMarketCliFreshnessTests(unittest.TestCase):
+    """PreMarket 必須拒絕以舊盤後 base 發布「今天的盤前」。"""
+
+    @staticmethod
+    def _publish_post_close_base(root, applicable="2026-07-16"):
+        from reporting.observation_v2 import build_post_close_observation_metadata
+        from reporting.publisher import publish_report_v2
+        from tests.test_observation_public_surfaces import observation_dashboard
+
+        class Calendar:
+            def next_session(self, value):
+                return datetime.date.fromisoformat(applicable)
+
+        metadata = build_post_close_observation_metadata(
+            observation_dashboard(), Calendar()
+        )
+        publish_report_v2(Path(root), metadata)
+        return metadata
+
+    @staticmethod
+    def _calendar_artifact(root, closed=()):
+        document = calendar_document(2026, closed=closed)
+        path = Path(root) / "TW-2026.json"
+        path.write_text(json.dumps(document, ensure_ascii=False), encoding="utf-8")
+        return path
+
+    def _run_cli(self, root, applicable, calendars, extra=None):
+        environment = os.environ.copy()
+        environment["PYTHONPATH"] = os.pathsep.join(
+            [str(ROOT), str(ROOT / ".deps")]
+        )
+        command = [
+            sys.executable,
+            "-m",
+            "stock_papi.batch.cli",
+            "pre-market",
+            "--root",
+            str(root),
+            "--applicable-trading-date",
+            applicable,
+        ]
+        for calendar in calendars:
+            command += ["--calendar-artifact", str(calendar)]
+        command += list(extra or [])
+        return subprocess.run(
+            command,
+            cwd=str(ROOT),
+            env=environment,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=120,
+        )
+
+    def test_stale_post_close_base_blocks_pre_market_with_machine_readable_category(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self._publish_post_close_base(root, applicable="2026-07-16")
+            calendar = self._calendar_artifact(
+                temporary, closed=("2026-07-15",)
+            )
+
+            completed = self._run_cli(
+                root, "2026-07-16", [calendar]
+            )
+
+        self.assertEqual(completed.returncode, 4)
+        self.assertIn(
+            "stale_post_close_base", completed.stderr
+        )
+
+    def test_fresh_post_close_base_allows_pre_market_build(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self._publish_post_close_base(root, applicable="2026-07-16")
+            calendar = self._calendar_artifact(temporary)
+
+            completed = self._run_cli(
+                root, "2026-07-16", [calendar]
+            )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        result = json.loads(completed.stdout.strip().splitlines()[-1])
+        self.assertEqual(result["status"], "completed")
+
+    def test_missing_calendar_artifacts_fail_before_publication(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self._publish_post_close_base(root, applicable="2026-07-16")
+
+            completed = self._run_cli(
+                root, "2026-07-16", [], extra=["--calendar-artifact", "missing.json"]
+            )
+
+        self.assertNotEqual(completed.returncode, 0)
 
 if __name__ == "__main__":
     unittest.main()

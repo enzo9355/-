@@ -1,5 +1,11 @@
 import datetime
+import json
+import os
+import subprocess
+import sys
+import tempfile
 import unittest
+from pathlib import Path
 
 
 from stock_papi.batch.calendar import CalendarError, TradingCalendarSet
@@ -80,6 +86,75 @@ class TradingCalendarTests(unittest.TestCase):
         calendars = TradingCalendarSet.from_documents([document])
 
         self.assertTrue(calendars.is_session(datetime.date(2026, 7, 15)))
+
+    def test_latest_session_on_or_before_walks_back_weekends_and_holidays(self):
+        calendars = TradingCalendarSet.from_documents([
+            calendar_document(2026, closed=("2026-07-20",))
+        ])
+
+        self.assertEqual(
+            calendars.latest_session_on_or_before(datetime.date(2026, 7, 20)),
+            datetime.date(2026, 7, 17),
+        )
+        self.assertEqual(
+            calendars.latest_session_on_or_before(datetime.date(2026, 7, 21)),
+            datetime.date(2026, 7, 21),
+        )
+        self.assertEqual(
+            calendars.latest_session_on_or_before(datetime.date(2026, 7, 19)),
+            datetime.date(2026, 7, 17),
+        )
+
+    def test_latest_session_on_or_before_fails_closed_without_session_in_bounds(self):
+        closed = tuple(f"2026-01-{day:02d}" for day in range(1, 32))
+        calendars = TradingCalendarSet.from_documents([
+            calendar_document(2026, closed=closed)
+        ])
+
+        with self.assertRaises(CalendarError):
+            calendars.latest_session_on_or_before(datetime.date(2026, 1, 31))
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+class CalendarLatestSessionCliTests(unittest.TestCase):
+    def test_cli_derives_latest_completed_session_from_calendar(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            document = calendar_document(2026, closed=("2026-07-20",))
+            artifact = root / "TW-2026.json"
+            artifact.write_text(
+                json.dumps(document, ensure_ascii=False), encoding="utf-8"
+            )
+            environment = os.environ.copy()
+            environment["PYTHONPATH"] = os.pathsep.join(
+                [str(ROOT), str(ROOT / ".deps")]
+            )
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "stock_papi.batch.cli",
+                    "calendar-latest-session",
+                    "--calendar-artifact",
+                    str(artifact),
+                    "--before",
+                    "2026-07-20",
+                ],
+                cwd=str(ROOT),
+                env=environment,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=60,
+            )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        result = json.loads(completed.stdout.strip())
+        self.assertEqual(result["before"], "2026-07-20")
+        self.assertEqual(result["latest_session"], "2026-07-17")
 
 
 if __name__ == "__main__":
