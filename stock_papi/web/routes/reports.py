@@ -41,6 +41,7 @@ def _valid_report_date(report_date):
 
 def register_report_routes(
     app, *, load_index, load_metadata, load_index_v2, load_metadata_v2,
+    load_metadata_v2_by_sha=None,
     load_canonical_object=None, load_regression_artifact=None,
     prediction_capability=None,
 ):
@@ -188,20 +189,42 @@ def register_report_routes(
                 raise ReportWebError("報告內容暫時無法使用")
             
             if report_type == "pre_market":
-                expected_base_metadata_sha256 = None
-                post_close_item = next(
-                    (
-                        value for value in reports
-                        if value.get("report_type") == "post_close"
-                        and value.get("applicable_trading_date") == date_param
-                    ),
-                    None,
+                content = metadata.get("content")
+                base_metadata_sha256 = (
+                    content.get("base_metadata_sha256")
+                    if isinstance(content, dict)
+                    else None
                 )
-                if post_close_item is None:
-                    raise ReportWebError("盤前報告缺少盤後基底")
-                expected_base_metadata_sha256 = post_close_item.get(
-                    "metadata_sha256"
+                base_metadata = (
+                    load_metadata_v2_by_sha(base_metadata_sha256)
+                    if load_metadata_v2_by_sha is not None
+                    else None
                 )
+                if base_metadata is not None:
+                    if (
+                        base_metadata.get("report_type") != "post_close"
+                        or base_metadata.get("market", "TW") != market
+                        or base_metadata.get("source_market_date")
+                        != metadata.get("source_market_date")
+                        or base_metadata.get("applicable_trading_date")
+                        != metadata.get("applicable_trading_date")
+                    ):
+                        raise ReportWebError("盤前報告盤後基底不一致")
+                    expected_base_metadata_sha256 = base_metadata_sha256
+                else:
+                    post_close_item = next(
+                        (
+                            value for value in reports
+                            if value.get("report_type") == "post_close"
+                            and value.get("applicable_trading_date") == date_param
+                        ),
+                        None,
+                    )
+                    if post_close_item is None:
+                        raise ReportWebError("盤前報告缺少盤後基底")
+                    expected_base_metadata_sha256 = post_close_item.get(
+                        "metadata_sha256"
+                    )
                 report = build_observation_report_view(
                     metadata,
                     expected_base_metadata_sha256=expected_base_metadata_sha256,

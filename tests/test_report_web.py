@@ -286,6 +286,51 @@ class ReportWebTests(unittest.TestCase):
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.headers["Cache-Control"], "no-store")
 
+    def test_pre_market_uses_its_immutable_base_after_index_republishes_post_close(self):
+        temporary, objects = self._production_shaped_objects()
+        self.addCleanup(temporary.cleanup)
+        index = json.loads(objects["reports/v2/index-TW.json"])
+        post_close = next(
+            item for item in index["reports"] if item["report_type"] == "post_close"
+        )
+        original_metadata_path = f"reports/v2/{post_close['metadata']}"
+        republished = json.loads(objects[original_metadata_path])
+        republished["title"] = "2026-07-15 盤後市場觀察（專業版）"
+        republished["published_at"] = "2026-07-16T23:00:00Z"
+        encoded = json.dumps(
+            republished,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        metadata_sha256 = hashlib.sha256(encoded).hexdigest()
+        post_close.update(
+            title=republished["title"],
+            published_at=republished["published_at"],
+            metadata=f"metadata/{metadata_sha256}.json",
+            metadata_sha256=metadata_sha256,
+        )
+        objects["reports/v2/index-TW.json"] = json.dumps(
+            index,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        objects[f"reports/v2/{post_close['metadata']}"] = encoded
+
+        with patch.object(
+            stock_app,
+            "_gcs_get_report_v2_object",
+            side_effect=lambda path, _size: objects.get(path),
+            create=True,
+        ):
+            response = stock_app.app.test_client().get(
+                "/reports/2026-07-16/pre-market"
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("隔夜訊號分歧", response.get_data(as_text=True))
+
     def test_unexpected_report_render_error_is_safe_and_correlated(self):
         temporary, objects, _metadata = self._objects()
         self.addCleanup(temporary.cleanup)

@@ -155,6 +155,7 @@ from stock_papi.repositories.quant_snapshots import (
 from stock_papi.repositories.report_store import (
     load_report_index,
     load_report_metadata,
+    load_report_metadata_by_sha,
     load_report_pdf,
 )
 from stock_papi.repositories.auth_store import FirestoreAuthStore
@@ -1384,6 +1385,9 @@ def route_dependencies():
         ),
         "load_report_metadata_v2": lambda item: load_report_metadata(
             item, load_object=_gcs_get_report_v2_object, version="v2"
+        ),
+        "load_report_metadata_v2_by_sha": lambda metadata_sha256: load_report_metadata_by_sha(
+            metadata_sha256, load_object=_gcs_get_report_v2_object
         ),
         "load_canonical_object": lambda object_path, max_bytes=5_000_000: load_canonical_object(
             object_path, max_bytes=max_bytes
