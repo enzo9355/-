@@ -29,3 +29,11 @@
 ## Concerns
 
 - Browser desktop/390px visual inspection was not completed in this local run. The rendered routes, responsive CSS rules, and accessibility assertions were verified, but the detector's degraded mode leaves visual inspection as remaining acceptance work.
+
+## Round 1 fix — fail-closed US stocks hydration
+
+- Defect: `/us/stocks` rendered `data-dashboard-endpoint="/api/dashboard"`; the shared browser bundle could therefore fetch and render the TW/TAIEX dashboard on a US page.
+- RED: `python -m unittest tests.test_web_product.WebProductTests.test_us_stocks_disables_tw_dashboard_hydration -v` failed because the rendered US HTML unexpectedly contained `data-dashboard-endpoint`.
+- GREEN: `templates/stocks.html` now emits the existing `/api/dashboard` hydration attribute only for `market == "TW"`. US renders no dashboard endpoint, no TAIEX/TW event payload, and retains the `market=US` stock-search flow to `/stock/AAPL`.
+- Focused verification: the new regression test passed, then `tests.test_web_product tests.test_report_web tests.test_route_inventory tests.test_absorb_brand tests.test_regression_route_integration` passed 72/72 tests.
+- Per review direction, no live-browser acceptance or Impeccable detector run was performed in this fix round.

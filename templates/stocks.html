@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}個股與 ETF｜ABSORB{% endblock %}
 {% block content %}
-<div class="page dashboard-page" data-dashboard-endpoint="/api/dashboard">
+<div class="page dashboard-page"{% if market|default('TW', true) == 'TW' %} data-dashboard-endpoint="/api/dashboard"{% endif %}>
   <header class="page-header"><div><p class="eyebrow">STOCK ACTUALS</p><h1>個股與 ETF</h1><p class="page-intro">搜尋個股，或查看已觸發的市場事件與 ETF 實況。</p></div></header>
   {% if search_error %}<div class="error-banner" role="alert">找不到「{{ search_query }}」，請輸入台股代碼、名稱或美股代碼。</div>{% endif %}
    <section class="panel" aria-labelledby="stock-search-title"><h2 id="stock-search-title">搜尋股票</h2><form class="stock-search" action="{{ url_for('search_page') }}" method="get" role="search"><input type="hidden" name="market" value="{{ market|default('TW', true) }}"><label class="search-label" for="stock-search">股票代碼或名稱</label><div class="search-control glass-panel"><input id="stock-search" name="q" value="{{ search_query }}" placeholder="輸入 2330、台積電或 AAPL" autocomplete="off" required><button type="submit">查看觀察</button></div></form></section>

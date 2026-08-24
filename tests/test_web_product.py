@@ -226,6 +226,27 @@ class WebProductTests(unittest.TestCase):
         self.assertEqual(detail.status_code, 200)
         self.assertIn('data-market="US"', detail.get_data(as_text=True))
 
+    def test_us_stocks_disables_tw_dashboard_hydration(self):
+        client = stock_app.app.test_client()
+        response = client.get("/us/stocks")
+        html = response.get_data(as_text=True)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('data-market="US"', html)
+        self.assertNotIn('data-dashboard-endpoint', html)
+        self.assertNotIn("TAIEX", html)
+        self.assertIn("目前沒有通過條件的異常事件。", html)
+        self.assertIn('action="/search"', html)
+        self.assertIn('name="market" value="US"', html)
+
+        with patch.object(
+            stock_app, "search_stock_code", return_value=("AAPL", "Apple Inc.")
+        ):
+            search = client.get("/search?q=AAPL&market=US")
+
+        self.assertEqual(search.status_code, 302)
+        self.assertTrue(search.headers["Location"].endswith("/stock/AAPL"))
+
     @patch.object(stock_app, "_published_dashboard_snapshot")
     def test_market_page_accepts_production_data_quality_fields(self, load):
         snapshot = observation_dashboard()
