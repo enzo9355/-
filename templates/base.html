@@ -24,30 +24,36 @@
   <script type="application/ld+json">{"@context":"https://schema.org","@type":"SoftwareApplication","name":"ABSORB","applicationCategory":"FinanceApplication","operatingSystem":"Web, LINE","description":"已驗證市場觀察"}</script>
   {% block head %}{% endblock %}
 </head>
-<body data-account-session="{{ 'present' if request.cookies.get('stock_papi_session') else 'anonymous' }}">
+<body data-account-session="{{ 'present' if request.cookies.get('stock_papi_session') else 'anonymous' }}" data-market="{{ market|default('US' if (request.endpoint or '').startswith('us_') else 'TW', true) }}">
   {% set endpoint = request.endpoint or '' %}
-  {% set dashboard_active = endpoint == 'dashboard_page' %}
-  {% set market_active = endpoint == 'market_page' %}
-  {% set industries_active = endpoint == 'industries_page' %}
-  {% set stocks_active = endpoint in ('stocks_page', 'stock_page') %}
+  {% set market_context = market|default('US' if endpoint.startswith('us_') else 'TW', true) %}
+  {% set us_market_active = market_context == 'US' %}
+  {% set dashboard_active = endpoint in ('dashboard_page', 'us_dashboard_page') %}
+  {% set market_active = endpoint in ('market_page', 'us_market_page') %}
+  {% set industries_active = endpoint in ('industries_page', 'us_industries_page') %}
+  {% set stocks_active = endpoint in ('stocks_page', 'us_stocks_page', 'stock_page') %}
   {% set reports_active = 'report' in endpoint %}
   {% set ask_active = endpoint == 'ask_page' %}
   {% set learn_active = endpoint == 'learn_page' %}
-  {% set us_market_active = endpoint.startswith('us_') %}
+  {% set dashboard_url = url_for('us_dashboard_page') if us_market_active else url_for('dashboard_page') %}
+  {% set market_url = url_for('us_market_page') if us_market_active else url_for('market_page') %}
+  {% set industries_url = url_for('us_industries_page') if us_market_active else url_for('industries_page') %}
+  {% set stocks_url = url_for('us_stocks_page') if us_market_active else url_for('stocks_page') %}
+  {% set reports_url = url_for('us_reports_page') if us_market_active else url_for('reports_page') %}
   <a class="skip-link" href="#main-content">跳到主要內容</a>
   <header class="site-header">
     <div class="topbar">
-      <a class="brand-wordmark" data-brand-wordmark href="{{ url_for('dashboard_page') }}" aria-label="回到 ABSORB 主畫面">absorb</a>
+      <a class="brand-wordmark" data-brand-wordmark href="{{ dashboard_url }}" aria-label="回到 ABSORB 主畫面">ABSORB</a>
       <nav class="nav-list">
-        <a class="nav-link{{ ' active' if dashboard_active else '' }}" href="{{ url_for('dashboard_page') }}"{% if dashboard_active %} aria-current="page"{% endif %}>今天市場</a>
-        <a class="nav-link{{ ' active' if market_active else '' }}" href="{{ url_for('market_page') }}"{% if market_active %} aria-current="page"{% endif %}>市場實況</a>
-        <a class="nav-link{{ ' active' if industries_active else '' }}" href="{{ url_for('industries_page') }}"{% if industries_active %} aria-current="page"{% endif %}>產業觀察</a>
-        <a class="nav-link{{ ' active' if stocks_active else '' }}" href="{{ url_for('stocks_page') }}"{% if stocks_active %} aria-current="page"{% endif %}>個股與 ETF</a>
-        <a class="nav-link{{ ' active' if reports_active else '' }}" href="{{ url_for('reports_page') }}"{% if reports_active %} aria-current="page"{% endif %}>每日報告</a>
+        <a class="nav-link{{ ' active' if dashboard_active else '' }}" href="{{ dashboard_url }}"{% if dashboard_active %} aria-current="page"{% endif %}>今天市場</a>
+        <a class="nav-link{{ ' active' if market_active else '' }}" href="{{ market_url }}"{% if market_active %} aria-current="page"{% endif %}>市場實況</a>
+        <a class="nav-link{{ ' active' if industries_active else '' }}" href="{{ industries_url }}"{% if industries_active %} aria-current="page"{% endif %}>產業觀察</a>
+        <a class="nav-link{{ ' active' if stocks_active else '' }}" href="{{ stocks_url }}"{% if stocks_active %} aria-current="page"{% endif %}>個股與 ETF</a>
+        <a class="nav-link{{ ' active' if reports_active else '' }}" href="{{ reports_url }}"{% if reports_active %} aria-current="page"{% endif %}>每日報告</a>
       </nav>
       <nav class="market-switch" data-market-switch aria-label="切換市場內容">
         <a class="{{ 'active' if not us_market_active else '' }}" href="{{ url_for('dashboard_page') }}"{% if not us_market_active %} aria-current="true"{% endif %}>台股</a>
-        <a class="{{ 'active' if us_market_active else '' }}" href="{{ url_for('us_reports_page') }}" title="前往美股已驗證報告"{% if us_market_active %} aria-current="true"{% endif %}>美股</a>
+        <a class="{{ 'active' if us_market_active else '' }}" href="{{ url_for('us_dashboard_page') }}" title="前往美股已驗證研究摘要"{% if us_market_active %} aria-current="true"{% endif %}>美股</a>
       </nav>
       <section class="account-nav" data-account-nav><a class="topbar-account" href="{{ url_for('line_login', return_to=request.path) }}">使用 LINE 登入</a></section>
     </div>
@@ -59,10 +65,10 @@
     </div>
   </div>
   {% if not ask_active %}
-  <button class="quick-ask-trigger" type="button" data-quick-ask-open aria-controls="quick-ask-dialog" aria-expanded="false"><span aria-hidden="true">✦</span> Ask Absorb</button>
+  <button class="quick-ask-trigger" type="button" data-quick-ask-open aria-controls="quick-ask-dialog" aria-expanded="false">ASK ABSORB</button>
   <div class="quick-ask-backdrop" data-quick-ask-dialog id="quick-ask-dialog" hidden>
     <section class="quick-ask-sheet" role="dialog" aria-modal="true" aria-labelledby="quick-ask-title" data-conversation-endpoint="/api/conversation">
-      <header class="quick-ask-header"><div><h2 id="quick-ask-title">Ask Absorb</h2><p>正在閱讀：{{ '美股已驗證報告' if us_market_active else '台股市場總覽' }}</p></div><button type="button" data-quick-ask-close aria-label="關閉 Ask Absorb">×</button></header>
+      <header class="quick-ask-header"><div><h2 id="quick-ask-title">ASK ABSORB</h2><p>正在閱讀：{{ '美股已驗證研究摘要' if us_market_active else '台股市場總覽' }}</p></div><button type="button" data-quick-ask-close aria-label="關閉 ASK ABSORB">×</button></header>
       <div class="conversation-log quick-ask-log" data-conversation-log aria-live="polite"><p class="empty-state">可詢問目前已發布的市場、產業與個股觀察。</p></div>
       <form class="conversation-form quick-ask-form" data-conversation-form>
         <label for="quick-ask-question">觀察問題</label>
@@ -73,11 +79,11 @@
   </div>
   {% endif %}
   <nav class="mobile-nav" aria-label="行動版導覽">
-    <a class="{{ 'active' if dashboard_active else '' }}" href="{{ url_for('dashboard_page') }}"{% if dashboard_active %} aria-current="page"{% endif %}>今天</a>
-    <a class="{{ 'active' if market_active else '' }}" href="{{ url_for('market_page') }}"{% if market_active %} aria-current="page"{% endif %}>市場</a>
-    <a class="{{ 'active' if stocks_active else '' }}" href="{{ url_for('stocks_page') }}"{% if stocks_active %} aria-current="page"{% endif %}>個股</a>
-    <a class="{{ 'active' if reports_active else '' }}" href="{{ url_for('reports_page') }}"{% if reports_active %} aria-current="page"{% endif %}>每日報告</a>
-    <details class="mobile-more{{ ' active' if industries_active or ask_active or learn_active else '' }}"><summary>更多</summary><div><a class="{{ 'active' if industries_active else '' }}" href="{{ url_for('industries_page') }}"{% if industries_active %} aria-current="page"{% endif %}>產業</a><a class="{{ 'active' if ask_active else '' }}" href="{{ url_for('ask_page') }}"{% if ask_active %} aria-current="page"{% endif %}>Ask</a><a class="{{ 'active' if learn_active else '' }}" href="{{ url_for('learn_page') }}"{% if learn_active %} aria-current="page"{% endif %}>學習</a><a href="{{ url_for('account_page') }}" data-mobile-account>登入</a></div></details>
+    <a class="{{ 'active' if dashboard_active else '' }}" href="{{ dashboard_url }}"{% if dashboard_active %} aria-current="page"{% endif %}>今天</a>
+    <a class="{{ 'active' if market_active else '' }}" href="{{ market_url }}"{% if market_active %} aria-current="page"{% endif %}>市場</a>
+    <a class="{{ 'active' if industries_active else '' }}" href="{{ industries_url }}"{% if industries_active %} aria-current="page"{% endif %}>產業</a>
+    <a class="{{ 'active' if stocks_active else '' }}" href="{{ stocks_url }}"{% if stocks_active %} aria-current="page"{% endif %}>個股</a>
+    <a class="{{ 'active' if reports_active else '' }}" href="{{ reports_url }}"{% if reports_active %} aria-current="page"{% endif %}>報告</a>
   </nav>
   <script src="{{ url_for('static', filename='app.js', v=STATIC_ASSET_VERSION) }}" defer></script>
   {% block scripts %}{% endblock %}

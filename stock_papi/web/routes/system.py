@@ -9,11 +9,17 @@ def register_system_routes(app, *, search_stock):
 
     def search_page():
         query = request.args.get("q", "").strip()
+        market = request.args.get("market", "TW").upper()
         code, _name = search_stock(query)
         if code:
             return redirect(url_for("stock_page", code=code), code=302)
         return redirect(
-            url_for("stocks_page", q=query, error="not-found"), code=302
+            url_for(
+                "us_stocks_page" if market == "US" else "stocks_page",
+                q=query,
+                error="not-found",
+            ),
+            code=302,
         )
 
     def watchlist_page():

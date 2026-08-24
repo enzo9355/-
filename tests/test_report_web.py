@@ -98,6 +98,104 @@ class ReportWebTests(unittest.TestCase):
         }
         return temporary, objects
 
+    def test_market_summary_view_exposes_only_verified_professional_fields(self):
+        temporary, objects, _metadata = self._objects()
+        self.addCleanup(temporary.cleanup)
+        canonical_key = next(key for key in objects if "objects/canonical/" in key)
+        from reporting.professional_schema import ProfessionalPostCloseReport
+        from stock_papi.services.market_summary import build_market_summary_view
+
+        report = ProfessionalPostCloseReport.from_document(
+            json.loads(objects[canonical_key])
+        )
+        view = build_market_summary_view(report)
+
+        self.assertEqual(view["market"], report.identity.market)
+        self.assertEqual(
+            view["source_market_date"], report.identity.source_market_date.isoformat()
+        )
+        self.assertEqual(
+            view["applicable_trading_date"],
+            report.identity.applicable_trading_date.isoformat(),
+        )
+        self.assertEqual(view["industries"], report.industries.to_document())
+        self.assertEqual(view["key_events"], list(report.key_events))
+        self.assertEqual(view["securities"], report.securities.to_document())
+        self.assertEqual(view["validation"], report.validation.to_document())
+
+    def test_us_summary_rejects_tampered_canonical_object(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        metadata = build_post_close_observation_metadata(
+            observation_dashboard(), Calendar()
+        )
+        metadata["market"] = "US"
+        from reporting.professional_builder import build_professional_post_close_artifact
+        professional_report = build_professional_post_close_artifact(
+            metadata, code_commit_sha="b" * 40
+        )
+        publish_report_v2(root, metadata, professional_report=professional_report)
+        publish = root / "publish" / "reports" / "v2"
+        objects = {
+            f"reports/v2/{path.relative_to(publish).as_posix()}": path.read_bytes()
+            for path in publish.rglob("*")
+            if path.is_file()
+        }
+        canonical_key = next(key for key in objects if "objects/canonical/" in key)
+        canonical = json.loads(objects[canonical_key])
+        canonical["executive_summary"]["market_state"] = "tampered"
+        from reporting.professional_schema import compute_content_sha256
+        canonical["identity"]["content_sha256"] = compute_content_sha256(canonical)
+        objects[canonical_key] = json.dumps(
+            canonical, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+
+        with patch.object(
+            stock_app,
+            "_gcs_get_report_v2_object",
+            side_effect=lambda path, _size: objects.get(path) if path.startswith("reports/v2/") else objects.get(f"reports/v2/{path}"),
+            create=True,
+        ):
+            response = stock_app.app.test_client().get("/us")
+
+        self.assertEqual(response.status_code, 503)
+        self.assertNotIn("tampered", response.get_data(as_text=True))
+
+    def test_us_summary_renders_verified_canonical_report(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        metadata = build_post_close_observation_metadata(
+            observation_dashboard(), Calendar()
+        )
+        metadata["market"] = "US"
+        metadata["title"] = "2026-07-15 美股盤後市場觀察"
+        from reporting.professional_builder import build_professional_post_close_artifact
+        professional_report = build_professional_post_close_artifact(
+            metadata, code_commit_sha="b" * 40
+        )
+        publish_report_v2(root, metadata, professional_report=professional_report)
+        publish = root / "publish" / "reports" / "v2"
+        objects = {
+            f"reports/v2/{path.relative_to(publish).as_posix()}": path.read_bytes()
+            for path in publish.rglob("*")
+            if path.is_file()
+        }
+
+        with patch.object(
+            stock_app,
+            "_gcs_get_report_v2_object",
+            side_effect=lambda path, _size: objects.get(path) if path.startswith("reports/v2/") else objects.get(f"reports/v2/{path}"),
+            create=True,
+        ):
+            response = stock_app.app.test_client().get("/us")
+
+        html = response.get_data(as_text=True)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("美股市場研究摘要", html)
+        self.assertIn("2026-07-15", html)
+
     def test_production_shaped_daily_reports_have_distinct_canonical_pages(self):
         temporary, objects = self._production_shaped_objects()
         self.addCleanup(temporary.cleanup)

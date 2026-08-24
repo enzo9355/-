@@ -56,7 +56,7 @@ class AbsorbBrandTests(unittest.TestCase):
     def test_design_system_uses_measured_navy_and_prohibits_old_persona(self):
         design = (ROOT / "DESIGN.md").read_text(encoding="utf-8")
         self.assertIn("--absorb-navy: #122643", design)
-        self.assertIn("導覽文字標誌固定為小寫草寫 `absorb`", design)
+        self.assertIn("導覽文字標誌固定為 `ABSORB`", design)
         self.assertIn("Avenir Next", design)
         self.assertIn("不下載、內嵌或提交專有字型", design)
         self.assertIn("不使用玻璃擬態", design)
@@ -111,6 +111,15 @@ class AbsorbBrandTests(unittest.TestCase):
         self.assertIn(f"'sha256-{digest}'", csp_source)
         for name in ("404.html", "500.html"):
             self.assertIn("ABSORB", (ROOT / "templates" / name).read_text(encoding="utf-8"))
+
+    def test_product_shell_uses_accessible_uppercase_product_labels(self):
+        base = (ROOT / "templates" / "base.html").read_text(encoding="utf-8")
+
+        self.assertIn('aria-label="回到 ABSORB 主畫面"', base)
+        self.assertIn('>ABSORB</a>', base)
+        self.assertIn(">ASK ABSORB</button>", base)
+        self.assertIn(">ASK ABSORB</h2>", base)
+        self.assertIn('aria-label="關閉 ASK ABSORB"', base)
 
     def test_static_accessibility_contract(self):
         templates = list((ROOT / "templates").glob("*.html"))

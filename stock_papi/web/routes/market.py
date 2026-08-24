@@ -124,12 +124,22 @@ def register_market_routes(
         if code not in twstock_codes() and not is_us_ticker(code):
             abort(404)
         data = stock_observation(code)
+        market = "US" if is_us_ticker(code) else "TW"
         peer_group = find_industry_peers(code)
         peers = [{"code": peer, "name": get_stock_name(peer)} for peer in peer_group["codes"]]
         return render_template(
-            "stock_detail.html", d=data, peers=peers,
+            "stock_detail.html", d={**data, "market": market}, peers=peers,
             peer_category=peer_group["category"],
         ) if data else "查無資料"
+
+    def us_stocks_page():
+        return render_template(
+            "stocks.html",
+            observation={},
+            search_query="",
+            search_error=False,
+            market="US",
+        )
 
     def market_page():
         snapshot = dashboard_snapshot()
@@ -145,4 +155,5 @@ def register_market_routes(
     app.add_url_rule("/api/market-insights", "market_insights_api", market_insights_api)
     app.add_url_rule("/market-map", "market_map_page", market_map_page)
     app.add_url_rule("/stock/<code>", "stock_page", stock_page)
+    app.add_url_rule("/us/stocks", "us_stocks_page", us_stocks_page)
     app.add_url_rule("/market", "market_page", market_page)

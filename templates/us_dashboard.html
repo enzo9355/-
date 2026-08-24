@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}美股市場研究摘要｜ABSORB{% endblock %}
+{% block content %}
+<div class="page market-summary-page">
+  <header class="page-header market-summary-header">
+    <div>
+      <h1>美股市場研究摘要</h1>
+      <p class="page-intro">僅依已驗證的美股正式報告整理；不推定台股資料，也不補造即時數字。</p>
+    </div>
+    <dl class="summary-dates" aria-label="資料日期">
+      <div><dt>來源交易日</dt><dd>{{ summary.source_market_date }}</dd></div>
+      <div><dt>適用交易日</dt><dd>{{ summary.applicable_trading_date }}</dd></div>
+    </dl>
+  </header>
+  <section class="panel summary-conclusion" aria-labelledby="summary-conclusion-title">
+    <h2 id="summary-conclusion-title">{{ summary.executive_summary.one_line_conclusion }}</h2>
+    <p>{{ summary.executive_summary.largest_risk }}</p>
+  </section>
+  <div class="market-summary-grid">
+    <section class="panel" aria-labelledby="summary-events-title">
+      <h2 id="summary-events-title">關鍵事件</h2>
+      <ul class="summary-list">{% for event in summary.key_events %}<li><strong>{{ event.headline }}</strong>{% if event.description and event.description != event.headline %}<span>{{ event.description }}</span>{% endif %}</li>{% else %}<li class="empty-state">本次已驗證報告沒有可顯示的關鍵事件。</li>{% endfor %}</ul>
+    </section>
+    <section class="panel" aria-labelledby="summary-validation-title">
+      <h2 id="summary-validation-title">驗證狀態</h2>
+      {% if summary.validation.status == 'available' %}<dl class="summary-facts">{% for name, value in summary.validation.data.gates.items() %}<div><dt>{{ name }}</dt><dd>{{ value }}</dd></div>{% endfor %}</dl>{% else %}<p class="empty-state">{{ summary.validation.reason }}</p>{% endif %}
+    </section>
+  </div>
+</div>
+{% endblock %}

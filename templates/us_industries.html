@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}美股產業觀察｜ABSORB{% endblock %}
+{% block content %}
+<div class="page market-summary-page">
+  <header class="page-header"><div><h1>美股產業觀察</h1><p class="page-intro">資料日 {{ summary.source_market_date }}；排名與觀察均來自已驗證的美股正式報告。</p></div></header>
+  <section class="panel" aria-labelledby="us-industries-title">
+    <h2 id="us-industries-title">產業資料</h2>
+    {% if summary.industries.status == 'available' %}<div class="summary-table-wrap"><table><thead><tr><th scope="col">產業</th><th scope="col">觀察</th></tr></thead><tbody>{% for item in summary.industries.data.ranking|default([]) %}<tr><td>{{ item.name|default(item.industry|default('未命名')) }}</td><td>{{ item.rotation|default(item.status|default('資料不足')) }}</td></tr>{% else %}<tr><td colspan="2">本次報告沒有可顯示的產業排名。</td></tr>{% endfor %}</tbody></table></div>{% else %}<p class="empty-state">{{ summary.industries.reason }}</p>{% endif %}
+  </section>
+  <section class="panel" aria-labelledby="us-securities-title">
+    <h2 id="us-securities-title">個股與 ETF</h2>
+    {% if summary.securities.status == 'available' %}<p class="page-intro">已驗證事件 {{ summary.securities.data.stock_events|default([])|length }} 筆；ETF 觀察 {{ summary.securities.data.etf_observations|default([])|length }} 筆。</p>{% else %}<p class="empty-state">{{ summary.securities.reason }}</p>{% endif %}
+  </section>
+</div>
+{% endblock %}

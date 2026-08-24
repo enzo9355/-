@@ -26,7 +26,7 @@ class WebProductTests(unittest.TestCase):
             "/market": "市場實況",
             "/industries": "產業觀察",
             "/stocks": "個股與 ETF",
-            "/ask": "Ask ABSORB",
+            "/ask": "ASK ABSORB",
             "/learn": "市場觀察小辭典",
         }
 
@@ -169,7 +169,7 @@ class WebProductTests(unittest.TestCase):
         self.assertIn("使用 LINE 登入", html)
         self.assertIn("已驗證市場觀察", html)
         self.assertIn('data-market-switch', html)
-        self.assertIn('href="/reports/us"', html)
+        self.assertIn('href="/us"', html)
         self.assertNotIn("fonts.googleapis.com", html)
         self.assertIn("--absorb-navy:#122643", css)
         self.assertIn("--absorb-canvas:#f7f9fc", css)
@@ -198,6 +198,33 @@ class WebProductTests(unittest.TestCase):
         )
         self.assertIn("immutable", asset.headers["Cache-Control"])
         asset.close()
+
+    def test_us_product_navigation_and_stock_detail_keep_us_context(self):
+        client = stock_app.app.test_client()
+        us_stocks = client.get("/us/stocks")
+
+        self.assertEqual(us_stocks.status_code, 200)
+        html = us_stocks.get_data(as_text=True)
+        self.assertIn('data-market="US"', html)
+        for href in (
+            'href="/us"',
+            'href="/us/market"',
+            'href="/us/industries"',
+            'href="/us/stocks"',
+            'href="/reports/us"',
+        ):
+            with self.subTest(href=href):
+                self.assertIn(href, html)
+
+        with patch.object(stock_app, "build_stock_observation", return_value={
+            "code": "AAPL", "name": "Apple Inc.", "market": "US",
+            "observation_kind": "status", "status_label": "資料不足",
+            "observation_as_of": "2026-07-15", "evidence_sha256": "a" * 64,
+        }):
+            detail = client.get("/stock/AAPL")
+
+        self.assertEqual(detail.status_code, 200)
+        self.assertIn('data-market="US"', detail.get_data(as_text=True))
 
     @patch.object(stock_app, "_published_dashboard_snapshot")
     def test_market_page_accepts_production_data_quality_fields(self, load):
@@ -389,8 +416,7 @@ class WebProductTests(unittest.TestCase):
         self.assertNotIn('href="#', mobile_nav)
         self.assertIn('aria-current="page">今天</a>', mobile_nav)
         ask = client.get("/ask").get_data(as_text=True)
-        ask_mobile = ask.split('<nav class="mobile-nav"', 1)[1].split("</nav>", 1)[0]
-        self.assertIn('class="active" href="/ask" aria-current="page">Ask</a>', ask_mobile)
+        self.assertIn('<h1>ASK ABSORB</h1>', ask)
 
     def test_legacy_hash_migrator_uses_only_fixed_canonical_routes(self):
         script = Path(stock_app.app.static_folder, "app.js").read_text(

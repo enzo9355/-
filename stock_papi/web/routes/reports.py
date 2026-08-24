@@ -27,6 +27,7 @@ from reporting.regression_schema import (
 )
 from reporting.schemas import ReportMetadataV2
 from stock_papi.services.report_view import build_observation_report_view
+from stock_papi.services.market_summary import build_market_summary_view
 from reporting.config import MAX_CANONICAL_REPORT_BYTES
 from werkzeug.exceptions import HTTPException
 
@@ -149,6 +150,68 @@ def register_report_routes(
             )
             return None
 
+    def _load_verified_professional_report(*, metadata, route_source_date):
+        """Load one canonical report through the complete fail-closed contract."""
+        canonical_ptr = metadata.get("professional_report")
+        if not isinstance(canonical_ptr, dict):
+            raise ReportWebError("報告 Canonical Object 指標遺失")
+
+        object_path = canonical_ptr.get("object")
+        expected_sha = canonical_ptr.get("sha256")
+        if not isinstance(object_path, str) or not object_path:
+            raise ReportWebError("報告 Canonical Object 指標遺失")
+        if not isinstance(expected_sha, str) or not expected_sha:
+            raise ReportWebError("報告 Canonical Object 指標遺失")
+        if load_canonical_object is None:
+            raise ReportWebError("系統未提供 load_canonical_object")
+
+        try:
+            raw_bytes = load_canonical_object(
+                object_path, max_bytes=MAX_CANONICAL_REPORT_BYTES
+            )
+        except Exception as exc:
+            raise ReportWebError("無法讀取 Canonical Object") from exc
+        if (
+            not isinstance(raw_bytes, bytes)
+            or len(raw_bytes) == 0
+            or len(raw_bytes) > MAX_CANONICAL_REPORT_BYTES
+        ):
+            raise ReportWebError("Canonical Object 內容無效")
+
+        actual_sha256 = hashlib.sha256(raw_bytes).hexdigest()
+        if not hmac.compare_digest(actual_sha256, expected_sha):
+            raise ReportWebError("Canonical Object 雜湊比對失敗")
+        if object_path != f"objects/canonical/{actual_sha256}.json":
+            raise ReportWebError("Canonical Object 路徑與雜湊不符")
+
+        try:
+            canonical_doc = json.loads(raw_bytes.decode("utf-8"))
+        except UnicodeDecodeError as exc:
+            raise ReportWebError("Canonical Object 解碼失敗") from exc
+        except json.JSONDecodeError as exc:
+            raise ReportWebError("Canonical Object JSON 解析失敗") from exc
+        if not isinstance(canonical_doc, dict):
+            raise ReportWebError("Canonical Object 格式錯誤")
+
+        from reporting.professional_schema import ProfessionalPostCloseReport
+        try:
+            report = ProfessionalPostCloseReport.from_document(canonical_doc)
+        except (ValueError, TypeError, KeyError) as exc:
+            raise ReportWebError("Canonical Object 驗證失敗") from exc
+
+        try:
+            canonical_metadata = copy.deepcopy(metadata)
+            canonical_metadata.pop("regression_research", None)
+            validate_professional_report_binding(
+                route_source_date=route_source_date,
+                metadata=canonical_metadata,
+                pointer=canonical_ptr,
+                report=report,
+            )
+        except (ValueError, TypeError) as exc:
+            raise ReportWebError("Professional Report 綁定驗證失敗") from exc
+        return report
+
     def _observation_page(date_param: str, report_type: str, market="TW"):
         try:
             reports = _v2_reports(market=market, required=True)
@@ -240,71 +303,9 @@ def register_report_routes(
                         render_template("report_observation.html", report=report)
                     )
                     return _secure_response(response)
-                if not isinstance(canonical_ptr, dict):
-                    raise ReportWebError("報告 Canonical Object 指標遺失")
-
-                object_path = canonical_ptr.get("object")
-                expected_sha = canonical_ptr.get("sha256")
-                if not isinstance(object_path, str) or not object_path:
-                    raise ReportWebError("報告 Canonical Object 指標遺失")
-                if not isinstance(expected_sha, str) or not expected_sha:
-                    raise ReportWebError("報告 Canonical Object 指標遺失")
-
-                if load_canonical_object is None:
-                    raise ReportWebError("系統未提供 load_canonical_object")
-
-                try:
-                    raw_bytes = load_canonical_object(
-                        object_path, max_bytes=MAX_CANONICAL_REPORT_BYTES
-                    )
-                except Exception as exc:
-                    raise ReportWebError("無法讀取 Canonical Object") from exc
-
-                if (
-                    not isinstance(raw_bytes, bytes)
-                    or len(raw_bytes) == 0
-                    or len(raw_bytes) > MAX_CANONICAL_REPORT_BYTES
-                ):
-                    raise ReportWebError("Canonical Object 內容無效")
-
-                actual_sha256 = hashlib.sha256(raw_bytes).hexdigest()
-                if not hmac.compare_digest(actual_sha256, expected_sha):
-                    raise ReportWebError("Canonical Object 雜湊比對失敗")
-
-                expected_object = f"objects/canonical/{actual_sha256}.json"
-                if object_path != expected_object:
-                    raise ReportWebError("Canonical Object 路徑與雜湊不符")
-
-                try:
-                    text_content = raw_bytes.decode("utf-8")
-                except UnicodeDecodeError as exc:
-                    raise ReportWebError("Canonical Object 解碼失敗") from exc
-
-                try:
-                    canonical_doc = json.loads(text_content)
-                except json.JSONDecodeError as exc:
-                    raise ReportWebError("Canonical Object JSON 解析失敗") from exc
-
-                if not isinstance(canonical_doc, dict):
-                    raise ReportWebError("Canonical Object 格式錯誤")
-
-                from reporting.professional_schema import ProfessionalPostCloseReport
-                try:
-                    prof_report = ProfessionalPostCloseReport.from_document(canonical_doc)
-                except (ValueError, TypeError, KeyError) as exc:
-                    raise ReportWebError("Canonical Object 驗證失敗") from exc
-
-                try:
-                    canonical_metadata = copy.deepcopy(metadata)
-                    canonical_metadata.pop("regression_research", None)
-                    validate_professional_report_binding(
-                        route_source_date=date_param,
-                        metadata=canonical_metadata,
-                        pointer=canonical_ptr,
-                        report=prof_report,
-                    )
-                except (ValueError, TypeError) as exc:
-                    raise ReportWebError("Professional Report 綁定驗證失敗") from exc
+                prof_report = _load_verified_professional_report(
+                    metadata=metadata, route_source_date=date_param
+                )
 
                 pdf_download_url = None
                 regression_artifact = _optional_regression_overlay(
@@ -441,6 +442,42 @@ def register_report_routes(
         ))
         return _secure_response(response)
 
+    def _us_summary_response(template_name):
+        try:
+            reports = _v2_reports(market="US", required=True)
+            item = next(
+                (value for value in reports if value.get("report_type") == "post_close"),
+                None,
+            )
+            if item is None:
+                raise ReportWebError("美股盤後報告暫時無法使用")
+            metadata = load_metadata_v2(item)
+            if metadata is None:
+                raise ReportWebError("美股報告內容暫時無法使用")
+            report = _load_verified_professional_report(
+                metadata=metadata,
+                route_source_date=item.get("source_market_date"),
+            )
+            if report.identity.market != "US":
+                raise ReportWebError("美股 Canonical Object 市場不一致")
+            response = make_response(render_template(
+                template_name, summary=build_market_summary_view(report), market="US"
+            ))
+            return _secure_response(response)
+        except ReportWebError as exc:
+            return _report_error(503, report_type="post_close", exc=exc)
+        except Exception as exc:
+            return _report_error(500, report_type="post_close", exc=exc)
+
+    def us_dashboard_page():
+        return _us_summary_response("us_dashboard.html")
+
+    def us_market_page():
+        return _us_summary_response("us_market.html")
+
+    def us_industries_page():
+        return _us_summary_response("us_industries.html")
+
     def us_post_close_report_page(trading_date):
         if not _valid_report_date(trading_date):
             abort(404)
@@ -516,6 +553,9 @@ def register_report_routes(
         "us_reports_page",
         us_reports_page,
     )
+    app.add_url_rule("/us", "us_dashboard_page", us_dashboard_page)
+    app.add_url_rule("/us/market", "us_market_page", us_market_page)
+    app.add_url_rule("/us/industries", "us_industries_page", us_industries_page)
     app.add_url_rule(
         "/reports/us/<trading_date>/post-close",
         "us_post_close_report_page",

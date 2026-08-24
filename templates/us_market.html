@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}美股市場實況｜ABSORB{% endblock %}
+{% block content %}
+<div class="page market-summary-page">
+  <header class="page-header"><div><h1>美股市場實況</h1><p class="page-intro">資料日 {{ summary.source_market_date }}；以下只呈現已驗證正式報告中的市場欄位。</p></div></header>
+  <section class="panel" aria-labelledby="us-market-data-title">
+    <h2 id="us-market-data-title">市場觀察</h2>
+    {% if summary.market_observation.status == 'available' %}<dl class="summary-facts">{% for name, value in summary.market_observation.data.items() if value is not mapping and value is not sequence or value is string %}<div><dt>{{ name }}</dt><dd>{{ value }}</dd></div>{% else %}<div class="empty-state">市場觀察欄位暫時無法顯示。</div>{% endfor %}</dl>{% else %}<p class="empty-state">{{ summary.market_observation.reason }}</p>{% endif %}
+  </section>
+  <section class="panel" aria-labelledby="us-market-evidence-title">
+    <h2 id="us-market-evidence-title">支持與反對證據</h2>
+    <div class="market-summary-grid"><div><h3>支持證據</h3><ul class="summary-list">{% for item in summary.executive_summary.supporting_evidence %}<li>{{ item }}</li>{% else %}<li class="empty-state">沒有可顯示的支持證據。</li>{% endfor %}</ul></div><div><h3>反對證據</h3><ul class="summary-list">{% for item in summary.executive_summary.opposing_evidence %}<li>{{ item }}</li>{% else %}<li class="empty-state">沒有可顯示的反對證據。</li>{% endfor %}</ul></div></div>
+  </section>
+</div>
+{% endblock %}

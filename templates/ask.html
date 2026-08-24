@@ -1,8 +1,8 @@
 {% extends "base.html" %}
-{% block title %}Ask ABSORB｜ABSORB{% endblock %}
+{% block title %}ASK ABSORB｜ABSORB{% endblock %}
 {% block content %}
 <div class="page">
-  <header class="page-header"><div><p class="eyebrow">OBSERVATION Q&amp;A</p><h1>Ask ABSORB</h1><p class="page-intro">以已發布的市場觀察資料回答市場、產業與股票問題。</p></div></header>
+  <header class="page-header"><div><p class="eyebrow">OBSERVATION Q&amp;A</p><h1>ASK ABSORB</h1><p class="page-intro">以已發布的市場觀察資料回答市場、產業與股票問題。</p></div></header>
   <section class="panel conversation-panel" aria-labelledby="conversation-title" data-conversation-endpoint="/api/conversation"><div class="section-heading"><div><h2 id="conversation-title">輸入觀察問題</h2></div><span class="muted small">不提供上漲機率或買賣建議</span></div><div class="conversation-log" data-conversation-log aria-live="polite"><p class="empty-state">例如：「台積電目前站上哪些均線？」或「今天哪些產業實際轉強？」</p></div><form class="conversation-form" data-conversation-form><label for="conversation-question">觀察問題</label><div class="conversation-control"><input id="conversation-question" name="question" maxlength="1200" autocomplete="off" placeholder="輸入一般自然語言問題" required><button type="submit">詢問 ABSORB</button></div></form></section>
 </div>
 {% endblock %}
