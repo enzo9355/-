@@ -604,9 +604,11 @@ def _patched_pipeline(
             raise
         if market == "TW":
             result = dict(result)
-            result["source_lineage"] = fetcher.lineage_for(
+            detailed_lineage = fetcher.lineage_for(
                 str(symbol), persisted_daily=result.get("daily")
             )
+            result["source_lineage"] = detailed_lineage
+            result["lineage"] = detailed_lineage
         return result
 
     def load_exclusion_list_with_official_status(root, market):

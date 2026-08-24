@@ -486,7 +486,7 @@ def _validated_artifact(
             latest_date = str(daily[-1].get("Date") or "").split("T", 1)[0]
             target_text = target_market_date.isoformat()
             observation_kind = document.get("observation_kind")
-            lineage = document.get("lineage") or document.get("source_lineage")
+            lineage = document.get("source_lineage") or document.get("lineage")
             status = document.get("trading_status_evidence")
             latest = document.get("latest")
             latest_daily = (
@@ -1805,18 +1805,23 @@ def build_stock_snapshot(
             if market == "TW"
             else "us-market-data-v1"
         )
+        lineage = {
+            "source_schema_version": lineage_schema,
+            "observation_as_of": target_market_date.isoformat(),
+            "latest_regular_price_date": as_of,
+            "observation_kind": observation_kind,
+        }
+        if trading_status is not None:
+            lineage["trading_status_evidence_sha256"] = (
+                trading_status.get("evidence_sha256")
+            )
         result.update(
             schema_version=2,
             target_market_date=target_market_date.isoformat(),
             observation_as_of=target_market_date.isoformat(),
             latest_regular_price_date=as_of,
             observation_kind=observation_kind,
-            lineage={
-                "source_schema_version": lineage_schema,
-                "observation_as_of": target_market_date.isoformat(),
-                "latest_regular_price_date": as_of,
-                "observation_kind": observation_kind,
-            },
+            lineage=lineage,
         )
         if trading_status is not None:
             result["trading_status_evidence"] = trading_status
