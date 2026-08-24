@@ -257,9 +257,10 @@ class AbsorbConversationWebTests(unittest.TestCase):
         provider = Provider()
         client = stock_app.app.test_client()
         capability = SimpleNamespace(mode="production")
+        context_store = MemoryContextStore()
         with (
             patch.object(stock_app, "prediction_capability", capability),
-            patch.object(stock_app, "conversation_context_store", MemoryContextStore()),
+            patch.object(stock_app, "conversation_context_store", context_store),
             patch.object(stock_app, "_conversation_provider", return_value=provider),
             patch.object(
                 stock_app,
@@ -278,13 +279,25 @@ class AbsorbConversationWebTests(unittest.TestCase):
                 "/api/conversation",
                 json=self._payload("這檔如何？", market="US", page="stock"),
             )
+            third = client.post(
+                "/api/conversation",
+                json=self._payload("這檔如何？", market="TW", page="stock"),
+            )
 
         self.assertEqual(first.status_code, 200)
         self.assertEqual(second.status_code, 200)
+        self.assertEqual(third.status_code, 200)
         second_context = provider.plans[1]["context"]
         self.assertEqual(second_context["market"], "TW")
         self.assertEqual(second_context["symbol"], "2330")
         self.assertEqual(second_context["comparison_symbols"], ["2330"])
+        self.assertEqual(len(provider.plans), 2)
+        self.assertIn("哪一檔", third.get_json()["text"])
+        saved = next(iter(context_store._items.values()))
+        self.assertEqual(saved.current_market, "TW")
+        self.assertIsNone(saved.current_symbol)
+        self.assertEqual(saved.comparison_symbols, ())
+        self.assertEqual(saved.last_page_market, "TW")
 
     def test_browser_clients_receive_isolated_principals(self):
         principals = []

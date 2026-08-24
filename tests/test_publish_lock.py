@@ -74,17 +74,21 @@ class ReportV2PublishLockTests(unittest.TestCase):
         owner_file.write_text("stale-owner", encoding="ascii")
 
         started = time.monotonic()
-        with self.assertRaisesRegex(ReportPublishError, "timed out"):
-            with report_v2_publish_lock(
-                self.root, wait_seconds=0.12, poll_seconds=0.01
-            ):
-                self.fail("stale lock was bypassed")
+        captured = StringIO()
+        with redirect_stdout(captured):
+            with self.assertRaisesRegex(ReportPublishError, "timed out"):
+                with report_v2_publish_lock(
+                    self.root, wait_seconds=0.12, poll_seconds=0.01
+                ):
+                    self.fail("stale lock was bypassed")
         elapsed = time.monotonic() - started
 
         self.assertGreaterEqual(elapsed, 0.10)
         self.assertLess(elapsed, 1.0)
         self.assertTrue(self.lock_path.is_dir())
         self.assertEqual(owner_file.read_text(encoding="ascii"), "stale-owner")
+        events = [json.loads(line)["event"] for line in captured.getvalue().splitlines()]
+        self.assertEqual(events, ["waiting", "timeout"])
 
     def test_tw_and_us_publishers_serialize_across_real_processes(self):
         context = multiprocessing.get_context("spawn")
@@ -152,6 +156,21 @@ class ReportV2PublishLockTests(unittest.TestCase):
         self.assertEqual(events[0]["kind"], "absorb-pipeline-lock")
         self.assertEqual(events[0]["scope"], "report_v2_publish")
         self.assertIsInstance(events[0]["waited_milliseconds"], int)
+
+    def test_closed_stdout_does_not_change_lock_or_publication_semantics(self):
+        class ClosedStdout:
+            def write(self, _value):
+                raise BrokenPipeError("consumer closed the pipe")
+
+            def flush(self):
+                raise BrokenPipeError("consumer closed the pipe")
+
+        with mock.patch.object(sys, "stdout", ClosedStdout()):
+            with report_v2_publish_lock(self.root) as receipt:
+                self.assertTrue(receipt["acquired"])
+
+        self.assertTrue(receipt["released"])
+        self.assertFalse(self.lock_path.exists())
 
     def test_batch_publisher_emits_structured_lock_receipts_with_default_logging(self):
         context = multiprocessing.get_context("spawn")
@@ -289,12 +308,16 @@ class ReportV2PublishLockTests(unittest.TestCase):
                 raise OSError("injected lock cleanup failure")
             return real_rmdir(path)
 
-        with mock.patch.object(Path, "rmdir", fail_lock_rmdir):
-            with self.assertRaisesRegex(ReportPublishError, "release"):
-                with report_v2_publish_lock(self.root):
-                    pass
+        captured = StringIO()
+        with redirect_stdout(captured):
+            with mock.patch.object(Path, "rmdir", fail_lock_rmdir):
+                with self.assertRaisesRegex(ReportPublishError, "release"):
+                    with report_v2_publish_lock(self.root):
+                        pass
 
         self.assertTrue(self.lock_path.is_dir())
+        events = [json.loads(line)["event"] for line in captured.getvalue().splitlines()]
+        self.assertEqual(events, ["acquired", "release_failed"])
         with self.assertRaisesRegex(ReportPublishError, "timed out"):
             with report_v2_publish_lock(
                 self.root, wait_seconds=0.05, poll_seconds=0.01

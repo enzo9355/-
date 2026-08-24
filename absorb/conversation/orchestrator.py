@@ -163,6 +163,7 @@ class ConversationOrchestrator:
 
         entities = resolve_entities(question, self.search_stock)
         page_market = market_context if market_context in {"TW", "US"} else None
+        page_changed = False
         if entities:
             context.current_market = entities[0]["market"]
             context.current_entity_type = (
@@ -178,17 +179,11 @@ class ConversationOrchestrator:
                 context.last_page_market is not None
                 and context.last_page_market != page_market
             )
-            if page_changed and context.current_market != page_market:
+            if page_changed:
                 context.current_entity_type = "market"
                 context.current_symbol = None
                 context.current_industry_id = None
                 context.comparison_symbols = ()
-            elif page_changed and context.comparison_symbols:
-                context.comparison_symbols = tuple(
-                    symbol for symbol in context.comparison_symbols
-                    if ("TW" if symbol == "TAIEX" or symbol.isdigit() else "US")
-                    == page_market
-                )
             if not (
                 context.current_symbol
                 or context.current_industry_id
@@ -198,6 +193,10 @@ class ConversationOrchestrator:
                 context.current_entity_type = "market"
         if page_market is not None:
             context.last_page_market = page_market
+        if page_changed:
+            # A real page transition is authoritative even when a pronoun-only
+            # question returns before the normal end-of-request save.
+            self.context_store.save(principal, context)
         if not entities and context.comparison_symbols and "第二檔" in question:
             symbol = context.comparison_symbols[1] if len(context.comparison_symbols) > 1 else None
             if symbol:

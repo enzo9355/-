@@ -26,6 +26,7 @@ def _emit_lock_receipt(
     waited_milliseconds: int,
     wait_seconds: float | None = None,
 ) -> None:
+    """Best-effort observability that cannot change publication semantics."""
     document: dict[str, object] = {
         "kind": "absorb-pipeline-lock",
         "scope": "report_v2_publish",
@@ -34,11 +35,16 @@ def _emit_lock_receipt(
     }
     if wait_seconds is not None:
         document["max_wait_milliseconds"] = int(wait_seconds * 1000)
-    sys.stdout.write(
-        json.dumps(document, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
-        + "\n"
-    )
-    sys.stdout.flush()
+    try:
+        sys.stdout.write(
+            json.dumps(document, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+            + "\n"
+        )
+        sys.stdout.flush()
+    except (AttributeError, OSError, ValueError):
+        # Closed pipes and detached stdout are observation failures only. The
+        # lock lifecycle and publisher exit result remain authoritative.
+        return
 
 
 def _acquire_report_v2_publish_lock(
@@ -70,6 +76,11 @@ def _acquire_report_v2_publish_lock(
                 remaining = deadline - now
                 if remaining <= 0:
                     waited_milliseconds = int((now - started) * 1000)
+                    _emit_lock_receipt(
+                        "timeout",
+                        waited_milliseconds=waited_milliseconds,
+                        wait_seconds=wait_seconds,
+                    )
                     _LOGGER.error(
                         "report_v2_publish_lock event=timeout waited_milliseconds=%d",
                         waited_milliseconds,
@@ -172,6 +183,10 @@ def report_v2_publish_lock(
                 waited_milliseconds=waited_milliseconds,
             )
         except ReportPublishError as release_error:
+            _emit_lock_receipt(
+                "release_failed",
+                waited_milliseconds=waited_milliseconds,
+            )
             _LOGGER.error(
                 "report_v2_publish_lock event=release_failed waited_milliseconds=%d",
                 waited_milliseconds,
