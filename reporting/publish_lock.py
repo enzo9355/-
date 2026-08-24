@@ -27,12 +27,15 @@ def _silence_unusable_stdout() -> None:
         devnull_fd = os.open(os.devnull, os.O_WRONLY)
     except (AttributeError, OSError, ValueError):
         return
+    reused_stdout_fd = devnull_fd == stdout_fd
     try:
-        os.dup2(devnull_fd, stdout_fd)
+        if not reused_stdout_fd:
+            os.dup2(devnull_fd, stdout_fd)
     except OSError:
         return
     finally:
-        os.close(devnull_fd)
+        if not reused_stdout_fd:
+            os.close(devnull_fd)
 
 
 def _emit_lock_receipt(

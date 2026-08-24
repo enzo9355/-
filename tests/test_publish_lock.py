@@ -226,6 +226,35 @@ class ReportV2PublishLockTests(unittest.TestCase):
         self.assertFalse(self.lock_path.exists())
         self.assertNotIn("Exception ignored", stderr)
 
+    def test_closed_stdout_fd_keeps_success_exit_code_and_releases_lock(self):
+        completed_marker = self.root / "closed-fd-publisher-completed"
+        script = (
+            "import os, sys; "
+            "from pathlib import Path; "
+            "from reporting.publish_lock import report_v2_publish_lock; "
+            "root = Path(sys.argv[1]); marker = Path(sys.argv[2]); "
+            "os.close(sys.stdout.fileno()); "
+            "manager = report_v2_publish_lock(root); "
+            "manager.__enter__(); marker.write_text('completed', encoding='ascii'); "
+            "manager.__exit__(None, None, None)"
+        )
+
+        result = subprocess.run(
+            [sys.executable, "-c", script, str(self.root), str(completed_marker)],
+            cwd=Path(__file__).resolve().parents[1],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            timeout=20,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(completed_marker.read_text(encoding="ascii"), "completed")
+        self.assertFalse(self.lock_path.exists())
+        self.assertNotIn("Exception ignored", result.stderr)
+
     def test_batch_publisher_emits_structured_lock_receipts_with_default_logging(self):
         context = multiprocessing.get_context("spawn")
         ready = context.Event()
