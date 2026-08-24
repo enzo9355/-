@@ -3,6 +3,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from stock_papi.batch.backtest_store import (
     REQUIRED_PROMOTION_GATES,
@@ -174,6 +175,107 @@ class BacktestWorkerTests(unittest.TestCase):
             self.assertEqual(json.loads(archives[0].read_text(encoding="utf-8")), old_document)
             active = json.loads(old.checkpoint_path.read_text(encoding="utf-8"))
             self.assertEqual(active["dataset_sha256"], "b" * 64)
+
+    def test_stale_completion_with_unknown_field_is_not_archivable(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            old = FullBacktestWorker(
+                root,
+                dataset_manifest="quant/v1/manifests/TW-20260714T090000Z-aaaaaaaaaaaa.json",
+                dataset_sha256="a" * 64,
+                model_version="lgbm-5d-v1",
+                feature_schema_version=1,
+                cutoff=datetime.date(2026, 7, 14),
+                items=("2330",),
+            )
+            old.run(lambda _item: None, now=datetime.datetime(2026, 7, 14, 12, tzinfo=UTC))
+            tampered = json.loads(old.checkpoint_path.read_text(encoding="utf-8"))
+            tampered["unexpected"] = "forged"
+            old.checkpoint_path.write_text(json.dumps(tampered), encoding="utf-8")
+            current = FullBacktestWorker(
+                root,
+                dataset_manifest="quant/v1/manifests/TW-20260824T090000Z-bbbbbbbbbbbb.json",
+                dataset_sha256="b" * 64,
+                model_version="lgbm-5d-v1",
+                feature_schema_version=1,
+                cutoff=datetime.date(2026, 8, 24),
+                items=("2330",),
+            )
+
+            with self.assertRaisesRegex(BacktestStoreError, "self-consistent"):
+                current.has_archivable_stale_completed_checkpoint()
+
+    def test_archive_detects_checkpoint_change_and_restores_changed_source(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            old = FullBacktestWorker(
+                root,
+                dataset_manifest="quant/v1/manifests/TW-20260714T090000Z-aaaaaaaaaaaa.json",
+                dataset_sha256="a" * 64,
+                model_version="lgbm-5d-v1",
+                feature_schema_version=1,
+                cutoff=datetime.date(2026, 7, 14),
+                items=("2330",),
+            )
+            old.run(lambda _item: None, now=datetime.datetime(2026, 7, 14, 12, tzinfo=UTC))
+            original = old.checkpoint_path.read_bytes()
+            current = FullBacktestWorker(
+                root,
+                dataset_manifest="quant/v1/manifests/TW-20260824T090000Z-bbbbbbbbbbbb.json",
+                dataset_sha256="b" * 64,
+                model_version="lgbm-5d-v1",
+                feature_schema_version=1,
+                cutoff=datetime.date(2026, 8, 24),
+                items=("2330",),
+            )
+            real_rename = Path.rename
+
+            def replace_before_retirement(path, target):
+                if path == current.checkpoint_path:
+                    path.write_bytes(b'{"concurrent":"replacement"}')
+                return real_rename(path, target)
+
+            with mock.patch.object(Path, "rename", replace_before_retirement):
+                with self.assertRaisesRegex(BacktestStoreError, "changed during archive"):
+                    current.run(lambda _item: None, archive_stale_completed=True)
+
+            self.assertEqual(
+                current.checkpoint_path.read_bytes(),
+                b'{"concurrent":"replacement"}',
+            )
+            archives = list(current.checkpoint_path.parent.glob("archive/completed-*.json"))
+            self.assertEqual(len(archives), 1)
+            self.assertEqual(archives[0].read_bytes(), original)
+
+    def test_reparse_checkpoint_path_is_rejected_before_archive(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            old = FullBacktestWorker(
+                root,
+                dataset_manifest="quant/v1/manifests/TW-20260714T090000Z-aaaaaaaaaaaa.json",
+                dataset_sha256="a" * 64,
+                model_version="lgbm-5d-v1",
+                feature_schema_version=1,
+                cutoff=datetime.date(2026, 7, 14),
+                items=("2330",),
+            )
+            old.run(lambda _item: None, now=datetime.datetime(2026, 7, 14, 12, tzinfo=UTC))
+            current = FullBacktestWorker(
+                root,
+                dataset_manifest="quant/v1/manifests/TW-20260824T090000Z-bbbbbbbbbbbb.json",
+                dataset_sha256="b" * 64,
+                model_version="lgbm-5d-v1",
+                feature_schema_version=1,
+                cutoff=datetime.date(2026, 8, 24),
+                items=("2330",),
+            )
+
+            with mock.patch(
+                "stock_papi.batch.backtest_worker._is_reparse_point",
+                side_effect=lambda path: Path(path) == current.checkpoint_path,
+            ):
+                with self.assertRaisesRegex(BacktestStoreError, "reparse point"):
+                    current.has_archivable_stale_completed_checkpoint()
 
     def test_worker_yields_to_daily_lock_before_next_item(self):
         with tempfile.TemporaryDirectory() as temporary:
