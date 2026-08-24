@@ -77,6 +77,22 @@ class AbsorbConversationWebTests(unittest.TestCase):
             400,
         )
 
+    def test_web_conversation_rejects_non_string_fields_without_calling_converse(self):
+        client = stock_app.app.test_client()
+        invalid_values = ([], {}, True, None, 7)
+
+        with patch.object(stock_app, "run_absorb_conversation") as converse:
+            for field in ("question", "market", "page"):
+                for invalid in invalid_values:
+                    payload = self._payload()
+                    payload[field] = invalid
+                    with self.subTest(field=field, invalid=invalid):
+                        response = client.post("/api/conversation", json=payload)
+                        self.assertEqual(response.status_code, 400)
+                        self.assertEqual(response.get_json(), {"error": "invalid request"})
+
+        converse.assert_not_called()
+
     def test_web_conversation_accepts_allowlisted_learn_context(self):
         client = stock_app.app.test_client()
         with patch.object(
@@ -217,6 +233,58 @@ class AbsorbConversationWebTests(unittest.TestCase):
         self.assertEqual(second_context["market"], "US")
         self.assertIsNone(second_context["symbol"])
         self.assertEqual(second_context["comparison_symbols"], [])
+
+    def test_same_cookie_us_page_retains_explicit_tw_symbol_for_follow_up(self):
+        from tests.test_absorb_conversation import stock_data
+
+        class Provider:
+            def __init__(self):
+                self.plans = []
+
+            def plan(inner_self, prompt):
+                payload = json.loads(prompt.split("規劃資料：\n", 1)[1])
+                inner_self.plans.append(payload)
+                return json.dumps({
+                    "tool_calls": [{
+                        "name": "get_stock_analysis",
+                        "arguments": {"market": "TW", "symbol": "2330"},
+                    }]
+                }, ensure_ascii=False)
+
+            def answer(inner_self, _prompt):
+                return "已驗證資料已整理。"
+
+        provider = Provider()
+        client = stock_app.app.test_client()
+        capability = SimpleNamespace(mode="production")
+        with (
+            patch.object(stock_app, "prediction_capability", capability),
+            patch.object(stock_app, "conversation_context_store", MemoryContextStore()),
+            patch.object(stock_app, "_conversation_provider", return_value=provider),
+            patch.object(
+                stock_app,
+                "_conversation_search_stock",
+                side_effect=lambda query: (
+                    ("2330", "台積電") if "2330" in query else (None, None)
+                ),
+            ),
+            patch.object(stock_app, "analyze", return_value=stock_data()),
+        ):
+            first = client.post(
+                "/api/conversation",
+                json=self._payload("2330 現在如何？", market="US", page="stock"),
+            )
+            second = client.post(
+                "/api/conversation",
+                json=self._payload("這檔如何？", market="US", page="stock"),
+            )
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        second_context = provider.plans[1]["context"]
+        self.assertEqual(second_context["market"], "TW")
+        self.assertEqual(second_context["symbol"], "2330")
+        self.assertEqual(second_context["comparison_symbols"], ["2330"])
 
     def test_browser_clients_receive_isolated_principals(self):
         principals = []

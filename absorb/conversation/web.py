@@ -22,6 +22,11 @@ def register_conversation_routes(app, *, converse, resolve_authenticated_identit
             return _private(jsonify({"error": "invalid request"}), 400)
         market = payload.get("market", "TW")
         page = payload.get("page", "home")
+        if not all(
+            isinstance(value, str)
+            for value in (payload["question"], market, page)
+        ):
+            return _private(jsonify({"error": "invalid request"}), 400)
         if market not in {"TW", "US"} or page not in {
             "home", "market", "industries", "stocks", "reports", "stock", "ask", "learn"
         }:

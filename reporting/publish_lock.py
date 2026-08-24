@@ -1,10 +1,12 @@
 """Fail-closed cross-process lock for report-v2 publish transactions."""
 
 from contextlib import contextmanager
+import json
 import logging
 import os
 from pathlib import Path
 import secrets
+import sys
 import time
 from typing import Iterator
 
@@ -16,6 +18,27 @@ _OWNER_FILE_NAME = "owner-token"
 _DEFAULT_WAIT_SECONDS = 300.0
 _DEFAULT_POLL_SECONDS = 0.05
 _LOGGER = logging.getLogger(__name__)
+
+
+def _emit_lock_receipt(
+    event: str,
+    *,
+    waited_milliseconds: int,
+    wait_seconds: float | None = None,
+) -> None:
+    document: dict[str, object] = {
+        "kind": "absorb-pipeline-lock",
+        "scope": "report_v2_publish",
+        "event": event,
+        "waited_milliseconds": max(0, int(waited_milliseconds)),
+    }
+    if wait_seconds is not None:
+        document["max_wait_milliseconds"] = int(wait_seconds * 1000)
+    sys.stdout.write(
+        json.dumps(document, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+        + "\n"
+    )
+    sys.stdout.flush()
 
 
 def _acquire_report_v2_publish_lock(
@@ -38,9 +61,10 @@ def _acquire_report_v2_publish_lock(
             except FileExistsError as exc:
                 now = time.monotonic()
                 if not waiting_logged:
-                    _LOGGER.info(
-                        "report_v2_publish_lock event=waiting wait_seconds=%.3f",
-                        wait_seconds,
+                    _emit_lock_receipt(
+                        "waiting",
+                        waited_milliseconds=int((now - started) * 1000),
+                        wait_seconds=wait_seconds,
                     )
                     waiting_logged = True
                 remaining = deadline - now
@@ -76,9 +100,9 @@ def _acquire_report_v2_publish_lock(
             "report v2 publish transaction lock initialization failed"
         ) from exc
     waited_milliseconds = int((time.monotonic() - started) * 1000)
-    _LOGGER.info(
-        "report_v2_publish_lock event=acquired waited_milliseconds=%d",
-        waited_milliseconds,
+    _emit_lock_receipt(
+        "acquired",
+        waited_milliseconds=waited_milliseconds,
     )
     return lock_path, owner_token, waited_milliseconds
 
@@ -143,9 +167,9 @@ def report_v2_publish_lock(
         try:
             _release_report_v2_publish_lock(lock_path, owner_token)
             receipt["released"] = True
-            _LOGGER.info(
-                "report_v2_publish_lock event=released waited_milliseconds=%d",
-                waited_milliseconds,
+            _emit_lock_receipt(
+                "released",
+                waited_milliseconds=waited_milliseconds,
             )
         except ReportPublishError as release_error:
             _LOGGER.error(

@@ -1,8 +1,15 @@
 """Cross-process report-v2 publication lock tests."""
 
+from contextlib import redirect_stdout
+from io import StringIO
+import json
 import multiprocessing
 from pathlib import Path
+import queue
+import subprocess
+import sys
 import tempfile
+import threading
 import time
 import unittest
 from unittest import mock
@@ -15,10 +22,11 @@ LOCK_NAME = ".publish-transaction-lock"
 
 
 def _hold_publish_lock(root, ready, release):
-    with report_v2_publish_lock(Path(root)):
-        ready.set()
-        if not release.wait(10):
-            raise RuntimeError("timed out waiting to release publish lock")
+    with redirect_stdout(StringIO()):
+        with report_v2_publish_lock(Path(root)):
+            ready.set()
+            if not release.wait(10):
+                raise RuntimeError("timed out waiting to release publish lock")
 
 
 def _publish_market(root, market, ready, release, attempting, completed, failed):
@@ -42,7 +50,8 @@ def _publish_market(root, market, ready, release, attempting, completed, failed)
     publisher._publish_report_v2_impl = gated
     try:
         attempting.set()
-        publisher.publish_report_v2(Path(root), document)
+        with redirect_stdout(StringIO()):
+            publisher.publish_report_v2(Path(root), document)
     except BaseException:
         failed.set()
         raise
@@ -133,14 +142,86 @@ class ReportV2PublishLockTests(unittest.TestCase):
         self.assertFalse(self.lock_path.exists())
 
     def test_wait_acquire_and_release_are_observable(self):
-        with self.assertLogs("reporting.publish_lock", level="INFO") as captured:
+        captured = StringIO()
+        with redirect_stdout(captured):
             with report_v2_publish_lock(self.root):
                 pass
 
-        events = "\n".join(captured.output)
-        self.assertIn("event=acquired", events)
-        self.assertIn("waited_milliseconds=", events)
-        self.assertIn("event=released", events)
+        events = [json.loads(line) for line in captured.getvalue().splitlines()]
+        self.assertEqual([item["event"] for item in events], ["acquired", "released"])
+        self.assertEqual(events[0]["kind"], "absorb-pipeline-lock")
+        self.assertEqual(events[0]["scope"], "report_v2_publish")
+        self.assertIsInstance(events[0]["waited_milliseconds"], int)
+
+    def test_batch_publisher_emits_structured_lock_receipts_with_default_logging(self):
+        context = multiprocessing.get_context("spawn")
+        ready = context.Event()
+        release = context.Event()
+        holder = context.Process(
+            target=_hold_publish_lock,
+            args=(str(self.root), ready, release),
+        )
+        publisher = None
+        script = (
+            "import json, sys; "
+            "from pathlib import Path; "
+            "from stock_papi.batch.cli import _publish_v2_receipt; "
+            "from tests.test_report_schema_v2 import metadata; "
+            "root = Path(sys.argv[1]); "
+            "_publish_v2_receipt(root, metadata('pre_market')); "
+            "print(json.dumps({'batch_result': 'ok'}), flush=True)"
+        )
+
+        holder.start()
+        try:
+            self.assertTrue(ready.wait(10))
+            publisher = subprocess.Popen(
+                [sys.executable, "-c", script, str(self.root)],
+                cwd=Path(__file__).resolve().parents[1],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+            )
+            first_line_queue = queue.Queue()
+            reader = threading.Thread(
+                target=lambda: first_line_queue.put(publisher.stdout.readline()),
+                daemon=True,
+            )
+            reader.start()
+            first_line = first_line_queue.get(timeout=10)
+            self.assertEqual(json.loads(first_line)["event"], "waiting")
+            release.set()
+            stdout_tail, stderr = publisher.communicate(timeout=20)
+            stdout = first_line + stdout_tail
+        finally:
+            release.set()
+            holder.join(10)
+            if holder.is_alive():
+                holder.terminate()
+                holder.join(10)
+            if publisher is not None and publisher.poll() is None:
+                publisher.terminate()
+                publisher.wait(10)
+
+        self.assertEqual(holder.exitcode, 0)
+        self.assertEqual(publisher.returncode, 0, stderr)
+        documents = [json.loads(line) for line in stdout.splitlines() if line]
+        events = [
+            item for item in documents
+            if item.get("kind") == "absorb-pipeline-lock"
+            and item.get("scope") == "report_v2_publish"
+        ]
+        self.assertEqual(
+            [item["event"] for item in events],
+            ["waiting", "acquired", "released"],
+        )
+        self.assertGreater(events[1]["waited_milliseconds"], 0)
+        self.assertEqual(
+            events[2]["waited_milliseconds"],
+            events[1]["waited_milliseconds"],
+        )
+        self.assertEqual(documents[-1], {"batch_result": "ok"})
 
     def test_success_uses_unique_owner_tokens_and_releases_lock(self):
         owner_tokens = []

@@ -39,6 +39,7 @@ class PendingConfirmation:
 @dataclasses.dataclass
 class ConversationContext:
     schema_version: int = 1
+    last_page_market: str | None = None
     current_market: str | None = None
     current_entity_type: str | None = None
     current_symbol: str | None = None

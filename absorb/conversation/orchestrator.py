@@ -162,6 +162,7 @@ class ConversationOrchestrator:
             return ConversationAnswer("這項查詢需要先使用 LINE 登入；目前未讀取任何私人資料。")
 
         entities = resolve_entities(question, self.search_stock)
+        page_market = market_context if market_context in {"TW", "US"} else None
         if entities:
             context.current_market = entities[0]["market"]
             context.current_entity_type = (
@@ -172,14 +173,31 @@ class ConversationOrchestrator:
             context.comparison_symbols = tuple(
                 item["symbol"] for item in entities
             )
-        elif market_context in {"TW", "US"}:
-            previous_market = context.current_market
-            context.current_market = market_context
-            if previous_market != market_context:
+        elif page_market is not None:
+            page_changed = (
+                context.last_page_market is not None
+                and context.last_page_market != page_market
+            )
+            if page_changed and context.current_market != page_market:
                 context.current_entity_type = "market"
                 context.current_symbol = None
                 context.current_industry_id = None
                 context.comparison_symbols = ()
+            elif page_changed and context.comparison_symbols:
+                context.comparison_symbols = tuple(
+                    symbol for symbol in context.comparison_symbols
+                    if ("TW" if symbol == "TAIEX" or symbol.isdigit() else "US")
+                    == page_market
+                )
+            if not (
+                context.current_symbol
+                or context.current_industry_id
+                or context.comparison_symbols
+            ):
+                context.current_market = page_market
+                context.current_entity_type = "market"
+        if page_market is not None:
+            context.last_page_market = page_market
         if not entities and context.comparison_symbols and "第二檔" in question:
             symbol = context.comparison_symbols[1] if len(context.comparison_symbols) > 1 else None
             if symbol:
