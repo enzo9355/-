@@ -9,6 +9,9 @@ from stock_papi.batch.calendar import TradingCalendarSet
 from stock_papi.integrations.market_data.us_calendar import (
     get_us_calendar_documents,
 )
+from stock_papi.integrations.market_data.tw_calendar import (
+    get_tw_calendar_documents,
+)
 
 
 _MARKET_TIMEZONES = {
@@ -121,9 +124,12 @@ def _latest_post_close_dates(reports, *, market):
 
 
 def _next_session_for_market(market, value):
-    if market != "US":
+    if market == "TW":
+        documents = get_tw_calendar_documents(value.year, value.year + 1)
+    elif market == "US":
+        documents = get_us_calendar_documents(value.year, value.year + 1)
+    else:
         return None
-    documents = get_us_calendar_documents(value.year, value.year + 1)
     return TradingCalendarSet.from_documents(documents).next_session(value)
 
 

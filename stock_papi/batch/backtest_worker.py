@@ -81,6 +81,35 @@ class FullBacktestWorker:
             "item_count": len(self.items),
         }
 
+    def verify_completed_checkpoint(self):
+        """Return True only for a fully completed checkpoint of this exact source."""
+        if not self.checkpoint_path.exists():
+            return False
+        try:
+            checkpoint = json.loads(self.checkpoint_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, ValueError) as exc:
+            raise BacktestStoreError("full backtest checkpoint is invalid") from exc
+        identity = self._identity()
+        next_index = checkpoint.get("next_index") if isinstance(checkpoint, dict) else None
+        if (
+            not isinstance(checkpoint, dict)
+            or checkpoint.get("schema_version") != 1
+            or checkpoint.get("job_type") != "full_backtest"
+            or any(checkpoint.get(key) != value for key, value in identity.items())
+            or type(next_index) is not int
+            or not 0 <= next_index <= len(self.items)
+            or checkpoint.get("completed_items") != list(self.items[:next_index])
+            or checkpoint.get("status") not in {
+                "running", "yielded", "failed", "completed"
+            }
+        ):
+            raise BacktestStoreError("full backtest completed checkpoint identity mismatch")
+        if checkpoint["status"] != "completed":
+            return False
+        if next_index != len(self.items):
+            raise BacktestStoreError("full backtest completed checkpoint identity mismatch")
+        return True
+
     def _load_or_create(self, checked_at):
         identity = self._identity()
         if self.checkpoint_path.exists():

@@ -115,7 +115,7 @@ class TestRegressionRouteIntegration(unittest.TestCase):
             load_index=lambda: [],
             load_metadata=lambda _item: None,
             load_index_v2=lambda market="TW": [item],
-            load_metadata_v2=lambda _item: metadata,
+            load_metadata_v2=lambda _item, expected_market: metadata,
             load_canonical_object=lambda _path, max_bytes: canonical_raw,
             load_regression_artifact=load_regression,
             prediction_capability=SimpleNamespace(mode="research"),

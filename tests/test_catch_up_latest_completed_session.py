@@ -232,12 +232,12 @@ $result | ConvertTo-Json -Depth 6 -Compress
         us_pre = plans["US-PreMarket"]
         us_daily = plans["US-Daily"]
         recovery = plans["ReportUploadRecovery"]
-        self.assertEqual([item["scope"] for item in tw_post], ["market", "publication"])
-        self.assertEqual([item["scope"] for item in us_post], ["market", "publication"])
-        self.assertEqual([item["scope"] for item in us_daily], ["market", "publication"])
+        self.assertEqual([item["scope"] for item in tw_post], ["market"])
+        self.assertEqual([item["scope"] for item in us_post], ["market"])
+        self.assertEqual([item["scope"] for item in us_daily], ["market"])
         self.assertEqual([item["scope"] for item in tw_pre], ["market"])
         self.assertEqual([item["scope"] for item in us_pre], ["market"])
-        self.assertEqual([item["scope"] for item in recovery], ["publication"])
+        self.assertEqual(recovery, [])
         self.assertEqual(tw_post[0]["mutex_name"], tw_pre[0]["mutex_name"])
         self.assertEqual(us_post[0]["mutex_name"], us_pre[0]["mutex_name"])
         self.assertEqual(us_post[0]["mutex_name"], us_daily[0]["mutex_name"])

@@ -114,6 +114,13 @@ class ObservationDeployScriptTests(unittest.TestCase):
             "'/reports'",
             "'/market-map'",
             "'/stock/2330'",
+            "'/health/data'",
+            "'/us'",
+            "'/us/market'",
+            "'/us/industries'",
+            "'/us/stocks'",
+            "'/reports/us'",
+            "'/stock/AAPL'",
         ):
             self.assertIn(required, source)
 
@@ -124,6 +131,34 @@ class ObservationDeployScriptTests(unittest.TestCase):
         self.assertIn("source_commit = $Commit", source)
         self.assertIn("previous_revision", source)
         self.assertLess(source.index("rev-parse HEAD"), source.index("source_commit = $Commit"))
+
+    def test_candidate_revision_provenance_is_read_back_before_smoke_or_traffic(self) -> None:
+        source = DEPLOY.read_text(encoding="utf-8")
+        for required in (
+            "rev-parse 'HEAD^{tree}'",
+            "ABSORB_SOURCE_COMMIT=$Commit",
+            "ABSORB_SOURCE_TREE=$SourceTree",
+            "absorb-source-commit=$Commit",
+            "absorb-source-tree=$SourceTree",
+            "Get-Revision -Revision $CandidateRevision",
+            "CandidateInfo.status.imageDigest",
+            "status.containerStatuses[0].imageDigest",
+            "Candidate revision provenance verification failed",
+            "Deployment source changed while candidate was building",
+            "candidate_provenance = [ordered]@{",
+            "image_digest = $ImageDigest",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, source)
+        provenance_gate = source.index("Candidate revision provenance verification failed")
+        self.assertLess(
+            provenance_gate,
+            source.index("$CandidateSmoke = Invoke-ObservationSmoke"),
+        )
+        self.assertLess(provenance_gate, source.index('"--to-revisions=$CandidateRevision=100"'))
+        self.assertGreaterEqual(source.count("status --porcelain"), 2)
+        self.assertGreaterEqual(source.count("rev-parse HEAD"), 2)
+        self.assertGreaterEqual(source.count("rev-parse 'HEAD^{tree}'"), 2)
 
     def test_smoke_and_cutover_verification_forbid_prediction_payloads(self) -> None:
         deploy = DEPLOY.read_text(encoding="utf-8")
@@ -495,6 +530,34 @@ $Results -join ';'
             "Observation report smoke failed",
         ):
             self.assertIn(required, source)
+
+    def test_no_traffic_smoke_covers_dual_market_identity_and_data_health(self) -> None:
+        source = DEPLOY.read_text(encoding="utf-8")
+        smoke = source[
+            source.index("function Invoke-ObservationSmoke"):
+            source.index("function Invoke-ObservationCutoverVerification")
+        ]
+        for path in (
+            "'/health/data'",
+            "'/us'",
+            "'/us/market'",
+            "'/us/industries'",
+            "'/us/stocks'",
+            "'/reports/us'",
+            "'/stock/AAPL'",
+        ):
+            with self.subTest(path=path):
+                self.assertIn(path, smoke)
+        for contract in (
+            "Data health endpoint is missing TW or US identity",
+            'data-market="US"',
+            'data-market="TW"',
+            "US canonical report link is unavailable",
+            "US canonical report market identity smoke failed",
+            "[int]$Response.StatusCode -ne 200",
+        ):
+            with self.subTest(contract=contract):
+                self.assertIn(contract, smoke)
 
     def test_no_traffic_smoke_verifies_revisioned_static_assets(self) -> None:
         source = DEPLOY.read_text(encoding="utf-8")

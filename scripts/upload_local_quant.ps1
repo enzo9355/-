@@ -49,6 +49,82 @@ $ObservationOnlyPointerAllowlist = @(
     "gs://$Bucket/dashboard/v1/latest-US.json"
 )
 $ReceiptUpdated = $false
+$script:PublicationMutex = $null
+$script:PublicationMutexAcquired = $false
+$script:PublicationMutexReceipt = [ordered]@{
+    scope = 'publication_transaction'
+    mutex_name = 'Global\ABSORB-Observation-Publication-Writer'
+    wait_milliseconds = 300000
+    waited_milliseconds = 0
+    acquired = $false
+    released = $false
+    acquisition_reason = $null
+    failure_reason = $null
+}
+
+function Enter-AbsorbPublicationMutex {
+    [CmdletBinding()]
+    param(
+        [string]$MutexName = 'Global\ABSORB-Observation-Publication-Writer',
+        [int]$WaitMilliseconds = 300000
+    )
+    if ($WaitMilliseconds -lt 1 -or $WaitMilliseconds -gt 600000) {
+        throw 'Publication mutex wait is outside the safe range'
+    }
+    if ($script:PublicationMutexAcquired -or $null -ne $script:PublicationMutex) {
+        throw 'Publication mutex is already active'
+    }
+    $script:PublicationMutexReceipt = [ordered]@{
+        scope = 'publication_transaction'
+        mutex_name = $MutexName
+        wait_milliseconds = $WaitMilliseconds
+        waited_milliseconds = 0
+        acquired = $false
+        released = $false
+        acquisition_reason = $null
+        failure_reason = $null
+    }
+    $Watch = [Diagnostics.Stopwatch]::StartNew()
+    try {
+        $script:PublicationMutex = [Threading.Mutex]::new($false, $MutexName)
+        try {
+            $script:PublicationMutexAcquired = $script:PublicationMutex.WaitOne(
+                $WaitMilliseconds
+            )
+            if ($script:PublicationMutexAcquired) {
+                $script:PublicationMutexReceipt.acquisition_reason = 'acquired'
+            }
+        } catch [Threading.AbandonedMutexException] {
+            $script:PublicationMutexAcquired = $true
+            $script:PublicationMutexReceipt.acquisition_reason = 'abandoned_mutex_acquired'
+        }
+    } finally {
+        $Watch.Stop()
+        $script:PublicationMutexReceipt.waited_milliseconds = [int]$Watch.ElapsedMilliseconds
+    }
+    if (-not $script:PublicationMutexAcquired) {
+        $script:PublicationMutexReceipt.failure_reason = 'timeout'
+        if ($null -ne $script:PublicationMutex) {
+            $script:PublicationMutex.Dispose()
+            $script:PublicationMutex = $null
+        }
+        throw [TimeoutException]::new('Timed out waiting for publication transaction mutex')
+    }
+    $script:PublicationMutexReceipt.acquired = $true
+}
+
+function Exit-AbsorbPublicationMutex {
+    if ($script:PublicationMutexAcquired -and $null -ne $script:PublicationMutex) {
+        try {
+            $script:PublicationMutex.ReleaseMutex()
+            $script:PublicationMutexReceipt.released = $true
+        } finally {
+            $script:PublicationMutexAcquired = $false
+            $script:PublicationMutex.Dispose()
+            $script:PublicationMutex = $null
+        }
+    }
+}
 
 function Send-ReportUploadFailureNotification {
     param([string]$Message)
@@ -782,6 +858,7 @@ if ($LkgReceiptPath) {
 }
 
 try {
+    Enter-AbsorbPublicationMutex
     $InsightsUploaded = $false
     $InsightsLatestPath = Join-Path $ResolvedRoot 'latest-insights.json'
     if (-not $ObservationOnly -and (Test-Path -LiteralPath $InsightsLatestPath -PathType Leaf)) {
@@ -1309,6 +1386,7 @@ try {
         }
     }
 
+    Exit-AbsorbPublicationMutex
     $Status = @{
         uploaded_at = [DateTimeOffset]::Now.ToString('o')
         markets = $UploadedMarkets
@@ -1322,6 +1400,7 @@ try {
         pointer_updates = $Global:PointerUpdates.ToArray()
         lkg_receipt = $LkgReceiptPath
         bucket = $Bucket
+        publication_mutex = $script:PublicationMutexReceipt
     } | ConvertTo-Json -Compress
     Set-Content -LiteralPath (Join-Path $DataRoot 'logs\upload-status.json') -Value $Status -Encoding utf8
     if ($RequireReportV2 -and ($ReportV2UploadError -or $ReportV2UploadedTypes.Count -eq 0)) {
@@ -1359,5 +1438,6 @@ try {
         throw $OriginalError
     } finally {
         Release-LkgPointerLock
+        Exit-AbsorbPublicationMutex
     }
 }

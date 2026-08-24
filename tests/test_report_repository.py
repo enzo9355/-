@@ -3,10 +3,28 @@ import json
 import unittest
 
 from reporting.exceptions import ReportWebError
-from stock_papi.repositories.report_store import load_report_index, load_report_pdf
+from stock_papi.repositories.report_store import (
+    load_report_index,
+    load_report_metadata,
+    load_report_metadata_by_sha,
+    load_report_pdf,
+)
 
 
 class ReportRepositoryTests(unittest.TestCase):
+    def test_v2_metadata_loaders_require_explicit_expected_market(self):
+        with self.assertRaises(ValueError):
+            load_report_metadata(
+                {"metadata": "metadata/" + "a" * 64 + ".json"},
+                load_object=lambda *_: self.fail("must reject before object read"),
+                version="v2",
+            )
+        with self.assertRaises(ValueError):
+            load_report_metadata_by_sha(
+                "a" * 64,
+                load_object=lambda *_: self.fail("must reject before object read"),
+            )
+
     def test_v2_index_market_must_match_requested_object(self):
         for requested_market, document_market in (("US", "TW"), ("TW", "US")):
             with self.subTest(

@@ -43,22 +43,29 @@ def load_report_pdf(item, *, load_object, version="v1"):
 
 
 def load_report_metadata(
-    item, *, load_object, max_bytes=2 * 1024 * 1024, version="v1"
+    item, *, load_object, max_bytes=2 * 1024 * 1024, version="v1",
+    expected_market=None,
 ):
     version = _version(version)
+    if version == "v2" and expected_market not in {"TW", "US"}:
+        raise ValueError("v2 report metadata requires an expected market")
     content = load_object(f"reports/{version}/{item['metadata']}", max_bytes)
     return (
         None
         if content is None
         else validate_report_metadata(
-            content, item, expected_version=int(version[1:])
+            content, item, expected_version=int(version[1:]),
+            expected_market=expected_market,
         )
     )
 
 
 def load_report_metadata_by_sha(
-    metadata_sha256, *, load_object, max_bytes=2 * 1024 * 1024
+    metadata_sha256, *, load_object, max_bytes=2 * 1024 * 1024,
+    expected_market=None,
 ):
+    if expected_market not in {"TW", "US"}:
+        raise ValueError("v2 report metadata requires an expected market")
     if not isinstance(metadata_sha256, str) or re.fullmatch(
         r"[0-9a-f]{64}", metadata_sha256
     ) is None:
@@ -93,4 +100,6 @@ def load_report_metadata_by_sha(
     item["metadata_sha256"] = metadata_sha256
     if document.get("product_mode") is not None:
         item["product_mode"] = document["product_mode"]
-    return validate_report_metadata(content, item, expected_version=2)
+    return validate_report_metadata(
+        content, item, expected_version=2, expected_market=expected_market
+    )

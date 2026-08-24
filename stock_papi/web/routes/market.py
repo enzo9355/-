@@ -11,6 +11,7 @@ def register_market_routes(
     build_market_heatmap, dashboard_top_picks, industry_map,
     market_insights_payload, twstock_codes, is_us_ticker,
     find_industry_peers, get_stock_name, dashboard_snapshot,
+    us_securities_observation,
 ):
     def dashboard_api():
         snapshot = dashboard_snapshot()
@@ -133,12 +134,22 @@ def register_market_routes(
         ) if data else "查無資料"
 
     def us_stocks_page():
+        try:
+            observation = us_securities_observation()
+            if (
+                not isinstance(observation, dict)
+                or not isinstance(observation.get("stock_events"), list)
+                or not isinstance(observation.get("etf_observations"), list)
+            ):
+                raise ValueError("US securities observation is invalid")
+        except Exception:
+            return render_template(
+                "stocks.html", observation={}, search_query="",
+                search_error=False, market="US", data_unavailable=True,
+            ), 503
         return render_template(
-            "stocks.html",
-            observation={},
-            search_query="",
-            search_error=False,
-            market="US",
+            "stocks.html", observation=observation, search_query="",
+            search_error=False, market="US", data_unavailable=False,
         )
 
     def market_page():

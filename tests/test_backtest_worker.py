@@ -1,4 +1,5 @@
 import datetime
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -51,6 +52,51 @@ def promoted_candidate(model_version="lgbm-5d-v1"):
 
 
 class BacktestWorkerTests(unittest.TestCase):
+    def test_completed_checkpoint_verifier_binds_every_source_identity_field(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            worker = FullBacktestWorker(
+                root,
+                dataset_manifest="quant/v1/manifests/TW-20260714T090000Z-aaaaaaaaaaaa.json",
+                dataset_sha256="a" * 64,
+                model_version="lgbm-5d-v1",
+                feature_schema_version=1,
+                cutoff=datetime.date(2026, 7, 14),
+                items=("2330", "2317"),
+            )
+            worker.run(
+                lambda _item: None,
+                now=datetime.datetime(2026, 7, 14, 12, tzinfo=UTC),
+            )
+            checkpoint_path = worker.checkpoint_path
+            completed = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+            self.assertTrue(worker.verify_completed_checkpoint())
+
+            mutations = {
+                "schema_version": 2,
+                "job_type": "daily_prediction",
+                "dataset_manifest": "quant/v1/manifests/TW-20260715T090000Z-bbbbbbbbbbbb.json",
+                "dataset_sha256": "b" * 64,
+                "model_version": "lgbm-5d-v2",
+                "feature_schema_version": 2,
+                "cutoff": "2026-07-15",
+                "items_sha256": "c" * 64,
+                "item_count": 1,
+                "next_index": 1,
+                "completed_items": ["2330"],
+            }
+            for field, value in mutations.items():
+                with self.subTest(field=field):
+                    tampered = dict(completed)
+                    tampered[field] = value
+                    checkpoint_path.write_text(json.dumps(tampered), encoding="utf-8")
+                    with self.assertRaises(BacktestStoreError):
+                        worker.verify_completed_checkpoint()
+            incomplete = dict(completed, status="running")
+            checkpoint_path.write_text(json.dumps(incomplete), encoding="utf-8")
+            self.assertFalse(worker.verify_completed_checkpoint())
+            checkpoint_path.write_text(json.dumps(completed), encoding="utf-8")
+
     def test_worker_resumes_same_dataset_across_days_and_rejects_dataset_change(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -67,6 +113,9 @@ class BacktestWorkerTests(unittest.TestCase):
                 lambda item: calls.append(item),
                 max_items=1,
                 now=datetime.datetime(2026, 7, 14, 12, tzinfo=UTC),
+            )
+            self.assertFalse(
+                FullBacktestWorker(root, **kwargs).verify_completed_checkpoint()
             )
             second = FullBacktestWorker(root, **kwargs).run(
                 lambda item: calls.append(item),

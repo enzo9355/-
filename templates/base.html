@@ -35,6 +35,7 @@
   {% set reports_active = 'report' in endpoint %}
   {% set ask_active = endpoint == 'ask_page' %}
   {% set learn_active = endpoint == 'learn_page' %}
+  {% set page_context = 'home' if dashboard_active else ('market' if market_active else ('industries' if industries_active else ('stock' if endpoint == 'stock_page' else ('stocks' if stocks_active else ('reports' if reports_active else ('learn' if learn_active else 'ask')))))) %}
   {% set dashboard_url = '/us' if us_market_active else '/' %}
   {% set market_url = '/us/market' if us_market_active else '/market' %}
   {% set industries_url = '/us/industries' if us_market_active else '/industries' %}
@@ -67,7 +68,7 @@
   {% if not ask_active %}
   <button class="quick-ask-trigger" type="button" data-quick-ask-open aria-controls="quick-ask-dialog" aria-expanded="false">ASK ABSORB</button>
   <div class="quick-ask-backdrop" data-quick-ask-dialog id="quick-ask-dialog" hidden>
-    <section class="quick-ask-sheet" role="dialog" aria-modal="true" aria-labelledby="quick-ask-title" data-conversation-endpoint="/api/conversation">
+    <section class="quick-ask-sheet" role="dialog" aria-modal="true" aria-labelledby="quick-ask-title" data-conversation-endpoint="/api/conversation" data-market-context="{{ market_context }}" data-page-context="{{ page_context }}">
       <header class="quick-ask-header"><div><h2 id="quick-ask-title">ASK ABSORB</h2><p>正在閱讀：{{ '美股已驗證研究摘要' if us_market_active else '台股市場總覽' }}</p></div><button type="button" data-quick-ask-close aria-label="關閉 ASK ABSORB">×</button></header>
       <div class="conversation-log quick-ask-log" data-conversation-log aria-live="polite"><p class="empty-state">可詢問目前已發布的市場、產業與個股觀察。</p></div>
       <form class="conversation-form quick-ask-form" data-conversation-form>

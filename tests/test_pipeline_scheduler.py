@@ -1,4 +1,5 @@
 import datetime
+import hashlib
 import json
 import os
 import shutil
@@ -40,11 +41,6 @@ foreach ($definition in @($ast.FindAll({{ param($node) $node -is [Management.Aut
                 f'"Local\\ABSORB-Round2-{token}-$Market"',
                 1,
             ),
-            (
-                "'Global\\ABSORB-Observation-Publication-Writer'",
-                f"'Local\\ABSORB-Round2-{token}-Publication'",
-                1,
-            ),
         )
         for old, new, expected_count in replacements:
             actual_count = source.count(old)
@@ -54,7 +50,7 @@ foreach ($definition in @($ast.FindAll({{ param($node) $node -is [Management.Aut
                     f"expected {expected_count}, got {actual_count}"
                 )
             source = source.replace(old, new)
-        if "Global\\ABSORB" in source:
+        if "Global\\ABSORB-$Market-Observation-Writer" in source:
             raise AssertionError("temporary wrapper retained a production mutex name")
 
         wrapper = root / "invoke_pipeline_task.ps1"
@@ -352,17 +348,13 @@ $postClosePlan = @(Get-AbsorbPipelineMutexPlan -Job 'TW-PostClose')
 $recoveryPlan = @(Get-AbsorbPipelineMutexPlan -Job 'ReportUploadRecovery')
 if ($twPlan.Count -ne 1 -or $twPlan[0].scope -ne 'market' -or $twPlan[0].market -ne 'TW') {{ throw 'TW premarket mutex plan is incorrect' }}
 if ($usPlan.Count -ne 1 -or $usPlan[0].scope -ne 'market' -or $usPlan[0].market -ne 'US') {{ throw 'US premarket mutex plan is incorrect' }}
-if (($postClosePlan.scope -join '|') -ne 'market|publication') {{ throw 'market-to-publication lock ordering is incorrect' }}
-if (($recoveryPlan.scope -join '|') -ne 'publication') {{ throw 'recovery should only hold the publication lock' }}
+        if (($postClosePlan.scope -join '|') -ne 'market') {{ throw 'post-close should only hold the market computation lock' }}
+        if ($recoveryPlan.Count -ne 0) {{ throw 'recovery must acquire publication serialization inside the uploader' }}
 $twName = 'Local\\ABSORB-Task3-TW-' + [Guid]::NewGuid().ToString('N')
 $usName = 'Local\\ABSORB-Task3-US-' + [Guid]::NewGuid().ToString('N')
-$publicationName = 'Local\\ABSORB-Task3-Publication-' + [Guid]::NewGuid().ToString('N')
-$twPlan[0].mutex_name = $twName
-$usPlan[0].mutex_name = $usName
-($postClosePlan | Where-Object {{ $_.scope -eq 'publication' }})[0].mutex_name = $publicationName
-$recoveryPlan[0].mutex_name = $publicationName
-$twPlan[0].wait_milliseconds = 100
-$recoveryPlan[0].wait_milliseconds = 100
+        $twPlan[0].mutex_name = $twName
+        $usPlan[0].mutex_name = $usName
+        $twPlan[0].wait_milliseconds = 100
 function Start-TestMutexHolder {{
     param([string]$MutexName)
     $token = [Guid]::NewGuid().ToString('N')
@@ -396,8 +388,7 @@ function Stop-TestMutexHolder {{
     Remove-Item -LiteralPath $Holder.ready, $Holder.release -Force -ErrorAction SilentlyContinue
 }}
 $twHolder = Start-TestMutexHolder -MutexName $twName
-$publicationHolder = Start-TestMutexHolder -MutexName $publicationName
-try {{
+        try {{
     $watch = [Diagnostics.Stopwatch]::StartNew()
     try {{
         Enter-AbsorbPipelineMutexPlan -Plan $twPlan | Out-Null
@@ -409,18 +400,10 @@ try {{
     try {{
         if ($usLeases.Count -ne 1 -or -not $usLeases[0].receipt.acquired) {{ throw 'US work was incorrectly blocked by TW contention' }}
     }} finally {{ Exit-AbsorbPipelineMutexPlan -Leases $usLeases }}
-    $watch = [Diagnostics.Stopwatch]::StartNew()
-    try {{
-        Enter-AbsorbPipelineMutexPlan -Plan $recoveryPlan | Out-Null
-        throw 'publication contention was not rejected'
-    }} catch [TimeoutException] {{
-        if ($watch.ElapsedMilliseconds -lt 70 -or $watch.ElapsedMilliseconds -gt 1500) {{ throw 'publication wait was not bounded' }}
-    }} finally {{ $watch.Stop() }}
-}} finally {{
-    Stop-TestMutexHolder -Holder $twHolder
-    Stop-TestMutexHolder -Holder $publicationHolder
-}}
-@{{ tw_mutex = $twPlan[0].mutex_name; us_mutex = $usPlan[0].mutex_name; publication_scope = $recoveryPlan[0].scope }} | ConvertTo-Json -Compress
+        }} finally {{
+            Stop-TestMutexHolder -Holder $twHolder
+        }}
+        @{{ tw_mutex = $twPlan[0].mutex_name; us_mutex = $usPlan[0].mutex_name; recovery_lock_count = $recoveryPlan.Count }} | ConvertTo-Json -Compress
 """
         completed = subprocess.run(
             [
@@ -439,7 +422,7 @@ try {{
         self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
         receipt = json.loads(completed.stdout)
         self.assertNotEqual(receipt["tw_mutex"], receipt["us_mutex"])
-        self.assertEqual(receipt["publication_scope"], "publication")
+        self.assertEqual(receipt["recovery_lock_count"], 0)
 
     def test_us_daily_and_us_post_close_serialize_while_tw_premarket_is_independent(self):
         script = (
@@ -452,7 +435,7 @@ $postClosePlan = @(Get-AbsorbPipelineMutexPlan -Job 'US-PostClose')
 $twPlan = @(Get-AbsorbPipelineMutexPlan -Job 'TW-PreMarket')
 if ($dailyPlan.Count -lt 1 -or $dailyPlan[0].scope -ne 'market' -or $dailyPlan[0].market -ne 'US') { throw 'US-Daily lacks the US market lock' }
 if ($dailyPlan[0].mutex_name -ne $postClosePlan[0].mutex_name) { throw 'US jobs do not share the US market lock' }
-if (($dailyPlan.scope -join '|') -ne 'market|publication') { throw 'US-Daily lock order is not market then publication' }
+        if (($dailyPlan.scope -join '|') -ne 'market') { throw 'US-Daily should hold only the market computation lock' }
 $sharedName = 'Local\ABSORB-Round1-US-' + [Guid]::NewGuid().ToString('N')
 $twName = 'Local\ABSORB-Round1-TW-' + [Guid]::NewGuid().ToString('N')
 $dailyPlan[0].mutex_name = $sharedName
@@ -513,6 +496,83 @@ try {
         )
         self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
         self.assertIn("serialized", completed.stdout)
+
+    def test_publication_mutex_is_bounded_and_owned_by_upload_transaction(self):
+        upload = (
+            Path(__file__).parents[1] / "scripts" / "upload_local_quant.ps1"
+        ).resolve()
+        harness = self._powershell_function_import(upload) + r"""
+$ErrorActionPreference = 'Stop'
+$script:PublicationMutex = $null
+$script:PublicationMutexAcquired = $false
+$script:PublicationMutexReceipt = [ordered]@{}
+$name = 'Local\ABSORB-Upload-Publication-' + [Guid]::NewGuid().ToString('N')
+$ready = Join-Path ([IO.Path]::GetTempPath()) ('absorb-upload-' + [Guid]::NewGuid().ToString('N') + '.ready')
+$release = $ready + '.release'
+$holder = Start-Job -ScriptBlock {
+    param($Name, $Ready, $Release)
+    $mutex = [Threading.Mutex]::new($false, $Name)
+    try {
+        if (-not $mutex.WaitOne(5000)) { throw 'holder could not acquire publication mutex' }
+        [IO.File]::WriteAllText($Ready, 'ready')
+        while (-not [IO.File]::Exists($Release)) { Start-Sleep -Milliseconds 10 }
+    } finally {
+        try { $mutex.ReleaseMutex() } catch { }
+        $mutex.Dispose()
+    }
+} -ArgumentList $name, $ready, $release
+try {
+    for ($index = 0; $index -lt 300 -and -not (Test-Path -LiteralPath $ready); $index++) { Start-Sleep -Milliseconds 10 }
+    if (-not (Test-Path -LiteralPath $ready)) { throw 'publication holder did not become ready' }
+    $watch = [Diagnostics.Stopwatch]::StartNew()
+    try {
+        Enter-AbsorbPublicationMutex -MutexName $name -WaitMilliseconds 100
+        throw 'publication contention was not rejected'
+    } catch [TimeoutException] {
+        if ($watch.ElapsedMilliseconds -lt 70 -or $watch.ElapsedMilliseconds -gt 1500) { throw 'publication wait was not bounded' }
+    } finally { $watch.Stop() }
+    [IO.File]::WriteAllText($release, 'release')
+    Wait-Job -Job $holder -Timeout 5 | Out-Null
+    Enter-AbsorbPublicationMutex -MutexName $name -WaitMilliseconds 1000
+    if (-not $script:PublicationMutexReceipt.acquired) { throw 'publication mutex was not acquired after contention cleared' }
+    Exit-AbsorbPublicationMutex
+    if (-not $script:PublicationMutexReceipt.released) { throw 'publication mutex release was not receipted' }
+} finally {
+    if (-not (Test-Path -LiteralPath $release)) { [IO.File]::WriteAllText($release, 'release') }
+    Wait-Job -Job $holder -Timeout 5 | Out-Null
+    Remove-Job -Job $holder -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $ready, $release -Force -ErrorAction SilentlyContinue
+    Exit-AbsorbPublicationMutex
+}
+[Console]::WriteLine('publication-serialized')
+"""
+        completed = subprocess.run(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                harness,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+        self.assertIn("publication-serialized", completed.stdout)
+
+        invoke_source = (
+            Path(__file__).parents[1] / "scripts" / "invoke_pipeline_task.ps1"
+        ).read_text(encoding="utf-8")
+        upload_source = upload.read_text(encoding="utf-8")
+        self.assertNotIn("Observation-Publication-Writer", invoke_source)
+        self.assertIn("Global\\ABSORB-Observation-Publication-Writer", upload_source)
+        self.assertLess(
+            upload_source.index("Enter-AbsorbPublicationMutex"),
+            upload_source.index("$InsightsUploaded = $false"),
+        )
 
     def test_mutex_abandonment_and_partial_timeout_release_exactly_once(self):
         script = (
@@ -690,7 +750,7 @@ if ($receipts.Count -ne 1 -or $receipts[0].failure_reason -ne 'wait_failed' -or 
             )
             self.assertFalse(receipt["success"])
             self.assertEqual(receipt["exit_code"], 73)
-            self.assertEqual(len(receipt["mutexes"]), 2)
+            self.assertEqual(len(receipt["mutexes"]), 1)
             for mutex in receipt["mutexes"]:
                 self.assertTrue(mutex["mutex_name"].startswith("Local\\ABSORB-Round2-"))
                 self.assertNotIn("Global\\", mutex["mutex_name"])
@@ -766,6 +826,7 @@ if ($receipts.Count -ne 1 -or $receipts[0].failure_reason -ne 'wait_failed' -or 
                 + self._powershell_function_import(invoke_script)
                 + f". '{native_helper_ps}'\n"
                 + r"""
+function Test-AbsorbVerifiedFullBacktestCompletion { return $true }
 $Global:TaskState = 'Disabled'
 $Global:RegistrationEnabled = $false
 $Global:DisableCalls = 0
@@ -899,7 +960,28 @@ if ($postXml.Count -ne 1 -or $postXml[0].Xml -notmatch '<Interval>PT20M</Interva
             root = Path(temporary)
             checkpoint = root / "checkpoints" / "jobs" / "full_backtest" / "current.json"
             checkpoint.parent.mkdir(parents=True)
-            checkpoint.write_text(json.dumps({"status": "completed"}), encoding="utf-8")
+            items = ("2330",)
+            checkpoint.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "job_type": "full_backtest",
+                        "dataset_manifest": "quant/v1/manifests/TW-20260821T000000Z-aaaaaaaaaaaa.json",
+                        "dataset_sha256": "a" * 64,
+                        "model_version": "model-v1",
+                        "feature_schema_version": 1,
+                        "cutoff": "2026-08-21",
+                        "items_sha256": hashlib.sha256(
+                            json.dumps(items, separators=(",", ":")).encode("utf-8")
+                        ).hexdigest(),
+                        "item_count": 1,
+                        "next_index": 1,
+                        "completed_items": ["2330"],
+                        "status": "completed",
+                    }
+                ),
+                encoding="utf-8",
+            )
             probe = root / "completed_checkpoint_probe.py"
             probe.write_text(
                 "import builtins\n"
@@ -946,44 +1028,51 @@ if ($postXml.Count -ne 1 -or $postXml[0].Xml -notmatch '<Interval>PT20M</Interva
             self.assertIn("already completed", output)
             self.assertNotIn("deliberately unavailable yfinance", output)
 
-    def test_full_backtest_wrapper_checkpoint_guard_is_python_free(self):
-        wrapper = (
-            Path(__file__).parents[1] / "scripts" / "run_full_backtest.ps1"
-        ).resolve()
+    def test_full_backtest_stale_minimal_checkpoint_fails_before_yfinance_import(self):
+        cli_root = Path(__file__).parents[1].resolve()
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             checkpoint = root / "checkpoints" / "jobs" / "full_backtest" / "current.json"
             checkpoint.parent.mkdir(parents=True)
             checkpoint.write_text(json.dumps({"status": "completed"}), encoding="utf-8")
-            harness = f"""
-$ErrorActionPreference = 'Stop'
-$tokens = $null
-$errors = $null
-$ast = [Management.Automation.Language.Parser]::ParseFile('{str(wrapper).replace("'", "''")}', [ref]$tokens, [ref]$errors)
-if ($errors.Count -ne 0) {{ throw 'run_full_backtest.ps1 did not parse' }}
-$definition = @($ast.FindAll({{ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Test-AbsorbFullBacktestCompletedCheckpoint' }}, $true))[0]
-if ($null -eq $definition) {{ throw 'full backtest checkpoint helper was not found' }}
-Invoke-Expression $definition.Extent.Text
-$env:ABSORB_PYTHON_EXE = 'C:\\missing-yfinance-runtime.exe'
-if (-not (Test-AbsorbFullBacktestCompletedCheckpoint -DataRoot '{str(root).replace("'", "''")}')) {{ throw 'completed checkpoint was not accepted' }}
-[Console]::WriteLine('completed-without-python')
-"""
+            probe = root / "stale_checkpoint_probe.py"
+            probe.write_text(
+                "import datetime\n"
+                "import sys\n"
+                "import types\n"
+                "from types import SimpleNamespace\n"
+                "from stock_papi.batch import full_backtest_cli\n"
+                "source_loader = types.ModuleType('reporting.source_loader')\n"
+                "source_loader.load_report_source = lambda _root, market: SimpleNamespace(\n"
+                "    manifest=SimpleNamespace(manifest_path='manifests/TW-20260821T000000Z-aaaaaaaaaaaa.json', manifest_sha256='a' * 64, market_as_of=datetime.date(2026, 8, 21)),\n"
+                "    stocks=(SimpleNamespace(model_version='model-v1', symbol='2330'),))\n"
+                "sys.modules['reporting.source_loader'] = source_loader\n"
+                "raise SystemExit(full_backtest_cli.main(['--root', sys.argv[1], '--verify-completion']))\n",
+                encoding="utf-8",
+            )
+            environment = os.environ.copy()
+            environment["PYTHONPATH"] = str(cli_root)
             completed = subprocess.run(
-                [
-                    "powershell.exe",
-                    "-NoProfile",
-                    "-NonInteractive",
-                    "-ExecutionPolicy",
-                    "Bypass",
-                    "-Command",
-                    harness,
-                ],
+                [sys.executable, str(probe), str(root)],
+                cwd=cli_root,
+                env=environment,
                 capture_output=True,
                 text=True,
                 timeout=30,
             )
-            self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
-            self.assertIn("completed-without-python", completed.stdout)
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertNotIn("already completed", completed.stdout + completed.stderr)
+
+    def test_full_backtest_wrapper_uses_authoritative_verifier_before_yfinance(self):
+        wrapper = (
+            Path(__file__).parents[1] / "scripts" / "run_full_backtest.ps1"
+        ).read_text(encoding="utf-8")
+        verifier = "-m stock_papi.batch.full_backtest_cli --root $DataRoot --verify-completion"
+        yfinance = "-RequiredImports @('stock_papi', 'yfinance')"
+        self.assertIn(verifier, wrapper)
+        self.assertIn(yfinance, wrapper)
+        self.assertLess(wrapper.index(verifier), wrapper.index(yfinance))
+        self.assertNotIn("$Checkpoint.status", wrapper)
 
     def test_pipeline_installer_definition_is_daily_bounded_and_hidden(self):
         installer = (
@@ -1046,7 +1135,9 @@ if ($fullBacktest.Count -ne 1) {{ throw 'full backtest definition was not unique
             source,
         )
         self.assertNotIn("Invoke-NativeProcessCaptured", source)
-        self.assertIn("$Checkpoint.status -eq 'completed'", source)
+        self.assertIn("--verify-completion", source)
+        self.assertIn("full_backtest_completion_verified", source)
+        self.assertNotIn("$Checkpoint.status", source)
         self.assertIn("mutexes = @($MutexReceipts.ToArray())", source)
         self.assertIn("wait_milliseconds", source)
         self.assertIn("waited_milliseconds", source)

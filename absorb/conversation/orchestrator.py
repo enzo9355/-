@@ -130,7 +130,10 @@ class ConversationOrchestrator:
         self.logger = logger or logging.getLogger("absorb.conversation")
         self.now = now or (lambda: dt.datetime.now(dt.timezone.utc))
 
-    def handle(self, *, principal: str, question: str, access="public") -> ConversationAnswer:
+    def handle(
+        self, *, principal: str, question: str, access="public",
+        market_context: str | None = None, page_context: str | None = None,
+    ) -> ConversationAnswer:
         correlation_id = secrets.token_hex(8)
         self.metrics.increment("natural_language_requests")
         self.logger.info("conversation request correlation_id=%s", correlation_id)
@@ -148,6 +151,8 @@ class ConversationOrchestrator:
             return ConversationAnswer("已清除這個工作階段的股票與產業上下文。")
 
         context = self.context_store.get(principal)
+        if market_context in {"TW", "US"} and context.current_symbol is None:
+            context.current_market = market_context
         if question.startswith("確認") and context.pending_confirmation is None:
             return ConversationAnswer("目前沒有待確認操作；未執行任何變更。")
         confirmation = self._handle_confirmation(principal, question, context, access)
@@ -187,6 +192,7 @@ class ConversationOrchestrator:
             "industry_id": context.current_industry_id,
             "report_type": context.current_report_type,
             "comparison_symbols": list(context.comparison_symbols),
+            "page": page_context,
         }
         allowed_entities = {(item["market"], item["symbol"]) for item in entities}
         if context.current_symbol and context.current_market:

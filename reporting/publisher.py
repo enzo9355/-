@@ -345,6 +345,7 @@ def _publish_report_v2_impl(
         reports = []
 
     entry = {
+        "market": market,
         "report_type": document["report_type"],
         "source_market_date": document["source_market_date"],
         "applicable_trading_date": document["applicable_trading_date"],

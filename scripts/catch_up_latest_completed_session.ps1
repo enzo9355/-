@@ -1342,7 +1342,15 @@ function Get-LocalObservationPromotionResume {
         [string]$_.product_mode -eq 'observation' -and
         [string]$_.source_market_date -eq $TargetDate
     })
+    if (
+        $TargetEntries.Count -eq 1 -and
+        $null -eq $TargetEntries[0].PSObject.Properties['market']
+    ) {
+        # Legacy v2 publisher items inherited market identity from index-TW.json.
+        $TargetEntries[0] | Add-Member -NotePropertyName market -NotePropertyValue 'TW'
+    }
     $ExpectedTargetEntry = [ordered]@{
+        market = [string]$Candidate.report.market
         report_type = [string]$Candidate.report.report_type
         source_market_date = [string]$Candidate.report.source_market_date
         applicable_trading_date = [string]$Candidate.report.applicable_trading_date
@@ -1404,7 +1412,9 @@ source_manifest_sha256 = sys.argv[5]
 candidate_path = Path(sys.argv[6])
 
 index = validate_report_index(
-    (report_root / "index-TW.json").read_bytes(), expected_version=2
+    (report_root / "index-TW.json").read_bytes(),
+    expected_version=2,
+    expected_market="TW",
 )
 target_entries = [
     item
@@ -1435,7 +1445,10 @@ if latest != expected_latest:
     raise ValueError("formal local report latest binding is invalid")
 metadata_path = report_root / target_entry["metadata"]
 metadata = validate_report_metadata(
-    metadata_path.read_bytes(), target_entry, expected_version=2
+    metadata_path.read_bytes(),
+    target_entry,
+    expected_version=2,
+    expected_market="TW",
 )
 if (
     metadata.get("source_manifest") != source_manifest
@@ -1505,6 +1518,7 @@ metadata_base.pop("content_sha256", None)
 if metadata_base != candidate_report or dashboard != candidate_dashboard:
     raise ValueError("formal local promotion candidate binding is invalid")
 expected_entry = {
+    "market": candidate_report["market"],
     "report_type": candidate_report["report_type"],
     "source_market_date": candidate_report["source_market_date"],
     "applicable_trading_date": candidate_report["applicable_trading_date"],

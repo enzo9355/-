@@ -5,7 +5,7 @@ if ($DataRoot -notin @('D:\AbsorbData', 'D:\StockPapiData')) { throw 'Data root 
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 . (Join-Path $PSScriptRoot 'python_runtime.ps1')
 $PythonExe = Resolve-AbsorbPythonExecutable -RepoRoot $RepoRoot
-Assert-AbsorbPythonRuntime -PythonExe $PythonExe -RepoRoot $RepoRoot
+Assert-AbsorbPythonRuntime -PythonExe $PythonExe -RepoRoot $RepoRoot -RequiredImports @('stock_papi', 'pypdf')
 $LatestPath = Join-Path $DataRoot 'publish\reports\v2\latest-TW-post_close.json'
 if (-not (Test-Path -LiteralPath $LatestPath -PathType Leaf)) { throw 'Verified post-close base is unavailable' }
 $Latest = Get-Content -LiteralPath $LatestPath -Raw -Encoding utf8 | ConvertFrom-Json

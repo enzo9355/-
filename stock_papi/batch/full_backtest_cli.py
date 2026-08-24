@@ -25,26 +25,13 @@ def _write_atomic(path, document):
     os.replace(temporary, path)
 
 
-def _completed_checkpoint(root):
-    path = Path(root) / "checkpoints" / "jobs" / "full_backtest" / "current.json"
-    try:
-        document = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, ValueError):
-        return False
-    return isinstance(document, dict) and document.get("status") == "completed"
-
-
 def main(argv=None):
     parser = argparse.ArgumentParser(description="ABSORB resumable full backtest")
     parser.add_argument("--root", type=Path, default=Path(r"D:\AbsorbData"))
     parser.add_argument("--max-items", type=int, default=25)
+    parser.add_argument("--verify-completion", action="store_true")
     args = parser.parse_args(argv)
 
-    if _completed_checkpoint(args.root):
-        print("full backtest checkpoint is already completed; skipping execution")
-        return 0
-
-    from local_quant import load_stock_pipeline
     from reporting.source_loader import load_report_source
     from stock_papi.batch.backtest_worker import FullBacktestWorker
     from stock_papi.batch.runtime import job_namespace
@@ -68,6 +55,14 @@ def main(argv=None):
         cutoff=manifest.market_as_of,
         items=items,
     )
+    if worker.verify_completed_checkpoint():
+        print("full backtest checkpoint is already completed; skipping execution")
+        return 0
+    if args.verify_completion:
+        print("full backtest checkpoint is not completed for the current source")
+        return 3
+
+    from local_quant import load_stock_pipeline
     pipeline = load_stock_pipeline(args.root)
     namespace = job_namespace(args.root, "full_backtest")
     result_root = namespace.output / manifest.manifest_sha256 / "symbols"

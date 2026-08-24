@@ -161,7 +161,7 @@ def register_report_routes(
             )
             return None
 
-    def _load_verified_professional_report(*, metadata, route_source_date):
+    def _load_verified_professional_report(*, metadata, route_source_date, expected_market):
         """Load one canonical report through the complete fail-closed contract."""
         canonical_ptr = metadata.get("professional_report")
         if not isinstance(canonical_ptr, dict):
@@ -209,6 +209,9 @@ def register_report_routes(
             report = ProfessionalPostCloseReport.from_document(canonical_doc)
         except (ValueError, TypeError, KeyError) as exc:
             raise ReportWebError("Canonical Object 驗證失敗") from exc
+
+        if metadata.get("market") != expected_market or report.identity.market != expected_market:
+            raise ReportWebError("Professional Report 市場不符")
 
         try:
             canonical_metadata = copy.deepcopy(metadata)
@@ -258,7 +261,7 @@ def register_report_routes(
 
             if item is None:
                 abort(404)
-            metadata = load_metadata_v2(item)
+            metadata = load_metadata_v2(item, expected_market=market)
             if metadata is None:
                 raise ReportWebError("報告內容暫時無法使用")
             
@@ -270,7 +273,9 @@ def register_report_routes(
                     else None
                 )
                 base_metadata = (
-                    load_metadata_v2_by_sha(base_metadata_sha256)
+                    load_metadata_v2_by_sha(
+                        base_metadata_sha256, expected_market=market
+                    )
                     if load_metadata_v2_by_sha is not None
                     else None
                 )
@@ -315,7 +320,9 @@ def register_report_routes(
                     )
                     return _secure_response(response)
                 prof_report = _load_verified_professional_report(
-                    metadata=metadata, route_source_date=date_param
+                    metadata=metadata,
+                    route_source_date=date_param,
+                    expected_market=market,
                 )
 
                 pdf_download_url = None
@@ -462,12 +469,13 @@ def register_report_routes(
             )
             if item is None:
                 raise ReportWebError("美股盤後報告暫時無法使用")
-            metadata = load_metadata_v2(item)
+            metadata = load_metadata_v2(item, expected_market="US")
             if metadata is None:
                 raise ReportWebError("美股報告內容暫時無法使用")
             report = _load_verified_professional_report(
                 metadata=metadata,
                 route_source_date=item.get("source_market_date"),
+                expected_market="US",
             )
             if report.identity.market != "US":
                 raise ReportWebError("美股 Canonical Object 市場不一致")

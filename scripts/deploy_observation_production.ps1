@@ -102,6 +102,14 @@ function Get-Service {
     ) | ConvertFrom-Json
 }
 
+function Get-Revision {
+    param([string]$Revision)
+    return Invoke-Gcloud @(
+        'run', 'revisions', 'describe', $Revision,
+        '--project', $Project, '--region', $Region, '--format=json'
+    ) | ConvertFrom-Json
+}
+
 function Get-EnvironmentMap {
     param([object[]]$Environment)
 
@@ -202,6 +210,7 @@ function Invoke-ObservationSmoke {
     $HomeHtml = $null
     foreach ($Path in @(
         '/health',
+        '/health/data',
         '/',
         '/market',
         '/industries',
@@ -212,6 +221,12 @@ function Invoke-ObservationSmoke {
         '/reports',
         '/market-map',
         '/stock/2330'
+        '/us',
+        '/us/market',
+        '/us/industries',
+        '/us/stocks',
+        '/reports/us',
+        '/stock/AAPL'
     )) {
         $Response = Invoke-WebRequest `
             -Uri ($BaseUrl.TrimEnd('/') + $Path) `
@@ -236,6 +251,20 @@ function Invoke-ObservationSmoke {
                 throw 'Observation dashboard API schema is invalid'
             }
             Assert-NoPredictionKeys $Document
+        }
+        if ($Path -eq '/health/data') {
+            try { $Freshness = $Response.Content | ConvertFrom-Json }
+            catch { throw 'Data health endpoint did not return valid JSON' }
+            if (
+                $Freshness.service.status -ne 'ok' -or
+                $null -eq $Freshness.markets.TW -or
+                $null -eq $Freshness.markets.US
+            ) { throw 'Data health endpoint is missing TW or US identity' }
+        }
+        if ($Path -like '/us*' -or $Path -eq '/reports/us' -or $Path -eq '/stock/AAPL') {
+            if ([string]$Response.Content -notmatch 'data-market="US"') {
+                throw "US smoke lost market identity: $Path"
+            }
         }
         if ($Path -eq '/reports') {
             $ReportsHtml = [string]$Response.Content
@@ -315,6 +344,26 @@ function Invoke-ObservationSmoke {
             body_sha256 = Get-TextSha256 $Body
         }) | Out-Null
     }
+    $UsReports = Invoke-WebRequest -Uri ($BaseUrl.TrimEnd('/') + '/reports/us') `
+        -UseBasicParsing -MaximumRedirection 0 -TimeoutSec 45
+    $UsMatch = [regex]::Match(
+        [string]$UsReports.Content,
+        'href="(?<path>/reports/us/[0-9]{4}-[0-9]{2}-[0-9]{2}/post-close)"'
+    )
+    if (-not $UsMatch.Success) { throw 'US canonical report link is unavailable' }
+    $UsPath = [string]$UsMatch.Groups['path'].Value
+    $UsCanonical = Invoke-WebRequest -Uri ($BaseUrl.TrimEnd('/') + $UsPath) `
+        -UseBasicParsing -MaximumRedirection 0 -TimeoutSec 45
+    if (
+        [int]$UsCanonical.StatusCode -ne 200 -or
+        [string]$UsCanonical.Content -notmatch 'data-market="US"' -or
+        [string]$UsCanonical.Content -match 'data-market="TW"'
+    ) { throw 'US canonical report market identity smoke failed' }
+    $Results.Add([ordered]@{
+        path = $UsPath
+        status = [int]$UsCanonical.StatusCode
+        body_sha256 = Get-TextSha256 ([string]$UsCanonical.Content)
+    }) | Out-Null
     return $Results.ToArray()
 }
 
@@ -387,6 +436,10 @@ $Commit = (& $Git -C $RepoRoot rev-parse HEAD | Out-String).Trim()
 if ($LASTEXITCODE -ne 0 -or $Commit -notmatch '^[0-9a-f]{40}$') {
     throw 'Unable to determine deployment commit'
 }
+$SourceTree = (& $Git -C $RepoRoot rev-parse 'HEAD^{tree}' | Out-String).Trim()
+if ($LASTEXITCODE -ne 0 -or $SourceTree -notmatch '^[0-9a-f]{40}$') {
+    throw 'Unable to determine deployment source tree'
+}
 
 $Before = Get-Service
 if (-not $Before.status.latestReadyRevisionName -or -not $Before.status.url) {
@@ -430,6 +483,7 @@ $Receipt = [ordered]@{
     service = $Service
     region = $Region
     source_commit = $Commit
+    source_tree = $SourceTree
     previous_service = [ordered]@{
         file = 'cloud-run-before.json'
         sha256 = $null
@@ -444,6 +498,7 @@ $Receipt = [ordered]@{
     candidate_revision = $null
     candidate_url = $null
     candidate_tag = $null
+    candidate_provenance = $null
     smoke = @()
     traffic_applied = $false
     status = 'PLANNED'
@@ -478,6 +533,8 @@ try {
         'ABSORB_PREDICTION_RANKING_ENABLED=false',
         'ABSORB_PREDICTION_STRONG_ACTIONS_ENABLED=false',
         'ABSORB_PREDICTION_PERFORMANCE_ENDORSEMENT_ENABLED=false'
+        "ABSORB_SOURCE_COMMIT=$Commit"
+        "ABSORB_SOURCE_TREE=$SourceTree"
     ) -join ','
     $PreviewPrefixes = @(
         'ABSORB_PREVIEW_CANDIDATE_PREFIX',
@@ -492,6 +549,7 @@ try {
         '--region', $Region,
         '--no-traffic',
         '--tag', $Tag,
+        '--labels', "absorb-source-commit=$Commit,absorb-source-tree=$SourceTree",
         '--update-env-vars', $EnvironmentUpdates,
         '--remove-env-vars', $PreviewPrefixes,
         '--quiet'
@@ -502,6 +560,42 @@ try {
     $CandidateRevision = [string]$AfterDeploy.status.latestCreatedRevisionName
     if (-not $CandidateRevision) {
         throw 'Observation candidate revision is unavailable'
+    }
+    $CandidateInfo = Get-Revision -Revision $CandidateRevision
+    $CandidateEnvironment = Get-EnvironmentMap `
+        $CandidateInfo.spec.containers[0].env
+    $CandidateLabels = $CandidateInfo.metadata.labels
+    $Image = [string]$CandidateInfo.spec.containers[0].image
+    $ImageDigestEvidence = [string]$CandidateInfo.status.imageDigest
+    if (-not $ImageDigestEvidence) {
+        $ImageDigestEvidence = [string]$CandidateInfo.status.containerStatuses[0].imageDigest
+    }
+    $ImageDigest = if ($ImageDigestEvidence -match '(?<digest>sha256:[0-9a-f]{64})$') {
+        [string]$Matches.digest
+    } else { $null }
+    if (-not $ImageDigest -and $Image -match '@(?<digest>sha256:[0-9a-f]{64})$') {
+        $ImageDigest = [string]$Matches.digest
+    }
+    if (
+        [string]$CandidateLabels.'absorb-source-commit' -ne $Commit -or
+        [string]$CandidateLabels.'absorb-source-tree' -ne $SourceTree -or
+        $CandidateEnvironment['ABSORB_SOURCE_COMMIT'] -ne $Commit -or
+        $CandidateEnvironment['ABSORB_SOURCE_TREE'] -ne $SourceTree -or
+        $ImageDigest -notmatch '^sha256:[0-9a-f]{64}$'
+    ) { throw 'Candidate revision provenance verification failed' }
+    $CurrentCommit = (& $Git -C $RepoRoot rev-parse HEAD | Out-String).Trim()
+    $CurrentTree = (& $Git -C $RepoRoot rev-parse 'HEAD^{tree}' | Out-String).Trim()
+    $CurrentDirty = & $Git -C $RepoRoot status --porcelain
+    if ($CurrentCommit -ne $Commit -or $CurrentTree -ne $SourceTree -or @($CurrentDirty).Count -gt 0) {
+        throw 'Deployment source changed while candidate was building'
+    }
+    $Receipt.candidate_provenance = [ordered]@{
+        source_commit = $Commit
+        source_tree = $SourceTree
+        image = $Image
+        image_digest = $ImageDigest
+        label_commit = [string]$CandidateLabels.'absorb-source-commit'
+        label_tree = [string]$CandidateLabels.'absorb-source-tree'
     }
     $CandidateTraffic = @(
         $AfterDeploy.status.traffic |

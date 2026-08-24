@@ -138,18 +138,8 @@ class TpexLifecycleCacheTests(unittest.TestCase):
         binding = MappingProxyType({
             source_id: MappingProxyType({
                 "announcement_date": "2026-07-28",
-                "expected_records": (
-                    MappingProxyType({
-                        "symbol": "2867",
-                        "event_type": "suspend",
-                        "effective_date": "2026-08-20",
-                    }),
-                    MappingProxyType({
-                        "symbol": "2867",
-                        "event_type": "terminate",
-                        "effective_date": "2026-09-01",
-                    }),
-                ),
+                "expected_event_pair_count": 1,
+                "expected_page_count": 1,
                 "payload_size_bytes": len(raw_pdf),
                 "payload_sha256": digest,
             }),
@@ -170,7 +160,7 @@ class TpexLifecycleCacheTests(unittest.TestCase):
             ), patch.object(
                 trading_status,
                 "_extract_pdf_text",
-                return_value=extracted_text,
+                return_value=(extracted_text, 1),
                 create=True,
             ) as extract:
                 payload, payload_sha256, request_count = (
@@ -197,6 +187,7 @@ class TpexLifecycleCacheTests(unittest.TestCase):
             "announcement_date": "2026-07-28",
             "payload_size_bytes": len(raw_pdf),
             "payload_sha256": digest,
+            "page_count": 1,
             "extracted_text": extracted_text,
         })
         extract.assert_called_once_with(raw_pdf)

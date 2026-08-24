@@ -4,7 +4,6 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from types import MappingProxyType
 from unittest import mock
 
 import stock_papi.integrations.market_data.tw_trading_status as trading_status
@@ -27,6 +26,9 @@ TWSE_LISTING_CHANGE_FIXTURE = (
 )
 TWSE_LISTING_CHANGE_PDF_FIXTURE = (
     Path(__file__).parent / "fixtures" / "twse_listing_change_20260728.pdf"
+)
+TWSE_LISTING_CHANGE_MULTI_COMPANY_FIXTURE = (
+    Path(__file__).parent / "fixtures" / "twse_listing_change_multi_company.json"
 )
 FIELDS = (
     "代號",
@@ -80,6 +82,7 @@ def event(event_type, effective_date):
 
 def lifecycle_payloads():
     return {
+        "twse_listing_change_20260728": TWSE_LISTING_CHANGE_PDF_FIXTURE.read_bytes(),
         "twse_current_stop": {
             "stat": "ok",
             "tables": [{
@@ -198,68 +201,17 @@ class OfficialPdfLifecycleSession(LifecycleSession):
 
 class TwTradingStatusTests(unittest.TestCase):
     def test_listing_change_binding_supports_multiple_companies_and_lifecycle_pairs(self):
-        source_id = TWSE_LISTING_CHANGE_SOURCE_ID
-        definition = LIFECYCLE_SOURCE_DEFINITIONS[source_id]
-        text = (
-            "中華民國 115 年 7 月 28 日\n"
-            "公司代號：1111 自115年8月20日起停止買賣，並自115年9月1日起終止上市\n"
-            "公司代號：2222 自115年8月22日起停止買賣，並自115年9月3日起終止上市\n"
-            "公司代號：1111 自115年10月5日起停止買賣，並自115年10月20日起終止上市"
+        fixture = json.loads(
+            TWSE_LISTING_CHANGE_MULTI_COMPANY_FIXTURE.read_text(encoding="utf-8")
         )
-        digest = "d" * 64
-        expected_records = (
-            MappingProxyType({
-                "symbol": "1111", "event_type": "suspend",
-                "effective_date": "2026-08-20",
-            }),
-            MappingProxyType({
-                "symbol": "1111", "event_type": "terminate",
-                "effective_date": "2026-09-01",
-            }),
-            MappingProxyType({
-                "symbol": "2222", "event_type": "suspend",
-                "effective_date": "2026-08-22",
-            }),
-            MappingProxyType({
-                "symbol": "2222", "event_type": "terminate",
-                "effective_date": "2026-09-03",
-            }),
-            MappingProxyType({
-                "symbol": "1111", "event_type": "suspend",
-                "effective_date": "2026-10-05",
-            }),
-            MappingProxyType({
-                "symbol": "1111", "event_type": "terminate",
-                "effective_date": "2026-10-20",
-            }),
+        events = trading_status._parse_twse_listing_change_events(
+            fixture["extracted_text"],
+            announcement_date=datetime.date.fromisoformat(fixture["announcement_date"]),
+            expected_event_pair_count=fixture["expected_event_pair_count"],
+            source_id=fixture["source_id"],
+            source_url=fixture["source_url"],
+            payload_sha256=fixture["payload_sha256"],
         )
-        binding = MappingProxyType({
-            source_id: MappingProxyType({
-                "announcement_date": "2026-07-28",
-                "expected_records": expected_records,
-                "payload_size_bytes": 123,
-                "payload_sha256": digest,
-            }),
-        })
-        payload = {
-            "schema_version": 1,
-            "source_id": source_id,
-            "source_url": definition.url,
-            "announcement_date": "2026-07-28",
-            "payload_size_bytes": 123,
-            "payload_sha256": digest,
-            "extracted_text": text,
-        }
-
-        with mock.patch.object(
-            trading_status, "TWSE_LISTING_CHANGE_SOURCE_BINDINGS", binding
-        ):
-            try:
-                events = trading_status._twse_listing_change_events(
-                    payload, digest, source_id
-                )
-            except KeyError as exc:
-                self.fail(f"parser still depends on source-wide lifecycle dates: {exc}")
 
         self.assertEqual(
             {
@@ -267,21 +219,25 @@ class TwTradingStatusTests(unittest.TestCase):
                 for item in events
             },
             {
-                (item["symbol"], item["event_type"], item["effective_date"])
-                for item in expected_records
+                tuple(item)
+                for item in fixture["expected_events"]
             },
         )
 
-        unexpected = dict(payload)
-        unexpected["extracted_text"] += (
+        unexpected = fixture["extracted_text"] + (
             "\n公司代號：3333 自115年11月1日起停止買賣，"
             "並自115年11月15日起終止上市"
         )
-        with mock.patch.object(
-            trading_status, "TWSE_LISTING_CHANGE_SOURCE_BINDINGS", binding
-        ), self.assertRaisesRegex(ValueError, "event set is invalid"):
-            trading_status._twse_listing_change_events(
-                unexpected, digest, source_id
+        with self.assertRaisesRegex(ValueError, "event set is invalid"):
+            trading_status._parse_twse_listing_change_events(
+                unexpected,
+                announcement_date=datetime.date.fromisoformat(
+                    fixture["announcement_date"]
+                ),
+                expected_event_pair_count=fixture["expected_event_pair_count"],
+                source_id=fixture["source_id"],
+                source_url=fixture["source_url"],
+                payload_sha256=fixture["payload_sha256"],
             )
 
     def test_official_pdf_fixture_is_hash_bound_extracted_and_parsed_in_production_path(self):
@@ -305,9 +261,6 @@ class TwTradingStatusTests(unittest.TestCase):
                 now=datetime.datetime(2026, 9, 2, 1, tzinfo=datetime.timezone.utc),
             )
 
-        binding = trading_status.TWSE_LISTING_CHANGE_SOURCE_BINDINGS[
-            TWSE_LISTING_CHANGE_SOURCE_ID
-        ]
         self.assertEqual(snapshot.request_count, 5)
         self.assertEqual(
             snapshot.source_hashes[TWSE_LISTING_CHANGE_SOURCE_ID],
@@ -316,20 +269,6 @@ class TwTradingStatusTests(unittest.TestCase):
         self.assertEqual(
             snapshot.status_by_symbol["2867"]["status"],
             "officially_suspended",
-        )
-        self.assertEqual(
-            {
-                (
-                    item["symbol"],
-                    item["event_type"],
-                    item["effective_date"],
-                )
-                for item in binding["expected_records"]
-            },
-            {
-                ("2867", "suspend", "2026-08-20"),
-                ("2867", "terminate", "2026-09-01"),
-            },
         )
 
     def test_twse_listing_change_notice_resolves_active_suspend_and_termination_dates(self):
@@ -372,16 +311,6 @@ class TwTradingStatusTests(unittest.TestCase):
             "payload_size": lambda value: value.update(payload_size_bytes=139879),
             "payload_hash": lambda value: value.update(payload_sha256="0" * 64),
             "announcement_date": lambda value: value.update(announcement_date="2026-07-29"),
-            "suspension_date": lambda value: value.update(
-                extracted_text=value["extracted_text"].replace(
-                    "115年8月20日", "115年8月21日"
-                ).replace("115 年 8 月 20 日", "115 年 8 月 21 日")
-            ),
-            "termination_date": lambda value: value.update(
-                extracted_text=value["extracted_text"].replace(
-                    "115年9月1日", "115年9月2日"
-                ).replace("115 年 9 月 1 日", "115 年 9 月 2 日")
-            ),
         }
         for label, mutate in mutations.items():
             notice = dict(original)
@@ -504,8 +433,8 @@ class TwTradingStatusTests(unittest.TestCase):
         self.assertEqual(snapshot.status_by_symbol["1589"]["valid_from"], "2026-04-07")
         self.assertEqual(snapshot.status_by_symbol["4804"]["target_market_date"], "2026-07-29")
         self.assertEqual(set(snapshot.terminated_by_symbol), {"3426", "6806"})
-        self.assertEqual(snapshot.request_count, 8)
-        self.assertEqual(len(snapshot.source_hashes), 8)
+        self.assertEqual(snapshot.request_count, 9)
+        self.assertEqual(len(snapshot.source_hashes), 9)
 
     def test_lifecycle_loader_uses_hash_verified_warm_cache_without_requests(self):
         with tempfile.TemporaryDirectory() as temporary:

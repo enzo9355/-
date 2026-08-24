@@ -25,7 +25,7 @@
   {% if observation_kind != "regular_price" %}
   <header class="stock-hero" id="status-summary">
     <div class="hero-copy">
-      <a class="back-link" href="{{ url_for('dashboard_page') }}">返回市場觀察</a>
+      <a class="back-link" href="{{ url_for('us_dashboard_page' if market == 'US' else 'dashboard_page') }}">返回市場觀察</a>
       <p class="eyebrow">{{ market }} · {{ d.code }}</p>
       <h1>{{ d.name }}</h1>
       <p class="decision-headline">{{ d.status_label }}</p>
@@ -42,7 +42,7 @@
 
   <header class="stock-hero" id="summary">
     <div class="hero-copy">
-      <a class="back-link" href="{{ url_for('dashboard_page') }}">返回市場觀察</a>
+      <a class="back-link" href="{{ url_for('us_dashboard_page' if market == 'US' else 'dashboard_page') }}">返回市場觀察</a>
       <p class="eyebrow">{{ market }} · {{ d.code }}</p>
       <h1>{{ d.name }}</h1>
       <p class="decision-headline">個股觀察摘要</p>

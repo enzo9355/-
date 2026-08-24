@@ -7,6 +7,19 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+function Test-AbsorbVerifiedFullBacktestCompletion {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$DataRoot,
+        [Parameter(Mandatory)][string]$RepoRoot
+    )
+    . (Join-Path $RepoRoot 'scripts\python_runtime.ps1')
+    $PythonExe = Resolve-AbsorbPythonExecutable -RepoRoot $RepoRoot
+    Assert-AbsorbPythonRuntime -PythonExe $PythonExe -RepoRoot $RepoRoot -RequiredImports @('stock_papi')
+    & $PythonExe -m stock_papi.batch.full_backtest_cli --root $DataRoot --verify-completion | Out-Null
+    return $LASTEXITCODE -eq 0
+}
+
 function Get-AbsorbPipelineMutexPlan {
     [CmdletBinding()]
     param(
@@ -15,8 +28,8 @@ function Get-AbsorbPipelineMutexPlan {
         [string]$Job
     )
 
-    # Lock ordering is always market -> publication. Pre-market work takes
-    # only its own market lock, so US work cannot block TW pre-market.
+    # Market writer locks cover computation. Publication serialization is
+    # acquired by upload_local_quant.ps1 only around the shared transaction.
     $Plan = New-Object 'System.Collections.Generic.List[object]'
     $Market = switch ($Job) {
         { $_ -in @('TW-PostClose', 'TW-PreMarket') } { 'TW'; break }
@@ -29,14 +42,6 @@ function Get-AbsorbPipelineMutexPlan {
             market = $Market
             mutex_name = "Global\ABSORB-$Market-Observation-Writer"
             wait_milliseconds = 120000
-        })
-    }
-    if ($Job -in @('TW-PostClose', 'US-PostClose', 'US-Daily', 'WeeklyModel', 'ReportUploadRecovery')) {
-        $Plan.Add([pscustomobject]@{
-            scope = 'publication'
-            market = $null
-            mutex_name = 'Global\ABSORB-Observation-Publication-Writer'
-            wait_milliseconds = 300000
         })
     }
     return @($Plan.ToArray())
@@ -209,6 +214,7 @@ function Invoke-AbsorbPipelineTask {
     $SafeError = $null
     $SafeFailureStage = $null
     $FullBacktestTask = $null
+    $FullBacktestCompletionVerified = $false
 
     try {
         $MutexLeases = @(Enter-AbsorbPipelineMutexPlan -Plan $MutexPlan -Receipts $MutexReceipts)
@@ -232,13 +238,10 @@ function Invoke-AbsorbPipelineTask {
             $SafeError = "Pipeline exited with code $TaskExitCode"
         } else {
             if ($Job -eq 'FullBacktest') {
-                $CheckpointPath = Join-Path $DataRoot 'checkpoints\jobs\full_backtest\current.json'
-                $Checkpoint = if (Test-Path -LiteralPath $CheckpointPath -PathType Leaf) {
-                    Get-Content -LiteralPath $CheckpointPath -Raw -Encoding utf8 | ConvertFrom-Json
-                } else {
-                    $null
-                }
-                if ($null -ne $Checkpoint -and $Checkpoint.status -eq 'completed') {
+                $FullBacktestCompletionVerified = Test-AbsorbVerifiedFullBacktestCompletion `
+                    -DataRoot $DataRoot `
+                    -RepoRoot $RepoRoot
+                if ($FullBacktestCompletionVerified) {
                     # Disable and verify before a success receipt is committed.
                     $SafeFailureStage = 'full_backtest_disable'
                     $FullBacktestTask = Disable-AbsorbCompletedFullBacktestTask
@@ -273,6 +276,7 @@ function Invoke-AbsorbPipelineTask {
         finished_at = [DateTimeOffset]::Now.ToString('o')
         success = $TaskSucceeded
         exit_code = $TaskExitCode
+        full_backtest_completion_verified = $FullBacktestCompletionVerified
         log = $LogPath
         mutexes = @($MutexReceipts.ToArray())
     }

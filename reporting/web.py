@@ -87,6 +87,7 @@ def _validate_report_index_v1(content: bytes, config: ReportConfig | None = None
         seen_dates.add(report_date)
         mapped = dict(item)
         mapped.update(
+            market="TW",
             report_type="post_close",
             source_market_date=item["report_date"],
             applicable_trading_date=item["report_date"],
@@ -97,6 +98,7 @@ def _validate_report_index_v1(content: bytes, config: ReportConfig | None = None
 
 
 def _validate_report_index_v2(document: dict, settings: ReportConfig) -> list[dict]:
+    index_market = document.get("market")
     reports = document.get("reports")
     if (
         document.get("schema_version") != 2
@@ -130,6 +132,7 @@ def _validate_report_index_v2(document: dict, settings: ReportConfig) -> list[di
         present_pdf_keys = pdf_keys & set(item)
         if (
             report_type not in {"post_close", "pre_market", "weekly_model"}
+            or (item.get("market") is not None and item.get("market") != index_market)
             or product_mode not in {None, "observation"}
             or source > applicable
             or published.tzinfo is None
@@ -180,7 +183,9 @@ def _validate_report_index_v2(document: dict, settings: ReportConfig) -> list[di
             ):
                 raise ReportWebError("報告索引 v2 PDF 驗證失敗")
         logical_keys.add(logical_key)
-        validated.append(dict(item))
+        mapped = dict(item)
+        mapped["market"] = index_market
+        validated.append(mapped)
     validated.sort(key=lambda item: item["published_at"], reverse=True)
     return validated
 
@@ -229,7 +234,11 @@ def find_report(reports: list[dict], report_date: str) -> dict | None:
 
 
 def validate_report_metadata(
-    content: bytes, item: dict, *, expected_version: int | None = None
+    content: bytes,
+    item: dict,
+    *,
+    expected_version: int | None = None,
+    expected_market: str | None = None,
 ) -> dict:
     """驗證 content-addressed metadata，並綁定已驗證 index 項目。"""
     if not isinstance(content, bytes) or not 0 < len(content) <= 2 * 1024 * 1024:
@@ -245,6 +254,12 @@ def validate_report_metadata(
     version = document.get("schema_version")
     if expected_version is not None and version != expected_version:
         raise ReportWebError("報告 metadata schema 版本不符")
+    if expected_market not in (None, "TW", "US"):
+        raise ReportWebError("報告 metadata 預期市場不合法")
+    if expected_market is not None and item.get("market") != expected_market:
+        raise ReportWebError("報告索引項目市場不符")
+    if expected_market is not None and document.get("market") != expected_market:
+        raise ReportWebError("報告 metadata 市場不符")
     if version == 2:
         return _validate_report_metadata_v2(document, item)
     if version != 1:

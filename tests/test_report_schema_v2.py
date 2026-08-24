@@ -175,6 +175,25 @@ class ReportSchemaV2Tests(unittest.TestCase):
 
             self.assertEqual(index_path.read_bytes(), before)
 
+    def test_v2_rerun_accepts_legacy_index_item_without_market_and_backfills_it(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            document = metadata("pre_market")
+            publish_report_v2(root, document)
+            index_path = root / "publish" / "reports" / "v2" / "index-TW.json"
+            legacy_index = json.loads(index_path.read_text(encoding="utf-8"))
+            legacy_index["reports"][0].pop("market")
+            index_path.write_text(
+                json.dumps(legacy_index, sort_keys=True, separators=(",", ":")),
+                encoding="utf-8",
+            )
+
+            publish_report_v2(root, document)
+
+            republished = json.loads(index_path.read_text(encoding="utf-8"))
+            self.assertEqual(republished["reports"][0]["market"], "TW")
+            self.assertEqual(len(republished["reports"]), 1)
+
     def test_rerunning_older_report_preserves_newer_index_bytes(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

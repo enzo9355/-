@@ -59,6 +59,7 @@ def register_routes(app, dependencies):
         find_industry_peers=dependencies["find_industry_peers"],
         get_stock_name=dependencies["get_stock_name"],
         dashboard_snapshot=dependencies["dashboard_snapshot"],
+        us_securities_observation=dependencies["us_securities_observation"],
     )
     register_auth_routes(
         app,

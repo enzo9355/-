@@ -3,6 +3,7 @@ gunicorn
 line-bot-sdk
 requests
 defusedxml
+pypdf>=5,<7
 pandas
 numpy
 twstock

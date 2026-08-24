@@ -262,7 +262,11 @@ function initConversations() {
         const response = await fetch(panel.dataset.conversationEndpoint, {
           method: "POST",
           headers,
-          body: JSON.stringify({ question }),
+          body: JSON.stringify({
+            question,
+            market: panel.dataset.marketContext,
+            page: panel.dataset.pageContext,
+          }),
         });
         const data = await response.json();
         appendConversationMessage(log, "assistant", response.ok ? data.text : "自然語言分析暫時無法使用，請稍後再試。");

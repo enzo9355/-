@@ -72,6 +72,64 @@ class WebProductTests(unittest.TestCase):
         self.assertEqual(missing_calendar["status"], "unavailable")
         self.assertNotEqual(missing_calendar["status"], "current")
 
+    @patch.object(stock_app, "_published_dashboard_snapshot")
+    @patch.object(stock_app, "_published_report_index_v2")
+    def test_tw_health_freshness_uses_production_calendar_for_holidays_and_staleness(
+        self, load_index, load_dashboard
+    ):
+        load_dashboard.return_value = {
+            "market": "TW",
+            "observation_as_of": "2026-09-24",
+        }
+        load_index.side_effect = lambda market="TW": [{
+            "market": market,
+            "report_type": "post_close",
+            "source_market_date": "2026-09-24" if market == "TW" else "2026-09-24",
+            "applicable_trading_date": "2026-09-24",
+        }]
+        cases = (
+            ("session", dt.datetime(2026, 9, 24, 3, tzinfo=dt.timezone.utc), "current"),
+            ("holiday", dt.datetime(2026, 9, 25, 3, tzinfo=dt.timezone.utc), "current"),
+            ("holiday eve", dt.datetime(2026, 9, 28, 3, tzinfo=dt.timezone.utc), "current"),
+            ("next session", dt.datetime(2026, 9, 29, 3, tzinfo=dt.timezone.utc), "updating"),
+            ("missed session", dt.datetime(2026, 9, 30, 3, tzinfo=dt.timezone.utc), "stale"),
+        )
+        for label, instant, expected in cases:
+            with self.subTest(label=label), patch.object(
+                web_routes.system, "_utc_now", return_value=instant
+            ):
+                response = stock_app.app.test_client().get("/health/data")
+
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.get_json()["markets"]["TW"]["status"], expected)
+
+    @patch.object(stock_app, "_published_dashboard_snapshot")
+    @patch.object(stock_app, "_published_report_index_v2")
+    def test_tw_health_fails_unavailable_outside_calendar_evidence(
+        self, load_index, load_dashboard
+    ):
+        load_dashboard.return_value = {
+            "market": "TW",
+            "observation_as_of": "2027-01-04",
+        }
+        load_index.side_effect = lambda market="TW": [{
+            "market": market,
+            "report_type": "post_close",
+            "source_market_date": "2027-01-04",
+            "applicable_trading_date": "2027-01-04",
+        }]
+        with patch.object(
+            web_routes.system,
+            "_utc_now",
+            return_value=dt.datetime(2027, 1, 5, 3, tzinfo=dt.timezone.utc),
+        ):
+            response = stock_app.app.test_client().get("/health/data")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.get_json()["markets"]["TW"]["status"], "unavailable"
+        )
+
     def test_market_local_date_uses_aware_tw_and_us_timezones(self):
         market_local_date = getattr(web_routes.system, "market_local_date", None)
 
@@ -615,7 +673,11 @@ class WebProductTests(unittest.TestCase):
 
     def test_us_product_navigation_and_stock_detail_keep_us_context(self):
         client = stock_app.app.test_client()
-        us_stocks = client.get("/us/stocks")
+        with patch.object(
+            stock_app, "_published_us_securities_observation",
+            return_value={"stock_events": [], "etf_observations": []},
+        ):
+            us_stocks = client.get("/us/stocks")
 
         self.assertEqual(us_stocks.status_code, 200)
         html = us_stocks.get_data(as_text=True)
@@ -638,11 +700,17 @@ class WebProductTests(unittest.TestCase):
             detail = client.get("/stock/AAPL")
 
         self.assertEqual(detail.status_code, 200)
-        self.assertIn('data-market="US"', detail.get_data(as_text=True))
+        detail_html = detail.get_data(as_text=True)
+        self.assertIn('data-market="US"', detail_html)
+        self.assertIn('class="back-link" href="/us"', detail_html)
 
     def test_us_stocks_disables_tw_dashboard_hydration(self):
         client = stock_app.app.test_client()
-        response = client.get("/us/stocks")
+        with patch.object(
+            stock_app, "_published_us_securities_observation",
+            return_value={"stock_events": [], "etf_observations": []},
+        ):
+            response = client.get("/us/stocks")
         html = response.get_data(as_text=True)
 
         self.assertEqual(response.status_code, 200)
@@ -652,6 +720,24 @@ class WebProductTests(unittest.TestCase):
         self.assertIn("目前沒有通過條件的異常事件。", html)
         self.assertIn('action="/search"', html)
         self.assertIn('name="market" value="US"', html)
+
+        with patch.object(
+            stock_app, "_published_us_securities_observation",
+            side_effect=ValueError("unavailable"),
+        ):
+            unavailable = client.get("/us/stocks")
+        self.assertEqual(unavailable.status_code, 503)
+        self.assertIn("暫時無法取得", unavailable.get_data(as_text=True))
+
+        with patch.object(
+            stock_app, "_published_us_securities_observation", return_value={}
+        ):
+            malformed = client.get("/us/stocks")
+        self.assertEqual(malformed.status_code, 503)
+        self.assertNotIn(
+            "目前沒有通過條件的異常事件。",
+            malformed.get_data(as_text=True),
+        )
 
         with patch.object(
             stock_app, "search_stock_code", return_value=("AAPL", "Apple Inc.")
@@ -773,6 +859,8 @@ class WebProductTests(unittest.TestCase):
             'role="dialog"',
             'aria-modal="true"',
             'data-conversation-endpoint="/api/conversation"',
+            'data-market-context="TW"',
+            'data-page-context="home"',
             'maxlength="1200"',
             'aria-live="polite"',
         ):
@@ -784,6 +872,8 @@ class WebProductTests(unittest.TestCase):
             'event.key === "Tab"',
             'event.key.toLowerCase() === "k"',
             "querySelectorAll(\"[data-conversation-form]\")",
+            "market: panel.dataset.marketContext",
+            "page: panel.dataset.pageContext",
         ):
             with self.subTest(marker=marker):
                 self.assertIn(marker, script)
@@ -1011,6 +1101,7 @@ class WebProductTests(unittest.TestCase):
         self.assertIn("data-watchlist-toggle", html)
         self.assertIn("data-chart-range", html)
         self.assertIn('aria-label="個股觀察導覽"', html)
+        self.assertIn('class="back-link" href="/"', html)
 
     @patch.object(stock_app, "fetch_published_quant_snapshot")
     def test_stock_page_does_not_render_untrusted_snapshot_news(self, fetch):
@@ -1038,6 +1129,9 @@ class WebProductTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         fetch.assert_called_once_with("AAPL")
+        self.assertIn(
+            'class="back-link" href="/us"', response.get_data(as_text=True)
+        )
 
     def test_dashboard_script_does_not_insert_api_text_with_inner_html(self):
         script = Path(stock_app.app.static_folder, "app.js").read_text(

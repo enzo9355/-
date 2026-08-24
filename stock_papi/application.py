@@ -482,6 +482,63 @@ def load_regression_artifact(object_path, max_bytes=2_000_000):
     return data
 
 
+def _published_us_securities_observation():
+    """Load the latest US securities section through the full report binding."""
+    import hashlib
+
+    from reporting.exceptions import ReportWebError
+    from reporting.professional_binding import validate_professional_report_binding
+    from reporting.professional_schema import ProfessionalPostCloseReport
+
+    reports = _published_report_index_v2(market="US")
+    if not isinstance(reports, list):
+        raise ReportWebError("美股報告索引暫時無法使用")
+    item = next(
+        (value for value in reports if value.get("report_type") == "post_close"),
+        None,
+    )
+    if item is None:
+        raise ReportWebError("美股盤後報告暫時無法使用")
+    metadata = load_report_metadata(
+        item,
+        load_object=_gcs_get_report_v2_object,
+        version="v2",
+        expected_market="US",
+    )
+    pointer = metadata.get("professional_report") if isinstance(metadata, dict) else None
+    if not isinstance(pointer, dict):
+        raise ReportWebError("美股個股觀察來源暫時無法使用")
+    raw = load_canonical_object(pointer.get("object"))
+    if (
+        not isinstance(raw, bytes)
+        or hashlib.sha256(raw).hexdigest() != pointer.get("sha256")
+    ):
+        raise ReportWebError("美股個股觀察來源驗證失敗")
+    try:
+        report = ProfessionalPostCloseReport.from_document(json.loads(raw))
+        validate_professional_report_binding(
+            route_source_date=item.get("source_market_date"),
+            metadata=metadata,
+            pointer=pointer,
+            report=report,
+        )
+    except (TypeError, ValueError, KeyError, json.JSONDecodeError) as exc:
+        raise ReportWebError("美股個股觀察來源驗證失敗") from exc
+    if report.identity.market != "US" or report.securities.status != "available":
+        raise ReportWebError("美股個股觀察市場或狀態不符")
+    data = report.securities.data
+    if (
+        not isinstance(data, dict)
+        or not isinstance(data.get("stock_events"), list)
+        or not isinstance(data.get("etf_observations"), list)
+    ):
+        raise ReportWebError("美股個股觀察格式不合法")
+    return {
+        "stock_events": list(data.get("stock_events") or []),
+        "etf_observations": list(data.get("etf_observations") or []),
+    }
+
+
 
 def _gcs_get_dashboard_object(object_name, max_bytes):
     return _gcs_get_allowed_object(object_name, max_bytes, "dashboard/v1/")
@@ -861,17 +918,17 @@ def _conversation_sector_ranking():
     return rows
 
 
-def _conversation_report_lookup(report_type):
+def _conversation_report_lookup(report_type, *, market="TW"):
     try:
         item = next(
-            (row for row in _published_report_index_v2() if row.get("report_type") == report_type),
+            (row for row in _published_report_index_v2(market=market) if row.get("report_type") == report_type),
             None,
         )
     except Exception:
         item = None
     if not isinstance(item, dict):
         return {
-            "market": "TW", "report_type": report_type,
+            "market": market, "report_type": report_type,
             "data_quality": "unavailable", "limitations": ["report unavailable"],
         }
     return {
@@ -940,7 +997,7 @@ def _observation_signed(value, digits=2, suffix="%"):
     return f"{float(value):+.{digits}f}{suffix}"
 
 
-def _observation_conversation(*, question, access):
+def _observation_conversation(*, question, access, market_context="TW", page_context="home"):
     try:
         question = validate_question(question)
     except InputRejected as exc:
@@ -996,6 +1053,18 @@ def _observation_conversation(*, question, access):
             data_as_of=data.get("as_of"),
             data_quality="available",
             tools_used=("verified_observation_snapshot",),
+        )
+
+    if market_context == "US":
+        report = _conversation_report_lookup("post_close", market="US")
+        if report.get("data_quality") != "available":
+            return ConversationAnswer("已驗證的美股市場觀察資料暫時無法取得。")
+        summary = "；".join(report.get("summary") or []) or report.get("title")
+        return ConversationAnswer(
+            f"美股市場實況：{summary}\n\n資料截至：{report.get('source_market_date') or '未提供'}｜內容只描述已發布資料。",
+            data_as_of=report.get("source_market_date"),
+            data_quality="available",
+            tools_used=("verified_us_report_index",),
         )
 
     snapshot = _published_dashboard_snapshot()
@@ -1059,16 +1128,24 @@ def _observation_conversation(*, question, access):
     )
 
 
-def run_absorb_conversation(*, principal, question, access="public", action_executor=None):
+def run_absorb_conversation(
+    *, principal, question, access="public", action_executor=None,
+    market_context="TW", page_context="home",
+):
     if prediction_capability.mode == "research":
-        return _observation_conversation(question=question, access=access)
+        return _observation_conversation(
+            question=question, access=access,
+            market_context=market_context, page_context=page_context,
+        )
     state_lookup = (lambda: _conversation_user_state(principal)) if access == "authenticated" else None
     orchestrator = ConversationOrchestrator(
         context_store=conversation_context_store,
         tool_registry=build_registry(
             analyze=lambda symbol: analyze(symbol),
             sector_ranking=_conversation_sector_ranking,
-            report_lookup=_conversation_report_lookup,
+            report_lookup=lambda report_type: _conversation_report_lookup(
+                report_type, market=market_context
+            ),
             watchlist_lookup=state_lookup,
             alerts_lookup=state_lookup,
         ),
@@ -1078,10 +1155,13 @@ def run_absorb_conversation(*, principal, question, access="public", action_exec
     )
     return orchestrator.handle(
         principal=principal, question=question, access=access,
+        market_context=market_context, page_context=page_context,
     )
 
 
-def run_absorb_web_conversation(*, principal, question, access="public"):
+def run_absorb_web_conversation(
+    *, principal, question, access="public", market_context="TW", page_context="home"
+):
     action_executor = None
     if access == "authenticated" and principal.startswith("line:"):
         action_executor = _line_conversation_action_executor(principal.removeprefix("line:"))
@@ -1090,6 +1170,8 @@ def run_absorb_web_conversation(*, principal, question, access="public"):
         question=question,
         access=access,
         action_executor=action_executor,
+        market_context=market_context,
+        page_context=page_context,
     )
 
 
@@ -1383,11 +1465,13 @@ def route_dependencies():
         "load_report_metadata": lambda item: load_report_metadata(
             item, load_object=_gcs_get_report_object
         ),
-        "load_report_metadata_v2": lambda item: load_report_metadata(
-            item, load_object=_gcs_get_report_v2_object, version="v2"
+        "load_report_metadata_v2": lambda item, expected_market: load_report_metadata(
+            item, load_object=_gcs_get_report_v2_object, version="v2",
+            expected_market=expected_market,
         ),
-        "load_report_metadata_v2_by_sha": lambda metadata_sha256: load_report_metadata_by_sha(
-            metadata_sha256, load_object=_gcs_get_report_v2_object
+        "load_report_metadata_v2_by_sha": lambda metadata_sha256, expected_market: load_report_metadata_by_sha(
+            metadata_sha256, load_object=_gcs_get_report_v2_object,
+            expected_market=expected_market,
         ),
         "load_canonical_object": lambda object_path, max_bytes=5_000_000: load_canonical_object(
             object_path, max_bytes=max_bytes
@@ -1410,6 +1494,7 @@ def route_dependencies():
         ),
         "dashboard_sector_cards": lambda: dashboard_sector_cards(),
         "dashboard_snapshot": lambda: _published_dashboard_snapshot(),
+        "us_securities_observation": lambda: _published_us_securities_observation(),
         "prediction_capability": prediction_capability,
         "cached_opportunities": lambda: cached_opportunities(),
         "build_market_heatmap": build_market_heatmap,

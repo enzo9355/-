@@ -17,7 +17,7 @@ import app as stock_app
 
 from reporting.observation_v2 import build_post_close_observation_metadata
 from reporting.publisher import publish_report_v2
-from reporting.web import validate_report_index
+from reporting.web import ReportWebError, validate_report_index
 from tests.test_observation_public_surfaces import observation_dashboard
 
 
@@ -201,6 +201,127 @@ class ReportWebTests(unittest.TestCase):
         self.assertIn("美股市場研究摘要", html)
         self.assertIn("2026-07-15", html)
         load_index.assert_called_once_with(market="US")
+
+    def test_hash_valid_cross_market_metadata_is_rejected_in_both_directions(self):
+        from reporting.professional_builder import build_professional_post_close_artifact
+
+        def published_objects(market):
+            temporary = tempfile.TemporaryDirectory()
+            self.addCleanup(temporary.cleanup)
+            root = Path(temporary.name)
+            metadata = build_post_close_observation_metadata(
+                observation_dashboard(), Calendar()
+            )
+            metadata["market"] = market
+            professional = build_professional_post_close_artifact(
+                metadata, code_commit_sha="b" * 40
+            )
+            publish_report_v2(root, metadata, professional_report=professional)
+            publish = root / "publish" / "reports" / "v2"
+            return {
+                f"reports/v2/{path.relative_to(publish).as_posix()}": path.read_bytes()
+                for path in publish.rglob("*")
+                if path.is_file()
+            }
+
+        for route_market, artifact_market, route in (
+            ("US", "TW", "/reports/us/2026-07-15/post-close"),
+            ("TW", "US", "/reports/2026-07-15/post-close"),
+        ):
+            with self.subTest(route_market=route_market, artifact_market=artifact_market):
+                objects = published_objects(artifact_market)
+                source_index_key = f"reports/v2/index-{artifact_market}.json"
+                route_index_key = f"reports/v2/index-{route_market}.json"
+                route_index = json.loads(objects[source_index_key])
+                route_index["market"] = route_market
+                for item in route_index["reports"]:
+                    # Old publisher items did not carry market. The top-level
+                    # market must bind them without weakening idempotent reads.
+                    item.pop("market", None)
+                objects[route_index_key] = json.dumps(
+                    route_index,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+
+                with patch.object(
+                    stock_app,
+                    "_gcs_get_report_v2_object",
+                    side_effect=lambda path, _size: objects.get(path)
+                    if path.startswith("reports/v2/")
+                    else objects.get(f"reports/v2/{path}"),
+                    create=True,
+                ):
+                    response = stock_app.app.test_client().get(route)
+
+                self.assertEqual(response.status_code, 503)
+                self.assertNotIn(
+                    f'data-market="{artifact_market}"',
+                    response.get_data(as_text=True),
+                )
+
+    def test_us_stocks_loader_returns_verified_professional_stock_and_etf_rows(self):
+        from reporting.professional_builder import build_professional_post_close_artifact
+
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        dashboard = observation_dashboard()
+        dashboard["market"] = "US"
+        dashboard["stock_events"] = [{
+            "symbol": "AAPL",
+            "name": "Apple Inc.",
+            "event_type": "volume_surge",
+            "return_1d_pct": 1.25,
+            "volume_ratio": 1.8,
+            "observation": "成交量顯著放大",
+            "as_of": "2026-07-15",
+        }]
+        dashboard["etf_observations"] = [{
+            "symbol": "SPY",
+            "name": "SPDR S&P 500 ETF Trust",
+            "price": 622.4,
+            "return_1d_pct": 0.4,
+            "return_5d_pct": 1.1,
+            "as_of": "2026-07-15",
+        }]
+        metadata = build_post_close_observation_metadata(dashboard, Calendar())
+        metadata["market"] = "US"
+        professional = build_professional_post_close_artifact(
+            metadata, code_commit_sha="b" * 40
+        )
+        publish_report_v2(root, metadata, professional_report=professional)
+        publish = root / "publish" / "reports" / "v2"
+        objects = {
+            f"reports/v2/{path.relative_to(publish).as_posix()}": path.read_bytes()
+            for path in publish.rglob("*")
+            if path.is_file()
+        }
+
+        with patch.object(
+            stock_app,
+            "_gcs_get_report_v2_object",
+            side_effect=lambda path, _size: objects.get(path)
+            if path.startswith("reports/v2/")
+            else objects.get(f"reports/v2/{path}"),
+            create=True,
+        ):
+            observation = stock_app._published_us_securities_observation()
+
+        self.assertEqual(observation["stock_events"][0]["symbol"], "AAPL")
+        self.assertEqual(observation["etf_observations"][0]["symbol"], "SPY")
+
+    def test_explicit_item_market_mismatch_is_rejected_by_index_validator(self):
+        temporary, objects, _metadata = self._objects()
+        self.addCleanup(temporary.cleanup)
+        index = json.loads(objects["reports/v2/index-TW.json"])
+        index["reports"][0]["market"] = "US"
+
+        with self.assertRaises(ReportWebError):
+            validate_report_index(
+                json.dumps(index).encode("utf-8"), expected_market="TW"
+            )
 
     def test_production_shaped_daily_reports_have_distinct_canonical_pages(self):
         temporary, objects = self._production_shaped_objects()
