@@ -4,6 +4,8 @@ import datetime
 import json
 import pandas as pd
 import unittest
+import urllib.parse
+import zoneinfo
 from unittest.mock import patch
 
 from stock_papi.integrations.market_data.us_market_data import (
@@ -11,12 +13,272 @@ from stock_papi.integrations.market_data.us_market_data import (
     fetch_direct_yahoo_chart,
     fetch_nasdaq_historical_chart,
     fetch_us_stock_history,
+    _normalise_us_date,
     USIntegrityError,
     USSchemaError,
 )
 
 
 class USMarketDataTests(unittest.TestCase):
+    def test_target_bound_yahoo_query_uses_new_york_exclusive_end(self):
+        target = datetime.date(2026, 8, 24)
+        payload = {
+            "chart": {
+                "result": [
+                    {
+                        "timestamp": [1787587200],
+                        "indicators": {
+                            "quote": [
+                                {
+                                    "open": [100.0],
+                                    "high": [101.0],
+                                    "low": [99.0],
+                                    "close": [100.5],
+                                    "volume": [1000.0],
+                                }
+                            ]
+                        },
+                    }
+                ]
+            }
+        }
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self):
+                return json.dumps(payload).encode("utf-8")
+
+        requests = []
+
+        def open_url(request, timeout):
+            requests.append(request)
+            return Response()
+
+        with patch("urllib.request.urlopen", side_effect=open_url):
+            fetch_direct_yahoo_chart("BRK-B", target_market_date=target)
+
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(requests[0].full_url).query)
+        self.assertEqual(query["interval"], ["1d"])
+        self.assertEqual(query["period1"], ["1724472000"])
+        self.assertEqual(query["period2"], ["1787630400"])
+        self.assertNotIn("range", query)
+
+    def test_representative_symbols_ignore_future_bar_without_symbol_exception(self):
+        target = datetime.date(2026, 8, 24)
+        new_york = zoneinfo.ZoneInfo("America/New_York")
+
+        def timestamp(session_date):
+            return int(
+                datetime.datetime.combine(
+                    session_date,
+                    datetime.time(12, 0),
+                    tzinfo=new_york,
+                ).timestamp()
+            )
+
+        payload = {
+            "chart": {
+                "result": [
+                    {
+                        "timestamp": [timestamp(target), timestamp(target + datetime.timedelta(days=1))],
+                        "indicators": {
+                            "quote": [
+                                {
+                                    "open": [100.0, 200.0],
+                                    "high": [101.0, 150.0],
+                                    "low": [99.0, 149.0],
+                                    "close": [100.5, 200.5],
+                                    "volume": [1000.0, 1000.0],
+                                }
+                            ]
+                        },
+                    }
+                ]
+            }
+        }
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self):
+                return json.dumps(payload).encode("utf-8")
+
+        with patch("urllib.request.urlopen", side_effect=lambda request, timeout: Response()):
+            for symbol in ("AKO-A", "BRK-B", "DBC"):
+                with self.subTest(symbol=symbol):
+                    result = fetch_us_stock_history(symbol, target_market_date=target)
+                    self.assertEqual(list(result.index), [target])
+                    self.assertEqual(result.attrs["ignored_future_session_row_count"], 1)
+
+    def test_future_only_provider_bar_is_not_reused_when_target_is_missing(self):
+        target = datetime.date(2026, 8, 24)
+        future = target + datetime.timedelta(days=1)
+        new_york = zoneinfo.ZoneInfo("America/New_York")
+        timestamp = int(
+            datetime.datetime.combine(
+                future,
+                datetime.time(12, 0),
+                tzinfo=new_york,
+            ).timestamp()
+        )
+        payload = {
+            "chart": {
+                "result": [
+                    {
+                        "timestamp": [timestamp],
+                        "indicators": {
+                            "quote": [
+                                {
+                                    "open": [200.0],
+                                    "high": [201.0],
+                                    "low": [199.0],
+                                    "close": [200.5],
+                                    "volume": [1000.0],
+                                }
+                            ]
+                        },
+                    }
+                ]
+            }
+        }
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self):
+                return json.dumps(payload).encode("utf-8")
+
+        with patch("urllib.request.urlopen", return_value=Response()):
+            result = fetch_us_stock_history("DBC", target_market_date=target)
+
+        self.assertTrue(result.empty)
+        self.assertEqual(result.attrs["ignored_future_session_row_count"], 1)
+
+    def test_yfinance_fallback_uses_target_bound_start_and_end(self):
+        target = datetime.date(2026, 8, 24)
+        dates = pd.to_datetime([target, target + datetime.timedelta(days=1)])
+        frame = pd.DataFrame(
+            {
+                "Open": [100.0, 200.0],
+                "High": [101.0, 150.0],
+                "Low": [99.0, 149.0],
+                "Close": [100.5, 200.5],
+                "Volume": [1000.0, 1000.0],
+            },
+            index=dates,
+        )
+        ticker = unittest.mock.Mock()
+        ticker.history.return_value = frame
+
+        with patch(
+            "stock_papi.integrations.market_data.us_market_data.fetch_direct_yahoo_chart",
+            side_effect=RuntimeError("synthetic direct-provider failure"),
+        ), patch(
+            "stock_papi.integrations.market_data.us_market_data.yf.Ticker",
+            return_value=ticker,
+        ):
+            result = fetch_us_stock_history("DBC", target_market_date=target)
+
+        self.assertEqual(list(result.index), [target])
+        self.assertEqual(
+            ticker.history.call_args.kwargs,
+            {
+                "start": datetime.date(2024, 8, 24),
+                "end": datetime.date(2026, 8, 25),
+                "auto_adjust": False,
+            },
+        )
+
+    def test_new_york_session_date_conversion_remains_dst_aware(self):
+        utc = datetime.timezone.utc
+        self.assertEqual(
+            _normalise_us_date(
+                datetime.datetime(2026, 3, 6, 4, 59, tzinfo=utc), "DST"
+            ),
+            datetime.date(2026, 3, 5),
+        )
+        self.assertEqual(
+            _normalise_us_date(
+                datetime.datetime(2026, 3, 6, 5, 0, tzinfo=utc), "DST"
+            ),
+            datetime.date(2026, 3, 6),
+        )
+        self.assertEqual(
+            _normalise_us_date(
+                datetime.datetime(2026, 3, 9, 3, 59, tzinfo=utc), "DST"
+            ),
+            datetime.date(2026, 3, 8),
+        )
+        self.assertEqual(
+            _normalise_us_date(
+                datetime.datetime(2026, 3, 9, 4, 0, tzinfo=utc), "DST"
+            ),
+            datetime.date(2026, 3, 9),
+        )
+
+    def test_target_session_is_selected_before_future_live_bar_integrity_validation(self):
+        target = datetime.date(2026, 8, 24)
+        new_york = zoneinfo.ZoneInfo("America/New_York")
+
+        def timestamp(session_date):
+            return int(
+                datetime.datetime.combine(
+                    session_date,
+                    datetime.time(12, 0),
+                    tzinfo=new_york,
+                ).timestamp()
+            )
+
+        payload = {
+            "chart": {
+                "result": [
+                    {
+                        "timestamp": [timestamp(target), timestamp(target + datetime.timedelta(days=1))],
+                        "indicators": {
+                            "quote": [
+                                {
+                                    "open": [100.0, 200.0],
+                                    "high": [101.0, 150.0],
+                                    "low": [99.0, 149.0],
+                                    "close": [100.5, 200.5],
+                                    "volume": [1000.0, 1000.0],
+                                }
+                            ]
+                        },
+                    }
+                ]
+            }
+        }
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self):
+                return json.dumps(payload).encode("utf-8")
+
+        with patch("urllib.request.urlopen", return_value=Response()):
+            result = fetch_us_stock_history("BRK-B", target_market_date=target)
+
+        self.assertEqual(list(result.index), [target])
+        self.assertEqual(float(result.iloc[-1]["Close"]), 100.5)
+
     def test_compute_technical_indicators(self):
         dates = pd.date_range("2026-07-01", periods=30, freq="B")
         df = pd.DataFrame(

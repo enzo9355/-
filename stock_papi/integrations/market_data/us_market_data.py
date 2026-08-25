@@ -117,6 +117,11 @@ def compute_us_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 _US_REQUIRED_PRICE_COLUMNS = ("Open", "High", "Low", "Close", "Volume")
+_YAHOO_RANGE_LOOKBACK_DAYS = {
+    "2y": 730,
+    "1y": 365,
+    "3mo": 90,
+}
 
 
 def _scalar_is_missing(value) -> bool:
@@ -165,6 +170,69 @@ def _normalise_us_date(value, symbol: str) -> datetime.date:
         return datetime.date.fromisoformat(str(value).split("T", 1)[0])
     except (TypeError, ValueError, OverflowError, OSError) as exc:
         raise USSchemaError(f"US price row date is invalid for {symbol}: {value!r}") from exc
+
+
+def _yahoo_target_window(
+    range_str: str, target_market_date: datetime.date
+) -> tuple[datetime.date, datetime.date]:
+    try:
+        lookback_days = _YAHOO_RANGE_LOOKBACK_DAYS[range_str]
+    except KeyError as exc:
+        raise USSchemaError(
+            f"Yahoo target-bound history does not support range {range_str!r}"
+        ) from exc
+    return (
+        target_market_date - datetime.timedelta(days=lookback_days),
+        target_market_date + datetime.timedelta(days=1),
+    )
+
+
+def _yahoo_session_epoch(session_date: datetime.date) -> int:
+    return int(
+        datetime.datetime.combine(
+            session_date,
+            datetime.time.min,
+            tzinfo=NEW_YORK,
+        ).timestamp()
+    )
+
+
+def _filter_us_history_to_target(
+    raw_df: pd.DataFrame,
+    symbol: str,
+    target_market_date: datetime.date | None,
+) -> pd.DataFrame:
+    """Remove provider rows after the target session before validating OHLC."""
+    if target_market_date is None or raw_df is None or raw_df.empty:
+        return raw_df
+    if not isinstance(raw_df, pd.DataFrame):
+        raise USSchemaError(f"US price payload is not tabular for {symbol}")
+
+    if isinstance(raw_df.index, pd.DatetimeIndex):
+        date_values = list(raw_df.index)
+    elif "Date" in raw_df.columns:
+        date_values = list(raw_df["Date"])
+    elif len(raw_df.index) and all(
+        isinstance(value, (datetime.date, datetime.datetime, pd.Timestamp))
+        for value in raw_df.index
+    ):
+        date_values = list(raw_df.index)
+    else:
+        raise USSchemaError(f"US price payload has no date column for {symbol}")
+
+    normalized_dates = [
+        _normalise_us_date(value, symbol) for value in date_values
+    ]
+    keep = [date <= target_market_date for date in normalized_dates]
+    if all(keep):
+        return raw_df
+
+    filtered = raw_df.loc[keep].copy()
+    filtered.attrs = dict(getattr(raw_df, "attrs", {}))
+    filtered.attrs["ignored_future_session_row_count"] = sum(
+        not include for include in keep
+    )
+    return filtered
 
 
 def _coerce_us_number(value, *, symbol: str, field: str, date: datetime.date) -> float:
@@ -425,6 +493,8 @@ def _prepare_us_history_frame(raw_df: pd.DataFrame, symbol: str) -> pd.DataFrame
     """Normalize and validate every provider row before any filtering or deduplication."""
     if raw_df is None or raw_df.empty:
         empty = pd.DataFrame()
+        if raw_df is not None:
+            empty.attrs.update(getattr(raw_df, "attrs", {}))
         empty.attrs["dropped_non_observation_placeholder_count"] = 0
         return empty
     if not isinstance(raw_df, pd.DataFrame):
@@ -503,7 +573,23 @@ def fetch_direct_yahoo_chart(
 ) -> pd.DataFrame:
     """Fetch daily chart history directly from Yahoo chart API with zero crumb rate limits and retry backoff."""
     import time
-    url = f"https://query2.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1d&range={range_str}"
+    query = {"interval": "1d"}
+    if target_market_date is None:
+        query["range"] = range_str
+    else:
+        start_date, end_date = _yahoo_target_window(range_str, target_market_date)
+        # Yahoo treats period2 as exclusive; use the next New York midnight so
+        # the target session is included while later live sessions are excluded.
+        query.update(
+            {
+                "period1": str(_yahoo_session_epoch(start_date)),
+                "period2": str(_yahoo_session_epoch(end_date)),
+            }
+        )
+    url = (
+        f"https://query2.finance.yahoo.com/v8/finance/chart/{symbol}?"
+        f"{urllib.parse.urlencode(query)}"
+    )
     req = urllib.request.Request(
         url,
         headers={
@@ -581,6 +667,7 @@ def fetch_direct_yahoo_chart(
     n = len(timestamps)
     records = []
     dropped_placeholder_count = 0
+    ignored_future_session_row_count = 0
     for i in range(n):
         try:
             dt = datetime.datetime.fromtimestamp(
@@ -590,6 +677,9 @@ def fetch_direct_yahoo_chart(
             raise USSchemaError(
                 f"Yahoo chart timestamp is invalid for {symbol} at row {i}"
             ) from exc
+        if target_market_date is not None and dt > target_market_date:
+            ignored_future_session_row_count += 1
+            continue
         values = {
             field: arrays[field][i]
             for field in _US_REQUIRED_PRICE_COLUMNS
@@ -617,6 +707,7 @@ def fetch_direct_yahoo_chart(
         prepared.attrs.get("dropped_non_observation_placeholder_count", 0)
         + dropped_placeholder_count
     )
+    prepared.attrs["ignored_future_session_row_count"] = ignored_future_session_row_count
     return prepared
 
 
@@ -645,12 +736,24 @@ def fetch_us_stock_history(
             # Fallback to yfinance if direct chart endpoint encounters unexpected error
             try:
                 yf_ticker = yf.Ticker(symbol)
-                raw_df = yf_ticker.history(period=range_str, auto_adjust=False)
+                if target_market_date is None:
+                    raw_df = yf_ticker.history(period=range_str, auto_adjust=False)
+                else:
+                    start_date, end_date = _yahoo_target_window(
+                        range_str, target_market_date
+                    )
+                    raw_df = yf_ticker.history(
+                        start=start_date,
+                        end=end_date,
+                        auto_adjust=False,
+                    )
             except Exception as yf_err:
                 raise USProviderOperationalError(f"Provider failure for {symbol}: {yf_err}") from yf_err
 
     if raw_df is None or raw_df.empty:
         empty = pd.DataFrame()
+        if raw_df is not None:
+            empty.attrs.update(getattr(raw_df, "attrs", {}))
         empty.attrs["dropped_non_observation_placeholder_count"] = 0
         return empty
 
@@ -660,6 +763,7 @@ def fetch_us_stock_history(
         )
         or 0
     )
+    raw_df = _filter_us_history_to_target(raw_df, symbol, target_market_date)
     df = _prepare_us_history_frame(raw_df, symbol)
     dropped_placeholder_count = upstream_dropped_placeholder_count + int(
         df.attrs.get("dropped_non_observation_placeholder_count", 0)
