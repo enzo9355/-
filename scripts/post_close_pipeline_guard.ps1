@@ -1,9 +1,6 @@
 [CmdletBinding()]
 param()
 
-Set-StrictMode -Version 2.0
-$ErrorActionPreference = 'Stop'
-
 function Test-PostCloseCompletion {
     <#
     .SYNOPSIS
@@ -22,6 +19,11 @@ function Test-PostCloseCompletion {
     Both conditions are required: a local pointer alone only proves local
     promotion, not remote publication or delivery. A corrupt or stale file
     fails the check (fail-open into a re-run, which is safe and idempotent).
+
+    This helper must not mutate the caller's PowerShell language semantics:
+    it sets no StrictMode or error preference, and every optional JSON
+    property is read through PSObject.Properties so the helper behaves
+    identically no matter how the caller's session is configured.
 
     The caller must enforce the DataRoot allowlist before invoking this helper.
     #>
@@ -43,7 +45,11 @@ function Test-PostCloseCompletion {
         $ExistingLatest = Get-Content -LiteralPath $LatestPostClosePath -Raw -Encoding utf8 | ConvertFrom-Json
     }
     catch { return $false }
-    if ([string]$ExistingLatest.source_market_date -ne $TargetDate) { return $false }
+    $SourceDateProperty = $ExistingLatest.PSObject.Properties['source_market_date']
+    if (
+        $null -eq $SourceDateProperty -or
+        [string]$SourceDateProperty.Value -ne $TargetDate
+    ) { return $false }
 
     $TaskStatusPath = Join-Path $DataRoot 'logs\tasks\current-TW-PostClose.json'
     if (-not (Test-Path -LiteralPath $TaskStatusPath -PathType Leaf)) {
@@ -53,9 +59,14 @@ function Test-PostCloseCompletion {
         $TaskStatus = Get-Content -LiteralPath $TaskStatusPath -Raw -Encoding utf8 | ConvertFrom-Json
     }
     catch { return $false }
-    if ([bool]$TaskStatus.success -ne $true) { return $false }
+    $SuccessProperty = $TaskStatus.PSObject.Properties['success']
+    if ($null -eq $SuccessProperty -or [bool]$SuccessProperty.Value -ne $true) {
+        return $false
+    }
     try {
-        $StartedAt = [DateTimeOffset]::Parse([string]$TaskStatus.started_at)
+        $StartedAtProperty = $TaskStatus.PSObject.Properties['started_at']
+        if ($null -eq $StartedAtProperty) { return $false }
+        $StartedAt = [DateTimeOffset]::Parse([string]$StartedAtProperty.Value)
     }
     catch { return $false }
     if ($StartedAt.ToString('yyyy-MM-dd') -ne $TargetDate) { return $false }

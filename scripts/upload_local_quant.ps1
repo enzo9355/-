@@ -1173,41 +1173,51 @@ try {
                     [string]$Document.observation_kind -ne
                         [string]$Entry.observation_kind
                 ) { throw 'Object v3 observation mismatch' }
-                $Expected = if ($ExpectedBySymbol.ContainsKey($Symbol)) {
-                    $ExpectedBySymbol[$Symbol]
-                } else { $null }
-                if ($null -eq $Expected) {
-                    if (
-                        [string]$Entry.observation_kind -ne 'regular_price' -or
-                        [string]$Entry.as_of -ne
-                            [string]$Manifest.target_market_date -or
-                        $null -ne $Document.trading_status_evidence -or
-                        $Entry.PSObject.Properties['evidence_sha256']
-                    ) { throw 'Regular price object v3 mismatch' }
-                } else {
-                    $Evidence = $Document.trading_status_evidence
-                    if (
-                        $null -eq $Evidence -or
-                        [int]$Evidence.schema_version -ne 1 -or
-                        [string]$Evidence.status -ne [string]$Expected.status -or
-                        [string]$Evidence.market -ne 'TW' -or
-                        [string]$Evidence.symbol -ne $Symbol -or
-                        [string]$Evidence.target_market_date -ne
-                            [string]$Manifest.target_market_date -or
-                        [string]$Evidence.evidence_sha256 -notmatch
-                            '^[0-9a-f]{64}$' -or
-                        [string]$Evidence.evidence_sha256 -ne
-                            [string]$Entry.evidence_sha256 -or
-                        [string]$Evidence.evidence_sha256 -ne
-                            [string]$Expected.evidence_sha256 -or
-                        [string]$Entry.sha256 -ne
-                            [string]$Expected.artifact_sha256 -or
-                        [string]$Entry.latest_regular_price_date -ne
-                            [string]$Expected.latest_regular_price_date -or
-                        [string]$Entry.observation_kind -ne
-                            [string]$Expected.status
-                    ) { throw 'Status object evidence mismatch' }
+            $Expected = if ($ExpectedBySymbol.ContainsKey($Symbol)) {
+                $ExpectedBySymbol[$Symbol]
+            } else { $null }
+            $EvidenceProperty = $Document.PSObject.Properties['trading_status_evidence']
+            $EntryEvidenceProperty = $Entry.PSObject.Properties['evidence_sha256']
+            if ($null -eq $Expected) {
+                $UnexpectedEvidence = (
+                    ($null -ne $EvidenceProperty) -and
+                    ($null -ne $EvidenceProperty.Value)
+                )
+                if (
+                    [string]$Entry.observation_kind -ne 'regular_price' -or
+                    [string]$Entry.as_of -ne
+                        [string]$Manifest.target_market_date -or
+                    $UnexpectedEvidence -or
+                    $null -ne $EntryEvidenceProperty
+                ) { throw 'Regular price object v3 mismatch' }
+            } else {
+                if ($null -eq $EvidenceProperty) {
+                    throw 'Status object evidence mismatch'
                 }
+                $Evidence = $EvidenceProperty.Value
+                if (
+                    $null -eq $EntryEvidenceProperty -or
+                    $null -eq $Evidence -or
+                    [int]$Evidence.schema_version -ne 1 -or
+                    [string]$Evidence.status -ne [string]$Expected.status -or
+                    [string]$Evidence.market -ne 'TW' -or
+                    [string]$Evidence.symbol -ne $Symbol -or
+                    [string]$Evidence.target_market_date -ne
+                        [string]$Manifest.target_market_date -or
+                    [string]$Evidence.evidence_sha256 -notmatch
+                        '^[0-9a-f]{64}$' -or
+                    [string]$Evidence.evidence_sha256 -ne
+                        [string]$EntryEvidenceProperty.Value -or
+                    [string]$Evidence.evidence_sha256 -ne
+                        [string]$Expected.evidence_sha256 -or
+                    [string]$Entry.sha256 -ne
+                        [string]$Expected.artifact_sha256 -or
+                    [string]$Entry.latest_regular_price_date -ne
+                        [string]$Expected.latest_regular_price_date -or
+                    [string]$Entry.observation_kind -ne
+                        [string]$Expected.status
+                ) { throw 'Status object evidence mismatch' }
+            }
             }
             $ValidatedObjectPaths.Add($ObjectPath) | Out-Null
             $ValidatedObjectRelatives.Add($ObjectRelative) | Out-Null
