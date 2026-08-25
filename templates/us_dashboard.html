@@ -30,7 +30,9 @@
     <section class="panel" aria-labelledby="summary-validation-title">
       <h2 id="summary-validation-title">驗證狀態</h2>
       {% set gate_labels = {"ranking": "模型排名", "calibration": "模型校準", "quality": "品質 Gate", "transaction_value": "交易價值驗證", "promotion": "模型 Promotion"} %}
-      {% set market_verified = (summary.get('market', {}).get('status') == 'available' and summary.get('industries', {}).get('status') == 'available') %}
+      {% set market_section = summary.get('market') if summary is mapping else none %}
+      {% set industries_section = summary.get('industries') if summary is mapping else none %}
+      {% set market_verified = (market_section is mapping and market_section.get('status') == 'available' and industries_section is mapping and industries_section.get('status') == 'available') %}
       <div class="validation-sections">
         <div class="validation-group">
           <h3>市場資料驗證</h3>
