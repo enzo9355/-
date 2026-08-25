@@ -5,7 +5,23 @@
   <header class="page-header"><div><h1>美股產業觀察</h1><p class="page-intro">資料日 {{ summary.source_market_date }}；排名與觀察均來自已驗證的美股正式報告。</p></div></header>
   <section class="panel" aria-labelledby="us-industries-title">
     <h2 id="us-industries-title">產業資料</h2>
-    {% if summary.industries.status == 'available' %}<div class="summary-table-wrap"><table><thead><tr><th scope="col">產業</th><th scope="col">觀察</th></tr></thead><tbody>{% for item in summary.industries.data.ranking|default([]) %}<tr><td>{{ item.name|default(item.industry|default('未命名')) }}</td><td>{{ item.rotation|default(item.status|default('資料不足')) }}</td></tr>{% else %}<tr><td colspan="2">本次報告沒有可顯示的產業排名。</td></tr>{% endfor %}</tbody></table></div>{% else %}<p class="empty-state">{{ summary.industries.reason }}</p>{% endif %}
+    {% if summary.industries.status == 'available' %}
+      <div class="summary-table-wrap"><table><thead><tr><th scope="col">排名</th><th scope="col">產業</th><th scope="col">5 日相對大盤</th><th scope="col">資料覆蓋率</th><th scope="col">有效樣本 / 成分數</th></tr></thead><tbody>
+      {% for item in summary.industries.data.ranking|default([]) %}
+        <tr>
+          <td>{{ item.rank|default(loop.index) }}</td>
+          <td>{{ item.name|default(item.industry|default('未命名')) }}</td>
+          <td>{% if item.relative_return_5d_pct is not none and item.relative_return_5d_pct is not string %}{{ '%+.2f%%'|format(item.relative_return_5d_pct) }}{% else %}尚無已驗證資料{% endif %}</td>
+          <td>{% if item.coverage is not none and item.coverage is not string %}{{ '%.0f%%'|format(item.coverage * 100) }}{% else %}尚無已驗證資料{% endif %}</td>
+          <td>{{ item.available_count|default('—') }} / {{ item.component_count|default('—') }}</td>
+        </tr>
+      {% else %}
+        <tr><td colspan="5">本次報告沒有可顯示的產業排名。</td></tr>
+      {% endfor %}
+      </tbody></table></div>
+    {% else %}
+      <p class="empty-state">{{ summary.industries.reason }}</p>
+    {% endif %}
   </section>
   <section class="panel" aria-labelledby="us-securities-title">
     <h2 id="us-securities-title">個股與 ETF</h2>
