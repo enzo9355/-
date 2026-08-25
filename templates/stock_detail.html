@@ -18,7 +18,7 @@
 {% set candles = d.get("candles", []) %}
 {% set ma20_line = d.get("ma20_line", []) %}
 {% set observation_kind = d.get("observation_kind", "regular_price") %}
-{% block title %}{{ d.name }}（{{ d.code }}）觀察｜ABSORB{% endblock %}
+{% block title %}{% if d.name and d.name|upper != d.code|upper %}{{ d.name }}（{{ d.code }}）{% else %}{{ d.code }}{% endif %}觀察｜ABSORB{% endblock %}
 {% block head %}{% if observation_kind == "regular_price" %}<script src="https://unpkg.com/lightweight-charts@4.2.2/dist/lightweight-charts.standalone.production.js" integrity="sha384-qQnpH1Chlwm0r93GZ6NgZoEehIelWkhwbBtJMWh0P5wPqySGEt8UjETGKMF0GUdn" crossorigin="anonymous"></script>{% endif %}{% endblock %}
 {% block content %}
 <div class="page stock-page" data-stock-code="{{ d.code }}" data-stock-name="{{ d.name }}"{% if observation_kind == "regular_price" %} data-stock-price="{{ '%.2f'|format(d.price) }}"{% endif %}>
