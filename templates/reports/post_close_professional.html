@@ -559,12 +559,21 @@
     </div>
 
     {% if val_sec.status == 'available' %}
+      {% set gate_labels = {"ranking": "模型排名", "calibration": "模型校準", "quality": "品質 Gate", "transaction_value": "交易價值驗證", "promotion": "模型 Promotion"} %}
       <div class="gate-grid">
         {% for name, status in val_sec.data.gates.items() %}
+          {% set label = gate_labels.get(name, name) %}
+          {% if status == 'UNAVAILABLE' %}
+            {% set display = '尚未提供驗證資料' %}
+          {% elif status == 'BLOCKED' %}
+            {% set display = '暫不發布' %}
+          {% else %}
+            {% set display = status %}
+          {% endif %}
           <div class="gate-card">
-            <span class="gate-name">{{ name }}</span>
-            <span class="gate-status badge {{ 'badge-success' if status in ('PASS', 'PASSED') else ('badge-danger' if status in ('FAIL', 'FAILED', 'REJECTED') else 'badge-neutral') }}">
-              {{ status }}
+            <span class="gate-name">{{ label }}</span>
+            <span class="gate-status badge {{ 'badge-success' if display in ('PASS', 'PASSED') else ('badge-danger' if display in ('FAIL', 'FAILED', 'REJECTED') else 'badge-neutral') }}">
+              {{ display }}
             </span>
           </div>
         {% endfor %}
@@ -573,6 +582,10 @@
         <p class="muted small">
           遵循嚴格生產防禦合約：未通過 Ranking、Calibration、Quality 與 Transaction Value 門檻之模型，系統將封鎖自動交易信號輸出，確保投資人與系統不受過擬合虛假訊號誤導。
         </p>
+        {% set has_unavailable = val_sec.data.gates.values()|select('equalto', 'UNAVAILABLE')|list|length > 0 or val_sec.data.gates.values()|select('equalto', 'BLOCKED')|list|length > 0 %}
+        {% if has_unavailable %}
+          <p class="muted small">以上狀態代表模型研究功能尚未取得發布資格，不代表市場行情資料驗證失敗。</p>
+        {% endif %}
       </div>
     {% else %}
       <div class="empty-state">{{ val_sec.reason or '模型驗證資料尚未提供。' }}</div>

@@ -415,8 +415,46 @@ def fetch_nasdaq_trade_halts(
         try:
             valid_sym = validate_us_ticker(parsed["symbol"])
             market_name = parsed["market"]
-            if market_name not in {"NASDAQ", "NYSE", "AMEX", "CBOE", "BATS"}:
-                raise ValueError("unsupported Nasdaq halt market")
+            normalized_market = market_name.upper().strip()
+            # Map known aliases and normalize; unsupported markets are skipped, not failed.
+            market_aliases = {
+                "NASDAQ": "NASDAQ",
+                "NASDAQ OMX": "NASDAQ",
+                "NASDAQ OMX BX": "NASDAQ",
+                "NASDAQ BX": "NASDAQ",
+                "BX": "NASDAQ",
+                "NASDAQ PSX": "NASDAQ",
+                "PSX": "NASDAQ",
+                "NYSE": "NYSE",
+                "NYSE AMERICAN": "AMEX",
+                "NYSE ARCA": "NYSE",
+                "NYSE MKT": "AMEX",
+                "ASE": "AMEX",
+                "AMEX": "AMEX",
+                "CBOE": "CBOE",
+                "BATS": "BATS",
+                "BATS EXCHANGE": "BATS",
+                "OTC": None,
+                "OTCBB": None,
+                "OTHER-OTC": None,
+                "OTC MARKETS": None,
+            }
+            if normalized_market in market_aliases:
+                mapped = market_aliases[normalized_market]
+                if mapped is None:
+                    continue
+                market_name = mapped
+            elif normalized_market not in {"NASDAQ", "NYSE", "AMEX", "CBOE", "BATS"}:
+                # Unknown non-major market like OTC variants: skip halt, don't fail whole pipeline
+                if "OTC" in normalized_market or normalized_market in {"NYS", "ASE"}:
+                    continue
+                # Fallback: treat any NASDAQ/NYSE substring as major
+                if "NASDAQ" in normalized_market:
+                    market_name = "NASDAQ"
+                elif "NYSE" in normalized_market:
+                    market_name = "NYSE"
+                else:
+                    continue
         except ValueError as exc:
             raise USStatusSchemaError("Nasdaq halt item identity is invalid") from exc
 

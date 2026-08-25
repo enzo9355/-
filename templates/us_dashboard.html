@@ -29,7 +29,38 @@
     </section>
     <section class="panel" aria-labelledby="summary-validation-title">
       <h2 id="summary-validation-title">驗證狀態</h2>
-      {% if summary.validation.status == 'available' %}<dl class="summary-facts">{% for name, value in summary.validation.data.gates.items() %}<div><dt>{{ name }}</dt><dd>{{ value }}</dd></div>{% endfor %}</dl>{% else %}<p class="empty-state">{{ summary.validation.reason }}</p>{% endif %}
+      {% set gate_labels = {"ranking": "模型排名", "calibration": "模型校準", "quality": "品質 Gate", "transaction_value": "交易價值驗證", "promotion": "模型 Promotion"} %}
+      {% set market_verified = (summary.get('market', {}).get('status') == 'available' and summary.get('industries', {}).get('status') == 'available') %}
+      <div class="validation-sections">
+        <div class="validation-group">
+          <h3>市場資料驗證</h3>
+          {% if market_verified %}
+            <p class="verified-badge">已驗證市場觀察資料</p>
+          {% else %}
+            <p class="empty-state">{{ summary.validation.reason if summary.validation.status != 'available' else '市場資料驗證處理中' }}</p>
+          {% endif %}
+        </div>
+        <div class="validation-group">
+          <h3>模型／量化研究能力</h3>
+          {% if summary.validation.status == 'available' %}
+            <dl class="summary-facts">
+              {% for name, value in summary.validation.data.gates.items() %}
+                {% set label = gate_labels.get(name, name) %}
+                {% if value == 'UNAVAILABLE' %}
+                  <div><dt>{{ label }}</dt><dd>尚未提供驗證資料</dd></div>
+                {% elif value == 'BLOCKED' %}
+                  <div><dt>{{ label }}</dt><dd>暫不發布</dd></div>
+                {% else %}
+                  <div><dt>{{ label }}</dt><dd>{{ value }}</dd></div>
+                {% endif %}
+              {% endfor %}
+            </dl>
+            <p class="muted small">以上狀態代表模型研究功能尚未取得發布資格，不代表市場行情資料驗證失敗。</p>
+          {% else %}
+            <p class="empty-state">模型研究功能尚未取得發布資格，不代表市場行情資料驗證失敗。</p>
+          {% endif %}
+        </div>
+      </div>
     </section>
   </div>
 </div>

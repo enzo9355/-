@@ -1,11 +1,38 @@
 {% extends "base.html" %}
 {% block title %}美股市場實況｜ABSORB{% endblock %}
 {% block content %}
+{% set market_labels = {"advancing_count": "上漲家數", "declining_count": "下跌家數", "unchanged_count": "平盤家數", "ma20_breadth_pct": "站上 MA20 比例", "ma60_breadth_pct": "站上 MA60 比例", "new_high_20d_count": "20 日新高家數", "new_low_20d_count": "20 日新低家數", "realized_volatility_20d_pct": "20 日已實現波動率", "return_1d_pct": "單日報酬", "return_5d_pct": "5 日報酬", "return_20d_pct": "20 日報酬", "return_60d_pct": "60 日報酬", "median_volume_ratio": "中位量比", "risk_state": "風險狀態"} %}
+{% set risk_labels = {"normal": "一般", "cautious": "謹慎", "elevated": "升高", "defensive": "防守"} %}
 <div class="page market-summary-page">
   <header class="page-header"><div><h1>美股市場實況</h1><p class="page-intro">資料日 {{ summary.source_market_date }}；以下只呈現已驗證正式報告中的市場欄位。</p></div></header>
   <section class="panel" aria-labelledby="us-market-data-title">
     <h2 id="us-market-data-title">市場觀察</h2>
-    {% if summary.market_observation.status == 'available' %}<dl class="summary-facts">{% for name, value in summary.market_observation.data.items() if value is not mapping and value is not sequence or value is string %}<div><dt>{{ name }}</dt><dd>{{ value }}</dd></div>{% else %}<div class="empty-state">市場觀察欄位暫時無法顯示。</div>{% endfor %}</dl>{% else %}<p class="empty-state">{{ summary.market_observation.reason }}</p>{% endif %}
+    {% if summary.market_observation.status == 'available' %}
+      <dl class="summary-facts">
+        {% for key, value in summary.market_observation.data.items() if value is not mapping and value is not sequence or value is string %}
+          {% set label = market_labels.get(key, key) %}
+          {% if value is none or (value is string and value|lower in ['none','null','']) %}
+            <div><dt>{{ label }}</dt><dd>尚無已驗證資料</dd></div>
+          {% elif key == 'risk_state' %}
+            <div><dt>{{ label }}</dt><dd>{{ risk_labels.get(value, value) }}</dd></div>
+          {% elif key.endswith('_pct') %}
+            {% if 'return' in key %}
+              <div><dt>{{ label }}</dt><dd>{{ '%+.2f%%'|format(value) }}</dd></div>
+            {% else %}
+              <div><dt>{{ label }}</dt><dd>{{ '%.1f%%'|format(value) }}</dd></div>
+            {% endif %}
+          {% elif key == 'median_volume_ratio' %}
+            <div><dt>{{ label }}</dt><dd>{{ '%.2f'|format(value) }}</dd></div>
+          {% else %}
+            <div><dt>{{ label }}</dt><dd>{{ value }}</dd></div>
+          {% endif %}
+        {% else %}
+          <div class="empty-state">市場觀察欄位暫時無法顯示。</div>
+        {% endfor %}
+      </dl>
+    {% else %}
+      <p class="empty-state">{{ summary.market_observation.reason }}</p>
+    {% endif %}
   </section>
   <section class="panel" aria-labelledby="us-market-evidence-title">
     <h2 id="us-market-evidence-title">支持與反對證據</h2>
