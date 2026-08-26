@@ -386,13 +386,16 @@ class HistoricalRequestContractTests(unittest.TestCase):
     def test_request_headers_are_source_specific(self):
         session = Session()
         with tempfile.TemporaryDirectory() as temporary:
-            build_historical_daily_snapshot(
+            snapshot = build_historical_daily_snapshot(
                 Path(temporary),
                 CONTRACT_TARGET,
                 session=session,
                 minimum_price_symbols={"TWSE": 2, "TPEx": 2},
                 minimum_chip_symbols=1,
             )
+
+        self.assertEqual(snapshot.name_by_symbol["2330"], "台積電")
+        self.assertEqual(snapshot.name_by_symbol["6488"], "環球晶")
 
         self.assertEqual(
             {call["source_id"] for call in session.calls},

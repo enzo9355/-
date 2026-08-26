@@ -24,6 +24,7 @@ from stock_papi.integrations.market_data.tw_official_bulk import (
     parse_tpex_institutional,
     parse_twse_institutional,
 )
+from stock_papi.integrations.market_data.tw_security_master import normalize_display_name
 from stock_papi.integrations.market_data.tw_official_cache import (
     OfficialCacheError,
     load_cached_raw_source,
@@ -247,7 +248,7 @@ def parse_twse_price_report_with_status(
                 payload_sha256,
             )
         except ValueError:
-            if not re.fullmatch(r"\d{4,6}", re.sub(r"<[^>]*>", "", str(source[0] or "")).strip()):
+            if not re.fullmatch(r"[0-9]{4,5}[0-9A-Z]?", re.sub(r"<[^>]*>", "", str(source[0] or "")).strip().upper()):
                 continue
             raise
         if result.price is not None:
@@ -328,7 +329,7 @@ def parse_tpex_price_report_with_status(
                 payload_sha256,
             )
         except ValueError:
-            if not re.fullmatch(r"\d{4,6}", re.sub(r"<[^>]*>", "", str(source[0] or "")).strip()):
+            if not re.fullmatch(r"[0-9]{4,5}[0-9A-Z]?", re.sub(r"<[^>]*>", "", str(source[0] or "")).strip().upper()):
                 continue
             raise
         if result.price is not None:
@@ -346,6 +347,54 @@ def parse_tpex_price_report(
 ) -> tuple[dict[str, Any], ...]:
     rows, _ = parse_tpex_price_report_with_status(payload, target_date, "0" * 64)
     return rows
+
+
+def _extract_price_names(
+    payload: Any,
+    target_date: _datetime.date,
+    source_id: str,
+) -> dict[str, str]:
+    """Extract the official point-in-time display names without changing price rows."""
+
+    document = _status_date(payload, target_date, f"{source_id} name")
+    if source_id == "twse_price":
+        fields, data, _ = _table(
+            document,
+            lambda names, _candidate: names == [
+                "證券代號", "證券名稱", "成交股數", "成交筆數", "成交金額", "開盤價",
+                "最高價", "最低價", "收盤價", "漲跌(+/-)", "漲跌價差", "最後揭示買價",
+                "最後揭示買量", "最後揭示賣價", "最後揭示賣量", "本益比",
+            ],
+            "TWSE price name",
+        )
+        symbol_index, name_index = 0, 1
+    else:
+        fields, data, table = _table(
+            document,
+            lambda names, candidate: names[:9] == [
+                "代號", "名稱", "收盤", "漲跌", "開盤", "最高", "最低", "均價", "成交股數"
+            ] and "上櫃股票行情" in str(candidate.get("title") or ""),
+            "TPEx price name",
+        )
+        if normalize_market_date(table.get("date")) != target_date:
+            raise ValueError("TPEx price name table date mismatch")
+        symbol_index, name_index = 0, 1
+    result: dict[str, str] = {}
+    for row in data:
+        if not isinstance(row, list) or len(row) != len(fields):
+            continue
+        try:
+            symbol = normalize_symbol(row[symbol_index])
+        except ValueError:
+            continue
+        name = normalize_display_name(row[name_index])
+        if not name:
+            continue
+        previous = result.get(symbol)
+        if previous is not None and previous != name:
+            raise ValueError("official price source contains conflicting names")
+        result[symbol] = name
+    return result
 
 
 def parse_tpex_margin_report(payload: Any, target_date: _datetime.date) -> tuple[dict[str, Any], ...]:
@@ -492,8 +541,10 @@ def build_historical_daily_snapshot(
     cold_sources = 0
     price_status_candidates: dict[str, dict[str, Any]] = {}
     raw_price_source_hashes: dict[str, str] = {}
+    official_names: dict[str, str] = {}
 
     for source_id, definition in HISTORICAL_SOURCE_DEFINITIONS.items():
+        statuses: dict[str, dict[str, Any]] = {}
         try:
             cached = load_cached_source(root, source_id=source_id, target_date=target_date, parser_version=PARSER_VERSION)
         except OfficialCacheError as exc:
@@ -569,6 +620,13 @@ def build_historical_daily_snapshot(
                     rows, statuses = parse_tpex_price_report_with_status(
                         payload, target_date, raw_cached.payload_sha256
                     )
+                for symbol, name in _extract_price_names(payload, target_date, source_id).items():
+                    previous_name = official_names.get(symbol)
+                    if previous_name is not None and previous_name != name:
+                        raise ValueError(
+                            f"official source contains conflicting names for {symbol}"
+                        )
+                    official_names[symbol] = name
                 minimum = minimum_for_source(source_id, definition)
                 symbol_count = _coverage(definition.dataset, rows, int(minimum))
             except OfficialSourceNotReady as exc:
@@ -589,11 +647,22 @@ def build_historical_daily_snapshot(
                 price_status_candidates[symbol] = status
             raw_price_source_hashes[source_id] = raw_cached.payload_sha256
             try:
+                cache_rows = [
+                    {
+                        **row,
+                        **(
+                            {"name": official_names[str(row["stock_id"])]}
+                            if str(row.get("stock_id")) in official_names
+                            else {}
+                        ),
+                    }
+                    for row in rows
+                ]
                 cached = store_cached_source(
                     root,
                     source_id=source_id,
                     target_date=target_date,
-                    rows=rows,
+                    rows=cache_rows,
                     symbol_count=symbol_count,
                     parser_version=PARSER_VERSION,
                     source_url=definition.url,
@@ -602,6 +671,7 @@ def build_historical_daily_snapshot(
                 )
             except (OfficialCacheError, OSError, ValueError) as exc:
                 raise OfficialSourceFailure(source_id, "cache_invalid", safe_message=str(exc)) from None
+            rows = cached.rows
             response_size = raw_cached.compressed_size
             cache_hit = raw_cache_hit
         elif cached is None:
@@ -618,6 +688,14 @@ def build_historical_daily_snapshot(
             response_size = len(content)
             try:
                 rows = HISTORICAL_PARSERS[source_id](payload, target_date)
+                if definition.dataset == "price":
+                    for symbol, name in _extract_price_names(payload, target_date, source_id).items():
+                        previous_name = official_names.get(symbol)
+                        if previous_name is not None and previous_name != name:
+                            raise ValueError(
+                                f"official source contains conflicting names for {symbol}"
+                            )
+                        official_names[symbol] = name
                 minimum = minimum_for_source(source_id, definition)
                 symbol_count = _coverage(definition.dataset, rows, int(minimum))
             except OfficialSourceNotReady as exc:
@@ -628,20 +706,49 @@ def build_historical_daily_snapshot(
                 ) from None
             except (KeyError, TypeError, ValueError) as exc:
                 raise OfficialSourceFailure(source_id, "schema_validation", safe_message=str(exc)) from None
+            cache_rows = (
+                [
+                    {
+                        **row,
+                        **(
+                            {"name": official_names[str(row["stock_id"])]}
+                            if str(row.get("stock_id")) in official_names
+                            else {}
+                        ),
+                    }
+                    for row in rows
+                ]
+                if definition.dataset == "price"
+                else rows
+            )
             cached = store_cached_source(
                 root,
                 source_id=source_id,
                 target_date=target_date,
-                rows=rows,
+                rows=cache_rows,
                 symbol_count=symbol_count,
                 parser_version=PARSER_VERSION,
                 source_url=definition.url,
                 fetched_at=checked_at,
                 date_verification="explicit",
             )
+            rows = cached.rows
             cache_hit = False
         else:
             rows = cached.rows
+            if definition.dataset == "price":
+                for row in rows:
+                    symbol = str(row.get("stock_id") or "")
+                    name = normalize_display_name(row.get("name"))
+                    if symbol and name:
+                        previous_name = official_names.get(symbol)
+                        if previous_name is not None and previous_name != name:
+                            raise OfficialSourceFailure(
+                                source_id,
+                                "cross_source_identity",
+                                safe_message=f"conflicting cached names for {symbol}",
+                            )
+                        official_names[symbol] = name
             response_size = cached.compressed_size
             cache_hit = True
         minimum = minimum_for_source(source_id, definition)
@@ -658,7 +765,14 @@ def build_historical_daily_snapshot(
             market=definition.market,
             dataset=definition.dataset,
             target_date=target_date,
-            rows=tuple(dict(row) for row in rows),
+            rows=tuple(
+                {
+                    key: value
+                    for key, value in row.items()
+                    if not (definition.dataset == "price" and key == "name")
+                }
+                for row in rows
+            ),
             symbol_count=symbol_count,
             content_sha256=cached.content_sha256,
             response_size_bytes=response_size,
@@ -865,6 +979,7 @@ def build_historical_daily_snapshot(
             symbol: status["evidence_sha256"]
             for symbol, status in sorted(superseded_terminations.items())
         },
+        "official_names": dict(sorted(official_names.items())),
     }
     manifest_sha256 = hashlib.sha256(
         json.dumps(manifest_document, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -899,6 +1014,7 @@ def build_historical_daily_snapshot(
             symbol: MappingProxyType(dict(status))
             for symbol, status in terminated.items()
         }),
+        name_by_symbol=MappingProxyType(dict(sorted(official_names.items()))),
     )
 
 

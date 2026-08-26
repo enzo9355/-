@@ -33,7 +33,7 @@ from stock_papi.quant.tw_legacy_reconciliation import (
 
 
 _INCOMPLETE = "TW official observation recovery is incomplete"
-_SYMBOL_RE = re.compile(r"[0-9]{4,6}")
+_SYMBOL_RE = re.compile(r"[0-9]{4,5}[0-9A-Z]?")
 
 _UNAVAILABLE_BUILD_ERRORS = (
     "price history is unavailable",
@@ -99,8 +99,25 @@ def _load_recovery_symbol_allowlist(
 
 
 def _required_symbols_by_exchange(
-    symbols: list[str], *, registry: Mapping[str, Any] | None = None
+    symbols: list[str], *, registry: Mapping[str, Any] | None = None,
+    security_master: Any = None,
 ) -> dict[str, set[str]]:
+    if security_master is not None:
+        result = {"TWSE": set(), "TPEx": set()}
+        for symbol in symbols:
+            try:
+                if hasattr(security_master, "resolve_exchange"):
+                    exchange = security_master.resolve_exchange(
+                        str(symbol), require_authoritative=True
+                    )
+                else:
+                    exchange = security_master.resolve(str(symbol)).exchange
+            except Exception as exc:
+                raise RuntimeError(
+                    f"TW exchange metadata is unavailable for {symbol}"
+                ) from exc
+            result[exchange].add(str(symbol))
+        return result
     if registry is None:
         import twstock
 
@@ -551,6 +568,7 @@ def _patched_pipeline(
     original_batch = local_quant.run_market_batch
     original_build = local_quant.build_stock_snapshot
     original_writer = getattr(local_quant, "write_stock_artifact", None)
+    original_name_resolver = getattr(pipeline, "get_stock_name_for_date", None)
     original_exclusion_loader = getattr(
         local_quant, "load_exclusion_list", None
     )
@@ -558,6 +576,22 @@ def _patched_pipeline(
     target_status_symbols = set(
         series.snapshots[series.target_date].trading_status_by_symbol
     )
+
+    def stock_name_for_date(symbol, target_date=None, require_authoritative=False):
+        if target_date is not None:
+            snapshot = series.snapshots.get(target_date)
+            if snapshot is not None:
+                name = snapshot.name_by_symbol.get(str(symbol))
+                if name:
+                    return name
+        if callable(original_name_resolver):
+            return original_name_resolver(
+                symbol,
+                target_date,
+                require_authoritative=require_authoritative,
+            )
+        getter = getattr(pipeline, "get_stock_name")
+        return getter(symbol)
 
     def run_market_batch_with_source(
         root,
@@ -607,6 +641,14 @@ def _patched_pipeline(
             detailed_lineage = fetcher.lineage_for(
                 str(symbol), persisted_daily=result.get("daily")
             )
+            security_master = (
+                result.get("source_lineage", {}).get("security_master")
+                if isinstance(result.get("source_lineage"), dict)
+                else None
+            )
+            if security_master is not None:
+                detailed_lineage = dict(detailed_lineage)
+                detailed_lineage["security_master"] = security_master
             result["source_lineage"] = detailed_lineage
             result["lineage"] = detailed_lineage
         return result
@@ -674,6 +716,8 @@ def _patched_pipeline(
                 raise RuntimeError("TW universe loader is unavailable")
             local_quant.get_taiwan_symbols = lambda _pipeline: list(symbols)
         pipeline.fetch_finmind_dataset = fetcher
+        if callable(original_name_resolver) or hasattr(pipeline, "get_stock_name"):
+            pipeline.get_stock_name_for_date = stock_name_for_date
         local_quant.load_stock_pipeline = lambda _root: pipeline
         local_quant.run_market_batch = run_market_batch_with_source
         local_quant.build_stock_snapshot = build_stock_snapshot_with_lineage
@@ -697,6 +741,10 @@ def _patched_pipeline(
             local_quant.load_exclusion_list = original_exclusion_loader
         local_quant.load_stock_pipeline = original_loader
         pipeline.fetch_finmind_dataset = original_fetch
+        if callable(original_name_resolver):
+            pipeline.get_stock_name_for_date = original_name_resolver
+        elif hasattr(pipeline, "get_stock_name_for_date"):
+            delattr(pipeline, "get_stock_name_for_date")
 
 
 def _run_stage(
@@ -778,7 +826,8 @@ def _run_stage(
             target_market_date=target_market_date,
         )
     required_symbols = _required_symbols_by_exchange(
-        [str(symbol) for symbol in symbols]
+        [str(symbol) for symbol in symbols],
+        security_master=getattr(pipeline, "taiwan_security_master", None),
     )
     series = series_builder(
         root,

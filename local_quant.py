@@ -388,7 +388,7 @@ def _write_gzip_json_atomic(path, document):
 def validate_market_symbol(market, symbol):
     symbol = str(symbol)
     valid = (
-        market == "TW" and bool(re.fullmatch(r"[0-9]{4,6}", symbol))
+        market == "TW" and bool(re.fullmatch(r"[0-9]{4,5}[0-9A-Z]?", symbol.upper()))
     ) or (
         market == "US"
         and len(symbol) <= 10
@@ -894,7 +894,7 @@ def _fetch_yfinance_holdings(etf):
 
 def _read_insights_metric(root, symbol):
     symbol = str(symbol).upper()
-    market = "TW" if re.fullmatch(r"\d{4,6}", symbol) else "US"
+    market = "TW" if re.fullmatch(r"[0-9]{4,5}[0-9A-Z]?", symbol.upper()) else "US"
     if market == "US" and not re.fullmatch(r"[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)?", symbol):
         return None
     try:
@@ -958,6 +958,16 @@ def build_market_insights_document(root, pipeline, now=None, fetch_json=None, fe
     previous = _load_local_market_insights(root) or {}
     fetch_json = fetch_json or _fetch_json_list
     fetch_etf = fetch_etf or _fetch_yfinance_holdings
+    name_for_date = getattr(pipeline, "get_stock_name_for_date", None)
+
+    def resolve_name(symbol):
+        if callable(name_for_date):
+            return name_for_date(
+                symbol,
+                checked_at.astimezone(TAIPEI).date(),
+                require_authoritative=True,
+            )
+        return pipeline.get_stock_name(symbol)
 
     mops = []
     successful_mops_sources = 0
@@ -995,7 +1005,7 @@ def build_market_insights_document(root, pipeline, now=None, fetch_json=None, fe
     )
     metrics = {
         str(symbol).upper(): {
-            "name": pipeline.get_stock_name(symbol),
+            "name": resolve_name(symbol),
             "prob": None,
             "trend": "資料待更新",
             "as_of": "",
@@ -1007,6 +1017,8 @@ def build_market_insights_document(root, pipeline, now=None, fetch_json=None, fe
     for symbol in symbols:
         metric = _read_insights_metric(root, symbol)
         if metric:
+            if callable(name_for_date):
+                metric["name"] = resolve_name(symbol)
             metrics[symbol] = metric
 
     return {
@@ -1449,7 +1461,7 @@ def get_taiwan_symbols(pipeline):
         {
             str(symbol)
             for symbol in pipeline.industry_map.get("全市場", [])
-            if re.fullmatch(r"[0-9]{4,6}", str(symbol))
+            if re.fullmatch(r"[0-9]{4,5}[0-9A-Z]?", str(symbol).upper())
         }
     )
 
@@ -1785,9 +1797,29 @@ def build_stock_snapshot(
             raise ValueError("target market date mismatch")
         if trading_status is not None and as_of >= target_market_date.isoformat():
             raise ValueError("trading status conflicts with regular price date")
+    name_resolver = getattr(pipeline, "get_stock_name_for_date", None)
+    if callable(name_resolver):
+        resolved_name = name_resolver(
+            symbol,
+            target_market_date,
+            require_authoritative=(market == "TW" and target_market_date is not None),
+        )
+    else:
+        resolved_name = pipeline.get_stock_name(symbol)
+    security_master_evidence = None
+    security_master = getattr(pipeline, "taiwan_security_master", None)
+    if market == "TW" and target_market_date is not None and callable(
+        getattr(security_master, "get_master", None)
+    ):
+        master = security_master.get_master(required=True)
+        security_master_evidence = {
+            "schema_version": master.schema_version,
+            "as_of": master.as_of.isoformat(),
+            "source_hashes": dict(master.source_hashes),
+        }
     result = {
         "as_of": as_of,
-        "name": pipeline.get_stock_name(symbol),
+        "name": resolved_name,
         "rows": len(daily),
         "model_version": model_version,
         "latest": latest,
@@ -1811,6 +1843,8 @@ def build_stock_snapshot(
             "latest_regular_price_date": as_of,
             "observation_kind": observation_kind,
         }
+        if security_master_evidence is not None:
+            lineage["security_master"] = security_master_evidence
         if trading_status is not None:
             lineage["trading_status_evidence_sha256"] = (
                 trading_status.get("evidence_sha256")

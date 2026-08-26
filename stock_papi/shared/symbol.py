@@ -33,7 +33,7 @@ def normalize_symbol(symbol: str) -> str:
         return f"TW:{symbol[:-4]}"
         
     # 3. No prefix or suffix, infer from format
-    if re.fullmatch(r"[0-9]{4,6}", symbol):
+    if re.fullmatch(r"[0-9]{4,5}[0-9A-Z]?", symbol):
         return f"TW:{symbol}"
         
     # Standardize US ticker hyphens to dots (e.g. BRK-B -> BRK.B)

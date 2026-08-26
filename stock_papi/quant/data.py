@@ -216,7 +216,7 @@ def get_data(
     code, days=730, *, datetime, pd, is_us_ticker, twstock_codes,
     fetch_yfinance, fetch_finmind, fetch_option_context,
     add_price_quality, add_market_context, add_option_context,
-    merge_chip, clean,
+    merge_chip, clean, taiwan_security_master=None,
 ):
     start_date = (datetime.datetime.now() - datetime.timedelta(days=days)).strftime("%Y-%m-%d")
     end_date = datetime.datetime.now().strftime("%Y-%m-%d")
@@ -233,8 +233,20 @@ def get_data(
     raw = fetch_finmind("TaiwanStockPrice", code, start_date, end_date)
     yf_price = pd.DataFrame()
     if code != "TAIEX":
-        info = twstock_codes.get(code)
-        suffix = ".TWO" if getattr(info, "data_source", "") == "tpex" else ".TW"
+        if taiwan_security_master is not None:
+            master = taiwan_security_master.get_master()
+            if master is not None:
+                exchange = taiwan_security_master.resolve_exchange(
+                    code,
+                    require_authoritative=True,
+                )
+            else:
+                info = twstock_codes.get(code)
+                exchange = "TPEx" if getattr(info, "data_source", "") == "tpex" else "TWSE"
+        else:
+            info = twstock_codes.get(code)
+            exchange = "TPEx" if getattr(info, "data_source", "") == "tpex" else "TWSE"
+        suffix = ".TWO" if exchange == "TPEx" else ".TW"
         yf_price = fetch_yfinance([f"{code}{suffix}"], start_date, end_date)
     price = None
     if not raw.empty:

@@ -88,6 +88,9 @@ class OfficialDailySnapshot:
     terminated_by_symbol: Mapping[str, Mapping[str, Any]] = field(
         default_factory=lambda: MappingProxyType({})
     )
+    name_by_symbol: Mapping[str, str] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
 
 
 _EMPTY_MARKERS = {
@@ -103,7 +106,7 @@ _EMPTY_MARKERS = {
     "除權息",
     "暫停交易",
 }
-_SYMBOL_RE = re.compile(r"\d{4,6}")
+_SYMBOL_RE = re.compile(r"[0-9]{4,5}[0-9A-Z]?")
 TPEX_INSTITUTIONAL_FIELDS = (
     "代號", "名稱",
     "買進股數", "賣出股數", "買賣超股數",

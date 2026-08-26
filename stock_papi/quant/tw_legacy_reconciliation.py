@@ -31,7 +31,7 @@ from stock_papi.quant.tw_incremental import (
 
 
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
-_SYMBOL_RE = re.compile(r"[0-9]{4,6}")
+_SYMBOL_RE = re.compile(r"[0-9]{4,5}[0-9A-Z]?")
 _MANIFEST_FIELDS = {
     "schema_version",
     "target_market_date",

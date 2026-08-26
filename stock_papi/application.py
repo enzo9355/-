@@ -125,6 +125,11 @@ from stock_papi.integrations.market_data.provider import (
     get_stock_name as _provider_get_stock_name,
     search_stock_code as _provider_search_stock_code,
 )
+from stock_papi.integrations.market_data.tw_security_master import (
+    TaiwanSecurityMasterResolver,
+    fetch_taiwan_security_master,
+    is_taiwan_symbol,
+)
 from stock_papi.integrations.news.provider import (
     fetch_marketaux_news as _fetch_marketaux_news,
     fetch_news_rss,
@@ -303,6 +308,16 @@ logging.basicConfig(
 logger = logging.getLogger("absorb")
 
 
+def _load_taiwan_security_master():
+    return fetch_taiwan_security_master(session=requests.Session())
+
+
+taiwan_security_master = TaiwanSecurityMasterResolver(
+    _load_taiwan_security_master,
+    fallback_registry=lambda: twstock.codes,
+)
+
+
 def runtime_logging_secrets():
     return (
         LINE_CHANNEL_ACCESS_TOKEN,
@@ -406,13 +421,32 @@ def fetch_option_context_history(start_date, end_date=None):
     )
 
 
-def get_stock_name(code):
-    return _provider_get_stock_name(code, twstock.codes, is_us_ticker)
+def get_stock_name(code, target_date=None, require_authoritative=False):
+    if is_taiwan_symbol(code):
+        return taiwan_security_master.resolve_name(
+            code,
+            target_date,
+            require_authoritative=require_authoritative,
+        )
+    return _provider_get_stock_name(
+        code, twstock.codes, is_us_ticker, taiwan_security_master,
+        target_date, require_authoritative,
+    )
+
+
+def get_stock_name_for_date(code, target_date=None, require_authoritative=False):
+    return get_stock_name(code, target_date, require_authoritative)
 
 def search_stock_code(keyword):
     return _provider_search_stock_code(
-        keyword, twstock.codes, is_us_ticker, get_stock_name
+        keyword, twstock.codes, is_us_ticker, get_stock_name,
+        taiwan_security_master,
     )
+
+
+def taiwan_security_codes():
+    master = taiwan_security_master.get_master()
+    return master.entries if master is not None else twstock.codes
 
 
 def get_gcp_access_token():
@@ -660,7 +694,8 @@ def get_data(code, days=730):
         datetime=datetime,
         pd=pd,
         is_us_ticker=is_us_ticker,
-        twstock_codes=twstock.codes,
+        twstock_codes=taiwan_security_codes(),
+        taiwan_security_master=taiwan_security_master,
         fetch_yfinance=fetch_yfinance_price_history,
         fetch_finmind=fetch_finmind_dataset,
         fetch_option_context=fetch_option_context_history,
@@ -1032,14 +1067,17 @@ def _observation_conversation(
         code, name = _conversation_search_stock(symbol_context.strip())
         if code:
             code = str(code).upper()
-            canonical_market = "TW" if code == "TAIEX" or code.isdigit() else "US"
+            canonical_market = "TW" if code == "TAIEX" or is_taiwan_symbol(code) else "US"
             if market_context in (None, canonical_market):
                 entities = [{"market": canonical_market, "symbol": code, "name": name or code}]
 
     if entities:
         entity = entities[0]
         symbol = entity["symbol"]
-        data = build_stock_observation(fetch_published_quant_snapshot(symbol))
+        data = build_stock_observation(
+            fetch_published_quant_snapshot(symbol),
+            get_stock_name=get_stock_name,
+        )
         if not isinstance(data, dict):
             return ConversationAnswer("已驗證的個股觀察資料暫時無法取得。")
         trend = {
@@ -1445,7 +1483,8 @@ def _handle_message_impl(event):
         "search_stock_code": search_stock_code,
         "analyze": analyze,
         "observe": lambda code: build_stock_observation(
-            fetch_published_quant_snapshot(code)
+            fetch_published_quant_snapshot(code),
+            get_stock_name=get_stock_name,
         ),
         "dashboard_snapshot": _published_dashboard_snapshot,
         "observation_mode": prediction_capability.mode == "research",
@@ -1505,7 +1544,8 @@ def route_dependencies():
         "resolve_conversation_identity": lambda http_request: _web_conversation_identity(http_request),
         "analyze": lambda code: analyze(code),
         "stock_observation": lambda code: build_stock_observation(
-            fetch_published_quant_snapshot(code)
+            fetch_published_quant_snapshot(code),
+            get_stock_name=get_stock_name,
         ),
         "dashboard_sector_cards": lambda: dashboard_sector_cards(),
         "dashboard_snapshot": lambda: _published_dashboard_snapshot(),
@@ -1516,7 +1556,7 @@ def route_dependencies():
         "dashboard_top_picks": dashboard_top_picks,
         "industry_map": lambda: industry_map,
         "market_insights_payload": lambda: market_insights_payload(),
-        "twstock_codes": lambda: twstock.codes,
+        "twstock_codes": taiwan_security_codes,
         "is_us_ticker": is_us_ticker,
         "find_industry_peers": lambda code: find_industry_peers(code),
         "get_stock_name": lambda code: get_stock_name(code),
@@ -1548,7 +1588,7 @@ def _papi_service():
         openalice_token=OPENALICE_API_TOKEN,
         search_stock=search_stock_code,
         get_stock_name=get_stock_name,
-        twstock_codes=twstock.codes,
+        twstock_codes=taiwan_security_codes(),
         industry_map=industry_map,
         analyze=analyze,
         system_cache=_SYSTEM_CACHE,
@@ -1566,4 +1606,5 @@ def _papi_service():
         gather_sector_data_fn=_gather_sector_data,
         build_single_context_fn=_build_single_stock_context,
         build_sector_examples_fn=_build_papi_sector_examples,
+        taiwan_security_master=taiwan_security_master,
     )
