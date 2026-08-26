@@ -5,6 +5,7 @@
 {% set quality = observation.data_quality or {} %}
 {% set industries = observation.industry_observations or [] %}
 {% set focus = observation.daily_focus or [] %}
+{% set market_index = observation.market_index or {} %}
 {% set advancing = market.get('advancing_count') %}
 {% set declining = market.get('declining_count') %}
 {% set unchanged = market.get('unchanged_count') %}
@@ -48,15 +49,21 @@
         <article><span>風險狀態</span><strong>{{ {'normal':'一般','cautious':'謹慎','elevated':'升高'}.get(market.get('risk_state'), '資料不足') }}</strong><small>已驗證狀態</small></article>
       </div>
 
-      <section class="evidence-canvas" aria-labelledby="return-title">
-        <div class="evidence-canvas-head"><div><span>VERIFIED MARKET ACTUALS</span><h3 id="return-title">期間報酬</h3></div><span>非即時報價</span></div>
+      <section class="evidence-canvas market-index-canvas" aria-labelledby="return-title">
+        <div class="evidence-canvas-head"><div><span>TAIWAN CAPITALIZATION WEIGHTED INDEX</span><h3 id="return-title">{{ market_index.get('name', '加權指數') }}</h3></div><span>資料日 {{ market_index.get('as_of', observation.observation_as_of or '待更新') }}</span></div>
+        {% if market_index.get('price') is not none %}
+        <div class="market-index-quote">
+          <div><strong>{{ '{:,.2f}'.format(market_index.get('price')) }}</strong><span class="{{ 'positive' if market_index.get('change_pct', 0) > 0 else 'negative' if market_index.get('change_pct', 0) < 0 else '' }}">{{ '{:+,.2f}'.format(market_index.get('change')) if market_index.get('change') is not none else '—' }}（{{ '{:+.2f}%'.format(market_index.get('change_pct')) if market_index.get('change_pct') is not none else '—' }}）</span></div>
+          <dl><div><dt>開盤</dt><dd>{{ '{:,.2f}'.format(market_index.get('open')) if market_index.get('open') is not none else '—' }}</dd></div><div><dt>最高</dt><dd>{{ '{:,.2f}'.format(market_index.get('high')) if market_index.get('high') is not none else '—' }}</dd></div><div><dt>最低</dt><dd>{{ '{:,.2f}'.format(market_index.get('low')) if market_index.get('low') is not none else '—' }}</dd></div></dl>
+        </div>
+        <div id="market-index-chart" class="market-index-chart" aria-label="加權指數 K 線圖"></div>
+        {% else %}<p class="empty-state market-index-empty">已驗證的大盤指數 K 線尚待發布。</p>{% endif %}
         <dl class="return-grid">
           {% for key, label in [('return_1d_pct','1 日'),('return_5d_pct','5 日'),('return_20d_pct','20 日'),('return_60d_pct','60 日')] %}
           {% set value = market.get(key) %}<div><dt>{{ label }}</dt><dd class="{{ 'positive' if value is not none and value > 0 else 'negative' if value is not none and value < 0 else '' }}">{{ '%+.2f%%'|format(value) if value is not none else '資料不足' }}</dd></div>
           {% endfor %}
         </dl>
-        <div class="breadth-band"><div><span>MA20 廣度</span><strong>{{ '%.1f%%'|format(market.get('ma20_breadth_pct')) if market.get('ma20_breadth_pct') is not none else '資料不足' }}</strong></div>{% if market.get('ma20_breadth_pct') is not none %}<progress value="{{ market.get('ma20_breadth_pct') }}" max="100">{{ market.get('ma20_breadth_pct') }}%</progress>{% endif %}<div><span>MA60 廣度</span><strong>{{ '%.1f%%'|format(market.get('ma60_breadth_pct')) if market.get('ma60_breadth_pct') is not none else '資料不足' }}</strong></div>{% if market.get('ma60_breadth_pct') is not none %}<progress value="{{ market.get('ma60_breadth_pct') }}" max="100">{{ market.get('ma60_breadth_pct') }}%</progress>{% endif %}</div>
-        <p class="canvas-note">以不同期間的已發生報酬與均線廣度交叉檢查，不代表未來方向。</p>
+        <p class="canvas-note">K 線呈現加權指數實際走勢；期間報酬為全市場觀察，兩者分開標示。</p>
       </section>
 
       <div class="command-insights">
@@ -82,5 +89,8 @@
 
   <nav class="dashboard-destinations" aria-label="研究功能入口"><a href="{{ url_for('market_page') }}"><strong>市場實況</strong><span>廣度、報酬與波動</span></a><a href="{{ url_for('industries_page') }}"><strong>產業觀察</strong><span>相對強度與產業廣度</span></a><a href="{{ url_for('stocks_page') }}"><strong>個股與 ETF</strong><span>事件與標的觀察</span></a><a href="{{ url_for('ask_page') }}"><strong>Ask ABSORB</strong><span>以已發布資料回答</span></a><a href="{{ url_for('learn_page') }}"><strong>學習</strong><span>市場觀察小辭典</span></a></nav>
   <div class="error-banner" data-dashboard-error aria-live="polite" hidden>已驗證的市場觀察資料暫時無法取得，請稍後再試。</div>
+  {% if market_index.get('candles') %}<script id="market-index-chart-data" type="application/json">{{ {"candles": market_index.get('candles'), "ma20": market_index.get('ma20', [])}|tojson }}</script>{% endif %}
 </div>
 {% endblock %}
+
+{% block head %}{% if (observation.market_index or {}).get('candles') %}<script src="https://unpkg.com/lightweight-charts@4.2.2/dist/lightweight-charts.standalone.production.js" integrity="sha384-qQnpH1Chlwm0r93GZ6NgZoEehIelWkhwbBtJMWh0P5wPqySGEt8UjETGKMF0GUdn" crossorigin="anonymous"></script>{% endif %}{% endblock %}

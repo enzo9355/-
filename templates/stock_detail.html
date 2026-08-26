@@ -17,6 +17,7 @@
 {% set risk_events = d.get("risk_events", []) %}
 {% set candles = d.get("candles", []) %}
 {% set ma20_line = d.get("ma20_line", []) %}
+{% set prediction = d.get("prediction_display") %}
 {% set observation_kind = d.get("observation_kind", "regular_price") %}
 {% block title %}{% if d.name and d.name|upper != d.code|upper %}{{ d.name }}（{{ d.code }}）{% else %}{{ d.code }}{% endif %}觀察｜ABSORB{% endblock %}
 {% block head %}{% if observation_kind == "regular_price" %}<script src="https://unpkg.com/lightweight-charts@4.2.2/dist/lightweight-charts.standalone.production.js" integrity="sha384-qQnpH1Chlwm0r93GZ6NgZoEehIelWkhwbBtJMWh0P5wPqySGEt8UjETGKMF0GUdn" crossorigin="anonymous"></script>{% endif %}{% endblock %}
@@ -36,9 +37,7 @@
     </div>
   </header>
   {% else %}
-  <div class="error-banner" role="status">
-    {{ prediction_status }}。本頁只顯示已驗證的價格、均線、技術、籌碼與風險事件。
-  </div>
+  <div class="error-banner" role="status">{% if prediction %}{{ prediction.label }}已標示於 K 線；屬回歸研究情境，不是目標價或買賣指令。{% else %}{{ prediction_status }}。目前只顯示已驗證的價格、均線、技術、籌碼與風險事件。{% endif %}</div>
 
   <header class="stock-hero" id="summary">
     <div class="hero-copy">
@@ -76,7 +75,7 @@
 
   <section class="panel chart-shell" id="chart">
     <div class="section-heading">
-      <div><p class="eyebrow">PRICE & MOVING AVERAGE</p><h2>價格與均線</h2></div>
+      <div><p class="eyebrow">PRICE, MOVING AVERAGE & AI SCENARIO</p><h2>價格與均線</h2>{% if prediction %}<p class="chart-prediction-note"><span></span>{{ prediction.label }}｜以虛線延伸，不代表保證走勢</p>{% else %}<p class="chart-prediction-note unavailable">AI 預測標記尚未發布</p>{% endif %}</div>
       <div class="segmented glass-segmented" aria-label="圖表顯示期間"><button type="button" data-chart-range="30" aria-pressed="false">1月</button><button type="button" class="active" data-chart-range="90" aria-pressed="true">3月</button><button type="button" data-chart-range="260" aria-pressed="false">1年</button></div>
     </div>
     <div id="stock-chart" class="stock-chart" aria-label="{{ d.name }}互動式價格圖"></div>
@@ -123,7 +122,7 @@
     </div>
   </section>
 
-  <script id="stock-chart-data" type="application/json">{{ {"candles": candles, "ma20": ma20_line}|tojson }}</script>
+  {% if prediction %}<script id="stock-chart-data" type="application/json">{{ {"candles": candles, "ma20": ma20_line, "prediction": prediction.line}|tojson }}</script>{% else %}<script id="stock-chart-data" type="application/json">{{ {"candles": candles, "ma20": ma20_line}|tojson }}</script>{% endif %}
   {% endif %}
 </div>
 {% endblock %}

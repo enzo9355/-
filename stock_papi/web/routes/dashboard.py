@@ -1,5 +1,7 @@
 """Dashboard page route registration."""
 
+import datetime
+
 from flask import abort, render_template, request
 
 from reporting.exceptions import ReportWebError
@@ -11,6 +13,7 @@ def register_dashboard_page(
     load_report_index_v2,
     load_dashboard_snapshot,
     load_data_freshness=None,
+    load_market_index=None,
     preview_enabled=False,
 ):
     def _snapshot():
@@ -34,7 +37,17 @@ def register_dashboard_page(
             )
             for report_type in ("post_close", "pre_market")
         }
-        snapshot = _snapshot()
+        snapshot = dict(_snapshot())
+        if "market_index" not in snapshot and load_market_index is not None:
+            try:
+                target_date = datetime.date.fromisoformat(
+                    str(snapshot.get("observation_as_of") or "")
+                )
+                market_index = load_market_index(target_date)
+                if isinstance(market_index, dict):
+                    snapshot["market_index"] = market_index
+            except (TypeError, ValueError):
+                pass
         data_freshness = {}
         if load_data_freshness is not None:
             try:

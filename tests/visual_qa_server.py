@@ -6,6 +6,7 @@ LINE, Firestore, market providers, or the formal report publishing pipeline.
 
 import datetime
 import json
+import math
 import os
 import tempfile
 from pathlib import Path
@@ -151,6 +152,79 @@ def analysis_data():
     }
 
 
+def visual_dashboard():
+    snapshot = observation_dashboard()
+    dates = []
+    current = datetime.date(2026, 7, 15)
+    while len(dates) < 65:
+        if current.weekday() < 5:
+            dates.append(current)
+        current -= datetime.timedelta(days=1)
+    dates.reverse()
+    candles = []
+    ma20 = []
+    closes = []
+    previous_close = 21840.0
+    for index, day in enumerate(dates):
+        close = 21840 + index * 18.5 + math.sin(index / 4.2) * 155
+        open_value = previous_close + math.sin(index * 1.7) * 34
+        high = max(open_value, close) + 46 + (index % 4) * 7
+        low = min(open_value, close) - 42 - (index % 3) * 8
+        candles.append({
+            "time": day.isoformat(),
+            "open": round(open_value, 2),
+            "high": round(high, 2),
+            "low": round(low, 2),
+            "close": round(close, 2),
+        })
+        closes.append(close)
+        if len(closes) >= 20:
+            ma20.append({
+                "time": day.isoformat(),
+                "value": round(sum(closes[-20:]) / 20, 2),
+            })
+        previous_close = close
+    latest = candles[-1]
+    prior_close = candles[-2]["close"]
+    change = latest["close"] - prior_close
+    snapshot["market_index"] = {
+        "symbol": "TAIEX",
+        "name": "加權指數",
+        "as_of": latest["time"],
+        "price": latest["close"],
+        "change": round(change, 2),
+        "change_pct": round(change / prior_close * 100, 2),
+        "open": latest["open"],
+        "high": latest["high"],
+        "low": latest["low"],
+        "candles": candles,
+        "ma20": ma20,
+    }
+    return snapshot
+
+
+def visual_quant_snapshot(code="2330", market="TW"):
+    snapshot = quant_snapshot(symbol=code, market=market)
+    if code == "2330":
+        as_of = snapshot["as_of"]
+        close = float(snapshot["daily"][-1]["Close"])
+        snapshot["prediction_display"] = {
+            "status": "published",
+            "as_of": as_of,
+            "horizon_sessions": 5,
+            "direction": "up",
+            "points": [
+                {"time": as_of, "value": close},
+                {"time": "2026-07-17", "value": close + 1.4},
+                {"time": "2026-07-20", "value": close + 2.3},
+                {"time": "2026-07-21", "value": close + 3.1},
+                {"time": "2026-07-22", "value": close + 3.8},
+                {"time": "2026-07-23", "value": close + 4.6},
+            ],
+        }
+    return snapshot
+
+
 REPORT_ITEM = {
     "report_date": "2026-07-11", "data_as_of": "2026-07-11", "coverage": 0.94,
     "market_action": "控制追價", "headline": "市場偏多，但高檔波動仍需控制部位",
@@ -194,8 +268,8 @@ REPORT_METADATA = {
 }
 
 
-stock_app._published_dashboard_snapshot = observation_dashboard
-stock_app.fetch_published_quant_snapshot = quant_snapshot
+stock_app._published_dashboard_snapshot = visual_dashboard
+stock_app.fetch_published_quant_snapshot = visual_quant_snapshot
 stock_app.find_industry_peers = lambda _code: {"category": "半導體", "codes": ["2454"]}
 stock_app.get_stock_name = lambda code: "聯發科" if code == "2454" else "台積電"
 

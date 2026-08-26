@@ -25,6 +25,98 @@ from tests.test_observation_public_surfaces import (
 
 
 class WebProductTests(unittest.TestCase):
+    @patch.object(stock_app, "_published_dashboard_snapshot")
+    def test_dashboard_renders_verified_market_index_level_and_candles(self, load_snapshot):
+        snapshot = observation_dashboard()
+        snapshot["market_index"] = {
+            "symbol": "TAIEX",
+            "name": "加權指數",
+            "as_of": "2026-07-15",
+            "price": 23150.25,
+            "change": 188.4,
+            "change_pct": 0.82,
+            "open": 22982.1,
+            "high": 23210.8,
+            "low": 22940.6,
+            "candles": [
+                {
+                    "time": "2026-07-14",
+                    "open": 22800.0,
+                    "high": 23010.0,
+                    "low": 22760.0,
+                    "close": 22961.85,
+                },
+                {
+                    "time": "2026-07-15",
+                    "open": 22982.1,
+                    "high": 23210.8,
+                    "low": 22940.6,
+                    "close": 23150.25,
+                },
+            ],
+            "ma20": [
+                {"time": "2026-07-14", "value": 22790.0},
+                {"time": "2026-07-15", "value": 22820.0},
+            ],
+        }
+        load_snapshot.return_value = snapshot
+
+        html = stock_app.app.test_client().get("/dashboard").get_data(as_text=True)
+
+        for marker in (
+            "加權指數",
+            "23,150.25",
+            "+188.40",
+            "+0.82%",
+            'id="market-index-chart"',
+            'id="market-index-chart-data"',
+            '"time": "2026-07-15"',
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, html)
+
+    @patch.object(stock_app, "fetch_published_quant_snapshot")
+    def test_stock_chart_renders_only_explicit_published_prediction_display(self, fetch):
+        snapshot = quant_snapshot()
+        snapshot["prediction_display"] = {
+            "status": "published",
+            "as_of": snapshot["as_of"],
+            "horizon_sessions": 5,
+            "direction": "up",
+            "points": [
+                {"time": snapshot["as_of"], "value": 164.0},
+                {"time": "2026-07-20", "value": 166.0},
+                {"time": "2026-07-21", "value": 168.0},
+            ],
+        }
+        fetch.return_value = snapshot
+
+        response = stock_app.app.test_client().get("/stock/2330")
+        html = response.get_data(as_text=True)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("AI 5 日偏多情境", html)
+        self.assertIn('"prediction"', html)
+        self.assertIn("2026-07-21", html)
+        self.assertNotIn('"AI_P"', html)
+        self.assertNotIn('"probability"', html)
+
+    def test_chart_renderer_draws_market_candles_and_prediction_marker(self):
+        script = Path(stock_app.app.static_folder, "app.js").read_text(
+            encoding="utf-8"
+        )
+
+        for marker in (
+            "initMarketIndexChart",
+            'bySelector("#market-index-chart")',
+            'bySelector("#market-index-chart-data")',
+            "predictionSeries.setMarkers",
+            'text: "AI 預測"',
+            "LineStyle.Dashed",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, script)
+
     def test_data_freshness_classifier_preserves_verified_dates_and_states(self):
         classifier = getattr(web_routes.system, "classify_data_freshness", None)
 
@@ -1249,6 +1341,39 @@ class WebProductTests(unittest.TestCase):
             self.assertIn(rule, css)
         self.assertIn("grid-template-columns:repeat(5,1fr)", css)
         self.assertIn('href="/reports">每日報告</a>', html)
+
+    def test_web_shell_serves_one_wordmark_font_across_devices(self):
+        client = stock_app.app.test_client()
+        response = client.get("/static/fonts/absorb-wordmark.woff2")
+        font_payload = response.get_data()
+        response.close()
+        css = Path(stock_app.app.static_folder, "app.css").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertGreater(len(font_payload), 1_000)
+        self.assertIn('font-family:"ABSORB Wordmark"', css)
+        self.assertIn('url("fonts/absorb-wordmark.woff2") format("woff2")', css)
+        self.assertIn(
+            'font-family:"ABSORB Wordmark","Segoe Script","Brush Script MT",cursive',
+            css,
+        )
+
+    def test_web_shell_uses_greek_villa_for_neutral_paper_surfaces(self):
+        css = Path(stock_app.app.static_folder, "app.css").read_text(
+            encoding="utf-8"
+        )
+        manifest = json.loads(
+            Path(stock_app.app.static_folder, "manifest.webmanifest").read_text(
+                encoding="utf-8"
+            )
+        )
+
+        self.assertIn("--absorb-surface:#f0ebe3", css)
+        self.assertIn("--command-paper:#f0ebe3", css)
+        self.assertIn("rgb(240 235 227 / 92%)", css)
+        self.assertEqual(manifest["background_color"], "#f0ebe3")
 
     def test_browser_bundle_has_no_local_watchlist_storage(self):
         source = Path(stock_app.app.static_folder, "app.js").read_text(

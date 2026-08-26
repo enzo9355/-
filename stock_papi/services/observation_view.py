@@ -37,6 +37,54 @@ def _sum(rows, field):
     return sum(values) if values else None
 
 
+def _published_prediction_display(snapshot, *, as_of, close):
+    """Validate an explicit display artifact; never infer it from raw model columns."""
+    candidate = snapshot.get("prediction_display")
+    if not isinstance(candidate, dict) or candidate.get("status") != "published":
+        return None
+    if _date_text(candidate.get("as_of")) != as_of:
+        return None
+    horizon = candidate.get("horizon_sessions")
+    direction = candidate.get("direction")
+    points = candidate.get("points")
+    if (
+        type(horizon) is not int
+        or not 1 <= horizon <= 20
+        or direction not in {"up", "neutral", "down"}
+        or not isinstance(points, list)
+        or not 2 <= len(points) <= 21
+    ):
+        return None
+    normalized = []
+    previous_date = None
+    for point in points:
+        if not isinstance(point, dict):
+            return None
+        date_text = _date_text(point.get("time"))
+        value = _number(point.get("value"))
+        if date_text is None or value is None or value <= 0:
+            return None
+        if previous_date is not None and date_text <= previous_date:
+            return None
+        normalized.append({"time": date_text, "value": value})
+        previous_date = date_text
+    if normalized[0]["time"] != as_of or not math.isclose(
+        normalized[0]["value"], close, rel_tol=1e-9, abs_tol=1e-6
+    ):
+        return None
+    direction_label = {"up": "偏多", "neutral": "中性", "down": "偏空"}[direction]
+    return {
+        "status": "published",
+        "as_of": as_of,
+        "horizon_sessions": horizon,
+        "direction": direction,
+        "label": f"AI {horizon} 日{direction_label}情境",
+        "line": json.dumps(
+            normalized, ensure_ascii=False, separators=(",", ":"), allow_nan=False
+        ),
+    }
+
+
 def _risk_events(rows):
     latest = rows[-1]
     events = []
@@ -215,7 +263,15 @@ def build_stock_observation(snapshot, *, get_stock_name=None):
         moving_average = _number(row.get("MA20"))
         if moving_average is not None:
             ma20_line.append({"time": date_text, "value": moving_average})
-    return {
+    previous_close = _number(rows[-2].get("Close")) if len(rows) > 1 else None
+    change = close - previous_close if previous_close not in (None, 0) else None
+    change_pct = (
+        change / previous_close * 100 if change is not None and previous_close else None
+    )
+    prediction_display = _published_prediction_display(
+        snapshot, as_of=as_of, close=close
+    )
+    result = {
         "code": str(snapshot.get("symbol") or ""),
         "name": _observation_name(snapshot, get_stock_name),
         "market": snapshot["market"],
@@ -223,6 +279,11 @@ def build_stock_observation(snapshot, *, get_stock_name=None):
         "observation_as_of": as_of,
         "latest_regular_price_date": as_of,
         "price": close,
+        "change": change,
+        "change_pct": change_pct,
+        "open": _number(latest.get("Open")),
+        "high": _number(latest.get("High")),
+        "low": _number(latest.get("Low")),
         "as_of": as_of,
         "quant_source": "已驗證本地快照",
         "prediction_status": "AI 預測研究中",
@@ -256,3 +317,6 @@ def build_stock_observation(snapshot, *, get_stock_name=None):
         ),
         "news": [],
     }
+    if prediction_display is not None:
+        result["prediction_display"] = prediction_display
+    return result

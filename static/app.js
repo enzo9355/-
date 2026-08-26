@@ -407,6 +407,69 @@ function measureChartHeight(container) {
   return Math.max(320, Math.min(460, Math.round(container.clientWidth * 0.62)));
 }
 
+function parseChartPoints(value) {
+  if (Array.isArray(value)) return value;
+  if (typeof value !== "string" || !value.trim()) return [];
+  const parsed = JSON.parse(value);
+  return Array.isArray(parsed) ? parsed : [];
+}
+
+function createPriceChart(container, raw, { predictionMarker = false, compact = false } = {}) {
+  const candles = parseChartPoints(raw.candles);
+  if (!candles.length) return null;
+  const height = compact
+    ? Math.max(250, Math.min(350, Math.round(container.clientWidth * 0.46)))
+    : measureChartHeight(container);
+  const chart = LightweightCharts.createChart(container, {
+    width: container.clientWidth,
+    height,
+    layout: { background: { color: "transparent" }, textColor: "#536575" },
+    grid: { vertLines: { color: "#cbd8de" }, horzLines: { color: "#cbd8de" } },
+    rightPriceScale: { borderColor: "#aebfc8" },
+    timeScale: { borderColor: "#aebfc8", rightOffset: predictionMarker ? 6 : 1 },
+  });
+  const candleSeries = chart.addCandlestickSeries({
+    upColor: "#7c1f31",
+    downColor: "#3f8060",
+    borderVisible: false,
+    wickUpColor: "#7c1f31",
+    wickDownColor: "#3f8060",
+  });
+  candleSeries.setData(candles);
+  const ma20 = parseChartPoints(raw.ma20);
+  if (ma20.length) {
+    chart.addLineSeries({ color: "#7aa6b3", lineWidth: 2, title: "MA20" }).setData(ma20);
+  }
+  const prediction = parseChartPoints(raw.prediction);
+  if (predictionMarker && prediction.length > 1) {
+    const predictionSeries = chart.addLineSeries({
+      color: "#7c1f31",
+      lineWidth: 2,
+      lineStyle: LightweightCharts.LineStyle.Dashed,
+      title: "AI 研究情境",
+      lastValueVisible: true,
+      priceLineVisible: false,
+    });
+    predictionSeries.setData(prediction);
+    predictionSeries.setMarkers([{
+      time: prediction[1].time,
+      position: "aboveBar",
+      color: "#7c1f31",
+      shape: "circle",
+      text: "AI 預測",
+    }]);
+  }
+  const resize = () => {
+    const nextHeight = compact
+      ? Math.max(250, Math.min(350, Math.round(container.clientWidth * 0.46)))
+      : measureChartHeight(container);
+    chart.resize(container.clientWidth, nextHeight);
+  };
+  if (window.ResizeObserver) new ResizeObserver(resize).observe(container);
+  window.addEventListener("resize", resize);
+  return { chart, length: candles.length };
+}
+
 function setChartRange(days) {
   if (!window.stockChart) return;
   const { chart, length } = window.stockChart;
@@ -418,29 +481,17 @@ function initStockChart() {
   const source = bySelector("#stock-chart-data");
   if (!container || !source || !window.LightweightCharts) return;
   const raw = JSON.parse(source.textContent);
-  const candles = JSON.parse(raw.candles);
-  const height = measureChartHeight(container);
-  const chart = LightweightCharts.createChart(container, {
-    width: container.clientWidth,
-    height,
-    layout: { background: { color: "transparent" }, textColor: "#586579" },
-    grid: { vertLines: { color: "#d9e0e8" }, horzLines: { color: "#d9e0e8" } },
-    timeScale: { borderColor: "#b7c1cf" },
-  });
-  const candleSeries = chart.addCandlestickSeries({
-    upColor: "#d94b63",
-    downColor: "#1f9a72",
-    borderVisible: false,
-    wickUpColor: "#d94b63",
-    wickDownColor: "#1f9a72",
-  });
-  candleSeries.setData(candles);
-  chart.addLineSeries({ color: "#2b6cb0", lineWidth: 1, title: "MA20" }).setData(JSON.parse(raw.ma20));
-  window.stockChart = { chart, length: candles.length };
+  window.stockChart = createPriceChart(container, raw, { predictionMarker: true });
+  if (!window.stockChart) return;
   setChartRange(90);
-  const resize = () => chart.resize(container.clientWidth, measureChartHeight(container));
-  if (window.ResizeObserver) new ResizeObserver(resize).observe(container);
-  window.addEventListener("resize", resize);
+}
+
+function initMarketIndexChart() {
+  const container = bySelector("#market-index-chart");
+  const source = bySelector("#market-index-chart-data");
+  if (!container || !source || !window.LightweightCharts) return;
+  const marketChart = createPriceChart(container, JSON.parse(source.textContent), { compact: true });
+  if (marketChart) marketChart.chart.timeScale().fitContent();
 }
 
 document.addEventListener("click", (event) => {
@@ -524,6 +575,7 @@ migrateLegacyHashRoute();
 loadDashboard();
 loadAccountState();
 initStockChart();
+initMarketIndexChart();
 initReturnCalculator();
 initConversations();
 initQuickAsk();
