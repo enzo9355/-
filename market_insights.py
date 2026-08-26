@@ -69,7 +69,7 @@ def parse_mops_items(items, source, limit=100):
             continue
         code = _clean_text(item.get("公司代號") or item.get("SecuritiesCompanyCode"), 8)
         title = _clean_text(item.get("主旨 ") or item.get("主旨"), 500)
-        if not re.fullmatch(r"\d{4,6}", code) or not title:
+        if not re.fullmatch(r"[0-9]{4,5}[0-9A-Z]?", code.upper()) or not title:
             continue
         try:
             published = _roc_datetime(item.get("發言日期"), item.get("發言時間"))

@@ -7,6 +7,7 @@ import math
 from stock_papi.integrations.market_data.tw_trading_status import (
     validate_status_evidence,
 )
+from stock_papi.integrations.market_data.tw_security_master import is_taiwan_symbol
 
 
 _STATUS_LABELS = {
@@ -73,7 +74,7 @@ def _risk_events(rows):
     return events or ["未觸發額外風險事件"]
 
 
-def _status_observation(snapshot, rows):
+def _status_observation(snapshot, rows, *, get_stock_name=None):
     target = _date_text(snapshot.get("target_market_date"))
     observed = _date_text(snapshot.get("observation_as_of"))
     latest_regular = _date_text(snapshot.get("latest_regular_price_date"))
@@ -102,7 +103,7 @@ def _status_observation(snapshot, rows):
         return None
     result = {
         "code": str(snapshot.get("symbol") or ""),
-        "name": str(snapshot.get("name") or snapshot.get("symbol") or ""),
+        "name": _observation_name(snapshot, get_stock_name),
         "market": "TW",
         "observation_kind": status,
         "status_label": _STATUS_LABELS[status],
@@ -118,7 +119,35 @@ def _status_observation(snapshot, rows):
     return result
 
 
-def build_stock_observation(snapshot):
+def _observation_name(snapshot, get_stock_name):
+    symbol = str(snapshot.get("symbol") or "")
+    fallback = str(snapshot.get("name") or symbol or "")
+    if (
+        not callable(get_stock_name)
+        or snapshot.get("market") != "TW"
+        or not is_taiwan_symbol(symbol)
+    ):
+        return fallback
+    target = _date_text(
+        snapshot.get("target_market_date")
+        or snapshot.get("observation_as_of")
+        or snapshot.get("as_of")
+    )
+    try:
+        resolved = get_stock_name(
+            symbol,
+            target_date=(datetime.date.fromisoformat(target) if target else None),
+            require_authoritative=True,
+        )
+    except Exception:
+        # A stale artifact name is not safe to present as current.  The symbol
+        # is an explicit, lossless fallback while the authoritative source is
+        # unavailable.
+        return symbol
+    return str(resolved or symbol)
+
+
+def build_stock_observation(snapshot, *, get_stock_name=None):
     schema_version = snapshot.get("schema_version") if isinstance(snapshot, dict) else None
     if (
         not isinstance(snapshot, dict)
@@ -133,7 +162,7 @@ def build_stock_observation(snapshot):
     if len(rows) != len(snapshot["daily"]):
         return None
     if schema_version == 2 and snapshot.get("observation_kind") in _STATUS_LABELS:
-        return _status_observation(snapshot, rows)
+        return _status_observation(snapshot, rows, get_stock_name=get_stock_name)
     latest = rows[-1]
     as_of = _date_text(latest.get("Date"))
     if as_of != snapshot.get("as_of"):
@@ -188,7 +217,7 @@ def build_stock_observation(snapshot):
             ma20_line.append({"time": date_text, "value": moving_average})
     return {
         "code": str(snapshot.get("symbol") or ""),
-        "name": str(snapshot.get("name") or snapshot.get("symbol") or ""),
+        "name": _observation_name(snapshot, get_stock_name),
         "market": snapshot["market"],
         "observation_kind": "regular_price",
         "observation_as_of": as_of,

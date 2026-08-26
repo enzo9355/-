@@ -356,27 +356,70 @@ def fetch_option_context_history(
     return tuple(frames[symbol] for symbol in symbols)
 
 
-def get_stock_name(code, stock_codes, is_us_ticker):
+def get_stock_name(
+    code,
+    stock_codes,
+    is_us_ticker,
+    resolver=None,
+    target_date=None,
+    require_authoritative=False,
+):
+    code = str(code or "").strip().upper()
     if code == "TAIEX":
         return "台股大盤"
+    if resolver is not None:
+        try:
+            from stock_papi.integrations.market_data.tw_security_master import (
+                is_taiwan_symbol,
+            )
+
+            if is_taiwan_symbol(code):
+                return resolver.resolve_name(
+                    code,
+                    target_date,
+                    require_authoritative=require_authoritative,
+                )
+        except (TypeError, ValueError):
+            pass
     if code in stock_codes:
-        return stock_codes[code].name
+        return str(getattr(stock_codes[code], "name", code))
     if is_us_ticker(code):
         return f"美股 {code}"
     return code
 
 
-def search_stock_code(keyword, stock_codes, is_us_ticker, resolve_name):
+def search_stock_code(
+    keyword,
+    stock_codes,
+    is_us_ticker,
+    resolve_name,
+    resolver=None,
+):
     keyword = keyword.upper().strip()
     if not keyword:
         return None, None
     if keyword in ["TAIEX", "加權指數", "台股大盤", "大盤"]:
         return "TAIEX", "台股大盤"
+    if resolver is not None:
+        try:
+            from stock_papi.integrations.market_data.tw_security_master import (
+                is_taiwan_symbol,
+            )
+
+            if is_taiwan_symbol(keyword):
+                if resolver.contains(keyword):
+                    return keyword, resolve_name(keyword)
+            match = resolver.search(keyword)
+            if match:
+                return match
+        except (TypeError, ValueError):
+            pass
     if keyword.isdigit():
         return keyword, resolve_name(keyword)
     if is_us_ticker(keyword):
         return keyword, resolve_name(keyword)
     for code, info in stock_codes.items():
-        if keyword in info.name.upper():
-            return code, info.name
+        name = str(getattr(info, "name", "") or "")
+        if keyword in name.upper():
+            return code, name
     return None, None

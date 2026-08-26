@@ -770,7 +770,7 @@ def _twse_reduction_rows(payload: Any, payload_sha256: str) -> tuple[list[dict[s
             effective_date=row[0], source_id="twse_reduction_resume",
             payload_sha256=payload_sha256, raw_row=row,
         ))
-        match = re.fullmatch(r"\s*(\d{4,6})\s*,\s*(\d{8})\s*", str(row[detail_index]))
+        match = re.fullmatch(r"\s*([0-9]{4,5}[0-9A-Z]?)\s*,\s*(\d{8})\s*", str(row[detail_index]).upper())
         if not match or normalize_symbol(match.group(1)) != symbol:
             raise ValueError("TWSE reduction detail reference is invalid")
         details.append((symbol, match.group(2)))
@@ -852,7 +852,7 @@ def _parse_twse_listing_change_events(
     if parsed_announcement_date != announcement_date:
         raise ValueError("TWSE listing change announcement date is invalid")
     pattern = re.compile(
-        r"公司代號\s*[：:]\s*(?P<symbol>\d{4,6}).*?自\s*"
+        r"公司代號\s*[：:]\s*(?P<symbol>[0-9]{4,5}[0-9A-Z]?).*?自\s*"
         + date.format(prefix="suspend")
         + r"\s*起停止買賣.*?並自\s*"
         + date.format(prefix="terminate")
@@ -984,7 +984,7 @@ def _tpex_history_events(payload: Any, payload_sha256: str) -> list[dict[str, An
         required = {"SecuritiesCompanyCode", "DateOfSuspendedTrading", "DateOfResumedTrading"}
         if not required <= set(row):
             raise ValueError("TPEx suspend history schema is invalid")
-        if not re.fullmatch(r"\d{4,6}", _text(row["SecuritiesCompanyCode"])):
+        if not re.fullmatch(r"[0-9]{4,5}[0-9A-Z]?", _text(row["SecuritiesCompanyCode"]).upper()):
             continue
         if _text(row["DateOfSuspendedTrading"]):
             events.append(_lifecycle_event(

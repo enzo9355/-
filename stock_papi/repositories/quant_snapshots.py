@@ -198,7 +198,7 @@ def published_quant_manifest(market, today=None, *, load_object, cache=QUANT_MAN
             for symbol, status in expected.items():
                 entry = symbols.get(symbol)
                 valid_symbol = (
-                    bool(re.fullmatch(r"[0-9]{4,6}", str(symbol)))
+                    bool(re.fullmatch(r"[0-9]{4,5}[0-9A-Z]?", str(symbol).upper()))
                     if market == "TW"
                     else (len(str(symbol)) <= 10 and bool(re.fullmatch(r"^[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)?$", str(symbol))))
                 )

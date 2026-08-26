@@ -4,6 +4,7 @@ import datetime
 
 from stock_papi.shared.formatting import clamp as _clamp
 from stock_papi.shared.formatting import safe_float as _safe_float
+from stock_papi.integrations.market_data.tw_security_master import is_taiwan_symbol
 
 
 def sector_signal_score(data):
@@ -23,7 +24,7 @@ def sector_candidates(category, codes, limit=20, activity=None):
     seen = set()
     for code in codes:
         code = str(code).strip()
-        if code in seen or not code.isdigit() or len(code) not in (4, 5):
+        if code in seen or not is_taiwan_symbol(code):
             continue
         if category != "ETF專區" and code.startswith("00"):
             continue
@@ -45,9 +46,14 @@ def sector_signal_item(code, data, *, get_stock_name):
         return None
     bt = data.get("bt") or {}
     foreign = data.get("foreign_flow") or {}
+    name = (
+        get_stock_name(code)
+        if is_taiwan_symbol(code)
+        else data.get("name") or get_stock_name(code)
+    )
     return {
         "code": code,
-        "name": data.get("name") or get_stock_name(code),
+        "name": name,
         "price": _safe_float(data.get("price")),
         "prob": int(round(_safe_float(data.get("prob")))),
         "trend": data.get("trend") or "中性",
@@ -104,7 +110,9 @@ def build_market_map(codes, theme_sectors):
         market[theme] = []
     from stock_papi.shared.symbol import get_instrument_type
     for code, info in codes.items():
-        if len(code) not in [4, 5]:
+        if not is_taiwan_symbol(code):
+            continue
+        if len(code) == 6 and get_instrument_type(code) != "ETF":
             continue
         group = getattr(info, "group", None) or getattr(info, "type", None)
         if group and isinstance(group, str) and group.strip():

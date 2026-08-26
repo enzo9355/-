@@ -2,6 +2,7 @@
 
 import re
 from stock_papi.shared.symbol import get_instrument_type
+from stock_papi.integrations.market_data.tw_security_master import is_taiwan_symbol
 from absorb.conversation.prompts import SYSTEM_PROMPT
 
 
@@ -54,6 +55,7 @@ class AbsorbResearchService:
         gather_sector_data_fn,
         build_single_context_fn,
         build_sector_examples_fn,
+        taiwan_security_master=None,
     ):
         self.requests = requests_module
         self.openalice_url = openalice_url
@@ -61,6 +63,7 @@ class AbsorbResearchService:
         self.search_stock = search_stock
         self.get_stock_name = get_stock_name
         self.twstock_codes = twstock_codes
+        self.taiwan_security_master = taiwan_security_master
         self.industry_map = industry_map
         self.analyze = analyze
         self.system_cache = system_cache
@@ -101,8 +104,14 @@ class AbsorbResearchService:
     def extract_stock(self, prompt):
         """Extract a stock or market target from a natural-language question."""
         prompt = str(prompt or "").strip()
-        code_match = re.search(r"(?<!\d)(\d{4,5})(?!\d)", prompt)
-        if code_match and code_match.group(1) in self.twstock_codes:
+        code_match = re.search(r"(?<![0-9A-Z])([0-9]{4,5}[0-9A-Z]?)(?![0-9A-Z])", prompt.upper())
+        if code_match and (
+            code_match.group(1) in self.twstock_codes
+            or (
+                self.taiwan_security_master is not None
+                and self.taiwan_security_master.contains(code_match.group(1))
+            )
+        ):
             code = code_match.group(1)
             return code, self.get_stock_name(code)
 
