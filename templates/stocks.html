@@ -1,17 +1,52 @@
 {% extends "base.html" %}
 {% block title %}個股與 ETF｜ABSORB{% endblock %}
 {% block content %}
-{% macro event_card(item) -%}<a class="pick-card" href="{{ url_for('stock_page', code=item.symbol) }}"><span>{% if item.name and item.name|upper != item.symbol|upper %}{{ item.name }} · {{ item.symbol }}{% else %}{{ item.symbol }}{% endif %}</span><strong>{{ item.observation }}</strong>{% if item.metric_value is not none %}<p class="{{ 'positive' if item.metric_value > 0 else 'negative' if item.metric_value < 0 else '' }}">{{ item.metric_value }} {{ item.unit }}</p>{% endif %}<small>資料日 {{ item.as_of }}</small></a>{%- endmacro %}
+{% set severity_labels = {'high':'極端','medium':'顯著','low':'注意'} %}
+{% set unit_labels = {'pct':'%','ratio':'倍','index':'','price':'','flag':''} %}
+{% macro event_card(item) -%}
+<a class="pick-card event-card severity-{{ item.severity or 'low' }}" href="{{ url_for('stock_page', code=item.symbol) }}">
+  <span>{% if item.name and item.name|upper != item.symbol|upper %}{{ item.name }} · {{ item.symbol }}{% else %}{{ item.symbol }}{% endif %}</span>
+  <strong>{{ item.observation }}</strong>
+  <div class="event-card-meta"><b>{{ severity_labels.get(item.severity, '注意') }}</b>{% if item.metric_value is not none %}<p class="{{ 'positive' if item.metric_value > 0 else 'negative' if item.metric_value < 0 else '' }}">{{ item.metric_value }}{{ unit_labels.get(item.unit, ' ' + (item.unit or '')) }}</p>{% endif %}</div>
+  <small>資料日 {{ item.as_of }}</small>
+</a>
+{%- endmacro %}
+{% macro event_group(key, title, items) -%}
+<section class="event-group event-{{ key }}" data-event-group="{{ key }}"><div class="event-group-heading"><h3>{{ title }}</h3><span>{{ items|length }} 件</span></div><div class="top-picks">{% for item in items %}{{ event_card(item) }}{% else %}<div class="empty-state">目前沒有{{ title }}事件。</div>{% endfor %}</div></section>
+{%- endmacro %}
 {% set events = observation.stock_events or [] %}
-{% set event_groups = namespace(up=[], down=[], other=[]) %}
-{% for item in events %}{% if item.observation == '單日漲幅異常' %}{% set event_groups.up = event_groups.up + [item] %}{% elif item.observation == '單日跌幅異常' %}{% set event_groups.down = event_groups.down + [item] %}{% else %}{% set event_groups.other = event_groups.other + [item] %}{% endif %}{% endfor %}
+{% set groups = namespace(up=[], down=[], volume=[], institution=[], technical=[], data=[]) %}
+{% for item in events %}
+  {% if item.event_type == 'price_move' and item.metric_value > 0 %}{% set groups.up = groups.up + [item] %}
+  {% elif item.event_type == 'price_move' %}{% set groups.down = groups.down + [item] %}
+  {% elif item.event_type in ('volume_surge','volume_dry_up') %}{% set groups.volume = groups.volume + [item] %}
+  {% elif item.event_type == 'institution_flow' %}{% set groups.institution = groups.institution + [item] %}
+  {% elif item.event_type in ('rsi_overbought','rsi_oversold','new_high_20d','new_low_20d') %}{% set groups.technical = groups.technical + [item] %}
+  {% elif item.event_type == 'data_warning' %}{% set groups.data = groups.data + [item] %}
+  {% endif %}
+{% endfor %}
+{% set official = observation.trading_status_observations or [] %}
 <div class="page dashboard-page"{% if market|default('TW', true) == 'TW' %} data-dashboard-endpoint="/api/dashboard"{% endif %}>
-  <header class="page-header"><div><p class="eyebrow">STOCK ACTUALS</p><h1>個股與 ETF</h1><p class="page-intro">搜尋個股，或查看已觸發的市場事件與 ETF 實況。</p></div></header>
+  <header class="page-header"><div><p class="eyebrow">STOCK ACTUALS</p><h1>個股與 ETF</h1><p class="page-intro">搜尋標的，或依事件類型查看已觸發的市場觀察。</p></div></header>
   {% if search_error %}<div class="error-banner" role="alert">找不到「{{ search_query }}」，請輸入台股代碼、名稱或美股代碼。</div>{% endif %}
   {% if data_unavailable %}<div class="error-banner" role="alert">已驗證的美股個股與 ETF 觀察暫時無法取得，請稍後再試。</div>{% endif %}
-   <section class="panel" aria-labelledby="stock-search-title"><h2 id="stock-search-title">搜尋股票</h2><form class="stock-search" action="{{ url_for('search_page') }}" method="get" role="search"><input type="hidden" name="market" value="{{ market|default('TW', true) }}"><label class="search-label" for="stock-search">股票代碼或名稱</label><div class="search-control glass-panel"><input id="stock-search" name="q" value="{{ search_query }}" placeholder="輸入 2330、台積電或 AAPL" autocomplete="off" required><button type="submit">查看觀察</button></div></form></section>
-    {% if not data_unavailable %}<section class="panel picks-panel" aria-labelledby="events-title"><div class="section-heading"><div><h2 id="events-title">個股異常事件</h2><p>漲跌分流，避免同一序列交錯判讀。</p></div></div><div class="event-groups" data-stock-events><section class="event-group event-up" data-event-group="up"><div class="event-group-heading"><h3>異常上漲</h3><span>{{ event_groups.up|length }} 檔</span></div><div class="top-picks">{% for item in event_groups.up %}{{ event_card(item) }}{% else %}<div class="empty-state">目前沒有異常上漲事件。</div>{% endfor %}</div></section><section class="event-group event-down" data-event-group="down"><div class="event-group-heading"><h3>異常下跌</h3><span>{{ event_groups.down|length }} 檔</span></div><div class="top-picks">{% for item in event_groups.down %}{{ event_card(item) }}{% else %}<div class="empty-state">目前沒有異常下跌事件。</div>{% endfor %}</div></section><section class="event-group event-other" data-event-group="other"><div class="event-group-heading"><h3>其他事件</h3><span>{{ event_groups.other|length }} 檔</span></div><div class="top-picks">{% for item in event_groups.other %}{{ event_card(item) }}{% else %}<div class="empty-state">目前沒有其他異常事件。</div>{% endfor %}</div></section></div></section>
-  <section class="panel picks-panel" aria-labelledby="etf-title"><div class="section-heading"><div><h2 id="etf-title">ETF 觀察</h2></div></div><div class="top-picks" data-etf-observations>{% for item in observation.etf_observations or [] %}<a class="pick-card" href="{{ url_for('stock_page', code=item.symbol) }}"><span>{{ item.name }} · {{ item.symbol }}</span><strong>收盤 {{ item.price }}</strong><small>5 日 {{ '%+.2f%%'|format(item.return_5d_pct) if item.return_5d_pct is not none else '資料不足' }}</small></a>{% else %}<div class="empty-state">ETF 觀察資料不足。</div>{% endfor %}</div></section>{% endif %}
+  <section class="panel" aria-labelledby="stock-search-title"><h2 id="stock-search-title">搜尋股票</h2><form class="stock-search" action="{{ url_for('search_page') }}" method="get" role="search"><input type="hidden" name="market" value="{{ market|default('TW', true) }}"><label class="search-label" for="stock-search">股票代碼或名稱</label><div class="search-control"><input id="stock-search" name="q" value="{{ search_query }}" placeholder="輸入 2330、台積電或 AAPL" autocomplete="off" required><button type="submit">查看觀察</button></div></form></section>
+  {% if not data_unavailable %}
+  <section class="panel picks-panel" aria-labelledby="events-title">
+    <div class="section-heading"><div><h2 id="events-title">個股異常事件</h2><p>漲跌、量能、法人、技術、官方狀態與資料警示分開呈現；分類不代表事件之間具有因果關係。</p></div></div>
+    <p class="event-severity-rule">分級規則：價格異常與資料警示為「極端」；量能放大、技術與法人事件為「顯著」；量能收縮為「注意」。</p>
+    <div class="event-groups" data-stock-events>
+      {{ event_group('up', '異常上漲', groups.up) }}
+      {{ event_group('down', '異常下跌', groups.down) }}
+      {{ event_group('volume', '量能異常', groups.volume) }}
+      {{ event_group('institution', '法人動向', groups.institution) }}
+      {{ event_group('technical', '技術面', groups.technical) }}
+      <section class="event-group event-official" data-event-group="official"><div class="event-group-heading"><h3>官方事件</h3><span>{{ official|length }} 件</span></div><div class="top-picks">{% for item in official %}<a class="pick-card event-card severity-high" href="{{ url_for('stock_page', code=item.symbol) }}"><span>{{ item.name }} · {{ item.symbol }}</span><strong>{{ item.label }}</strong><div class="event-card-meta"><b>官方</b></div><small>驗證日 {{ item.observation_as_of }}</small></a>{% else %}<div class="empty-state">目前沒有官方事件。</div>{% endfor %}</div></section>
+      {{ event_group('data', '資料警示', groups.data) }}
+    </div>
+  </section>
+  <section class="panel picks-panel" aria-labelledby="etf-title"><div class="section-heading"><div><h2 id="etf-title">ETF 觀察</h2></div></div><div class="top-picks" data-etf-observations>{% for item in observation.etf_observations or [] %}<a class="pick-card" href="{{ url_for('stock_page', code=item.symbol) }}"><span>{{ item.name }} · {{ item.symbol }}</span><strong>收盤 {{ item.price }}</strong><small>5 日 {{ '%+.2f%%'|format(item.return_5d_pct) if item.return_5d_pct is not none else '資料不足' }}</small></a>{% else %}<div class="empty-state">ETF 觀察資料不足。</div>{% endfor %}</div></section>
+  {% endif %}
   <div class="error-banner" data-dashboard-error hidden>個股觀察資料暫時無法取得。</div>
 </div>
 {% endblock %}

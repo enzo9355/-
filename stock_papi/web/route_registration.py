@@ -22,7 +22,6 @@ def register_routes(app, dependencies):
         load_report_index_v2=dependencies["load_report_index_v2"],
         load_dashboard_snapshot=dependencies["dashboard_snapshot"],
         load_data_freshness=load_data_freshness,
-        load_market_index=dependencies.get("market_index_snapshot"),
         preview_enabled=(
             dependencies["prediction_capability"].preview_candidate_prefix
             is not None

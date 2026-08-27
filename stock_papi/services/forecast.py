@@ -176,13 +176,11 @@ def _cached_forecast(rows, market):
             direction = "neutral"
 
         last_date = datetime.date.fromisoformat(str(frame.iloc[-1]["date"]))
-        future_dates = _future_weekdays(last_date)
-        points = [{"time": last_date.isoformat(), "value": current_price}]
-        for index, date in enumerate(future_dates, 1):
-            value = current_price + (target_price - current_price) * (
-                index / HORIZON_SESSIONS
-            )
-            points.append({"time": date.isoformat(), "value": round(value, 2)})
+        target_date = _future_weekdays(last_date)[-1]
+        points = [
+            {"time": last_date.isoformat(), "value": current_price},
+            {"time": target_date.isoformat(), "value": target_price},
+        ]
 
         return {
             "status": "published",

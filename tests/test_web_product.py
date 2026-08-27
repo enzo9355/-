@@ -58,26 +58,8 @@ class WebProductTests(unittest.TestCase):
                 {"time": "2026-07-14", "value": 22790.0},
                 {"time": "2026-07-15", "value": 22820.0},
             ],
-            "prediction_display": {
-                "status": "published",
-                "as_of": "2026-07-15",
-                "horizon_sessions": 5,
-                "direction": "up",
-                "probability_up_pct": 67.4,
-                "target_price": 23610.5,
-                "expected_return_pct": 1.99,
-                "model_version": "lgbm-ohlc-5d-v1",
-                "validation": {
-                    "oos_samples": 80,
-                    "direction_accuracy_pct": 58.8,
-                    "brier": 0.238,
-                    "price_mae_pct": 2.1,
-                },
-                "points": [
-                    {"time": "2026-07-15", "value": 23150.25},
-                    {"time": "2026-07-22", "value": 23610.5},
-                ],
-            },
+            "returns": {},
+            "source": {"provider": "TWSE", "kind": "official_index_daily"},
         }
         load_snapshot.return_value = snapshot
 
@@ -89,19 +71,17 @@ class WebProductTests(unittest.TestCase):
             "+188.40",
             "+0.82%",
             'id="market-index-chart"',
+            'role="img"',
+            "加權指數最近五個交易日 OHLC",
             'id="market-index-chart-data"',
             '"time": "2026-07-15"',
-            "五日上漲機率",
-            "67.4%",
-            "23,610.50",
-            "樣本 80 筆",
-            '"prediction"',
+            "AI 五日預測尚未通過正式發布驗證",
         ):
             with self.subTest(marker=marker):
                 self.assertIn(marker, html)
 
     @patch.object(stock_app, "fetch_published_quant_snapshot")
-    def test_stock_chart_renders_only_explicit_published_prediction_display(self, fetch):
+    def test_stock_chart_rejects_unverified_embedded_prediction_display(self, fetch):
         snapshot = quant_snapshot()
         snapshot["prediction_display"] = {
             "status": "published",
@@ -120,7 +100,6 @@ class WebProductTests(unittest.TestCase):
             },
             "points": [
                 {"time": snapshot["as_of"], "value": 164.0},
-                {"time": "2026-07-20", "value": 166.0},
                 {"time": "2026-07-21", "value": 171.0},
             ],
         }
@@ -130,33 +109,67 @@ class WebProductTests(unittest.TestCase):
         html = response.get_data(as_text=True)
 
         self.assertEqual(response.status_code, 200)
-        self.assertIn("AI 5 日偏多情境", html)
-        self.assertIn("五日上漲機率", html)
-        self.assertIn("68.0%", html)
-        self.assertIn("171.00", html)
-        self.assertIn("方向準確率 57.3%", html)
-        self.assertIn('"prediction"', html)
-        self.assertIn("2026-07-21", html)
+        self.assertIn("AI 五日預測尚未發布", html)
+        self.assertIn("個股最近五個交易日 OHLC", html)
+        self.assertNotIn("五日上漲機率", html)
+        self.assertNotIn("171.00", html)
+        self.assertNotIn('"prediction"', html)
         self.assertNotIn('"AI_P"', html)
 
     @patch.object(stock_app, "_published_dashboard_snapshot")
-    def test_stock_events_are_split_into_up_down_and_other_groups(self, load):
+    def test_stock_events_are_split_into_supported_categories_with_severity(self, load):
         snapshot = observation_dashboard()
         snapshot["stock_events"] = [
-            {"symbol": "6955", "name": "邦睿生技-創", "observation": "單日跌幅異常", "metric_value": -10.83, "unit": "pct", "as_of": "2026-08-26"},
-            {"symbol": "3313", "name": "斐成", "observation": "單日漲幅異常", "metric_value": 10.0, "unit": "pct", "as_of": "2026-08-26"},
-            {"symbol": "2603", "name": "長榮", "observation": "量能異常放大", "metric_value": 2.8, "unit": "倍", "as_of": "2026-08-26"},
+            {"symbol": "6955", "name": "邦睿生技-創", "event_type": "price_move", "severity": "high", "observation": "單日跌幅異常", "metric_value": -10.83, "unit": "pct", "as_of": "2026-08-26"},
+            {"symbol": "3313", "name": "斐成", "event_type": "price_move", "severity": "high", "observation": "單日漲幅異常", "metric_value": 10.0, "unit": "pct", "as_of": "2026-08-26"},
+            {"symbol": "2603", "name": "長榮", "event_type": "volume_surge", "severity": "medium", "observation": "量能異常放大", "metric_value": 2.8, "unit": "ratio", "as_of": "2026-08-26"},
+            {"symbol": "2330", "name": "台積電", "event_type": "institution_flow", "severity": "medium", "observation": "機構淨流入偏高", "metric_value": 3.1, "unit": "pct", "as_of": "2026-08-26"},
+            {"symbol": "2454", "name": "聯發科", "event_type": "rsi_overbought", "severity": "medium", "observation": "RSI 進入過熱區", "metric_value": 74.0, "unit": "index", "as_of": "2026-08-26"},
+            {"symbol": "0050", "name": "元大台灣50", "event_type": "data_warning", "severity": "high", "observation": "資料來源價差警示", "metric_value": 1, "unit": "flag", "as_of": "2026-08-26"},
         ]
+        snapshot["trading_status_observations"] = [{
+            "symbol": "1589", "name": "永冠-KY", "label": "停止買賣",
+            "observation_as_of": "2026-08-26",
+        }]
         load.return_value = snapshot
 
         html = stock_app.app.test_client().get("/stocks").get_data(as_text=True)
 
         self.assertIn("異常上漲", html)
         self.assertIn("異常下跌", html)
-        self.assertIn("其他事件", html)
+        for label in ("量能異常", "法人動向", "技術面", "官方事件", "資料警示"):
+            self.assertIn(label, html)
         self.assertIn('data-event-group="up"', html)
         self.assertIn('data-event-group="down"', html)
+        self.assertIn('data-event-group="volume"', html)
+        self.assertIn('data-event-group="official"', html)
+        self.assertIn("極端", html)
+        self.assertIn("顯著", html)
         self.assertLess(html.index("斐成"), html.index("邦睿生技-創"))
+
+    def test_shell_uses_collapsible_dashboard_sidebar_with_accessible_toggle(self):
+        html = stock_app.app.test_client().get("/dashboard").get_data(as_text=True)
+        script = Path(stock_app.app.static_folder, "app.js").read_text(encoding="utf-8")
+
+        for marker in (
+            'class="dashboard-sidebar"',
+            'data-sidebar-toggle',
+            'aria-controls="dashboard-sidebar"',
+            'aria-expanded="true"',
+            'id="dashboard-sidebar"',
+        ):
+            self.assertIn(marker, html)
+        self.assertIn("initSidebar", script)
+        self.assertIn('event.key === "Escape"', script)
+
+    @patch.object(stock_app, "fetch_published_quant_snapshot")
+    def test_stock_page_does_not_train_or_infer_a_forecast_during_request(self, fetch):
+        fetch.return_value = quant_snapshot()
+
+        html = stock_app.app.test_client().get("/stock/2330").get_data(as_text=True)
+
+        self.assertIn("AI 五日預測尚未發布", html)
+        self.assertNotIn("五日上漲機率", html)
 
     def test_chart_renderer_draws_market_candles_and_prediction_marker(self):
         script = Path(stock_app.app.static_folder, "app.js").read_text(
@@ -868,7 +881,8 @@ class WebProductTests(unittest.TestCase):
         self.assertNotIn("TAIEX", html)
         self.assertIn("目前沒有異常上漲事件。", html)
         self.assertIn("目前沒有異常下跌事件。", html)
-        self.assertIn("目前沒有其他異常事件。", html)
+        for label in ("量能異常", "法人動向", "技術面", "官方", "資料警示"):
+            self.assertIn(f"目前沒有{label}事件。", html)
         self.assertIn('action="/search"', html)
         self.assertIn('name="market" value="US"', html)
 
@@ -1067,14 +1081,14 @@ class WebProductTests(unittest.TestCase):
             with self.subTest(marker=marker):
                 self.assertIn(marker, html)
 
-    def test_dashboard_destinations_live_in_top_navigation(self):
+    def test_dashboard_destinations_live_in_sidebar_navigation(self):
         html = stock_app.app.test_client().get("/dashboard").get_data(as_text=True)
-        primary_nav = html.split('<nav class="nav-list">', 1)[1].split("</nav>", 1)[0]
+        primary_nav = html.split('<nav class="sidebar-nav"', 1)[1].split("</nav>", 1)[0]
 
         self.assertIn('href="/ask"', primary_nav)
-        self.assertIn(">ASK ABSORB</a>", primary_nav)
+        self.assertIn('<span class="nav-label">ASK ABSORB</span>', primary_nav)
         self.assertIn('href="/learn"', primary_nav)
-        self.assertIn(">學習</a>", primary_nav)
+        self.assertIn('<span class="nav-label">學習</span>', primary_nav)
         self.assertNotIn('class="dashboard-destinations"', html)
 
     @patch.object(stock_app, "_published_dashboard_snapshot")
@@ -1153,15 +1167,14 @@ class WebProductTests(unittest.TestCase):
             with self.subTest(path=path):
                 html = client.get(path).get_data(as_text=True)
                 self.assertIn(
-                    f'class="nav-link active" href="{path if path != "/dashboard" else "/"}" aria-current="page">{label}',
+                    f'class="nav-link active" href="{path if path != "/dashboard" else "/"}" aria-label="{label}" aria-current="page"',
                     html,
                 )
         home = client.get("/dashboard").get_data(as_text=True)
-        primary_nav = home.split('<nav class="nav-list">', 1)[1].split("</nav>", 1)[0]
-        mobile_nav = home.split('<nav class="mobile-nav"', 1)[1].split("</nav>", 1)[0]
+        primary_nav = home.split('<nav class="sidebar-nav"', 1)[1].split("</nav>", 1)[0]
         self.assertNotIn('href="#', primary_nav)
-        self.assertNotIn('href="#', mobile_nav)
-        self.assertIn('aria-current="page">今天</a>', mobile_nav)
+        self.assertNotIn('class="mobile-nav"', home)
+        self.assertIn('aria-current="page"><span class="nav-short"', primary_nav)
         ask = client.get("/ask").get_data(as_text=True)
         self.assertIn('<h1>ASK ABSORB</h1>', ask)
 
@@ -1469,8 +1482,9 @@ class WebProductTests(unittest.TestCase):
             "min-height:44px",
         ):
             self.assertIn(rule, css)
-        self.assertIn("grid-template-columns:repeat(5,1fr)", css)
-        self.assertIn('href="/reports">每日報告</a>', html)
+        self.assertIn(".dashboard-sidebar", css)
+        self.assertIn('aria-controls="dashboard-sidebar"', html)
+        self.assertIn('<span class="nav-label">每日報告</span>', html)
 
     def test_web_shell_serves_one_wordmark_font_across_devices(self):
         client = stock_app.app.test_client()
@@ -1502,7 +1516,9 @@ class WebProductTests(unittest.TestCase):
 
         self.assertIn("--absorb-surface:#f5f5f2", css)
         self.assertIn("--command-paper:#f7f6f2", css)
-        self.assertIn("rgb(247 246 242 / 92%)", css)
+        self.assertIn("background:var(--command-paper)", css)
+        self.assertNotIn("gradient", css)
+        self.assertNotIn("backdrop-filter", css)
         self.assertEqual(manifest["background_color"], "#f7f6f2")
 
     def test_research_layout_supports_4k_and_tall_ask_workspace(self):

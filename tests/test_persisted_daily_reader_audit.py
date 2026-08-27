@@ -121,6 +121,7 @@ READER_CONTRACTS = {
     ("stock_papi/batch/observation_products.py", "_market_daily_returns"): "canonical-OHLCV",
     ("stock_papi/batch/observation_products.py", "_market_observation"): "latest-only",
     ("stock_papi/batch/observation_products.py", "_industry_observations"): "latest-only",
+    ("stock_papi/batch/observation_products.py", "_attention_companies"): "latest-only",
     ("stock_papi/batch/observation_products.py", "_stock_events"): "latest-only",
     ("stock_papi/batch/observation_products.py", "_etf_observations"): "latest-only",
     ("stock_papi/batch/oos_diagnostics.py", "_enrich_point_in_time"): "feature-ready-history",

@@ -22,6 +22,8 @@
 
   {% set content = report.core %}
   {% set market = content.market_observation %}
+  {% set market_count = (market.advancing_count or 0) + (market.declining_count or 0) + (market.unchanged_count or 0) %}
+  {% set advancing_ratio = market.advancing_count * 100 / market_count if market_count else none %}
   <section class="panel" aria-labelledby="market-actuals-title">
     <h2 id="market-actuals-title">市場實況</h2>
     <dl class="report-meta">
@@ -30,20 +32,33 @@
       <div><dt>站上 MA20</dt><dd>{{ '%.1f%%'|format(market.ma20_breadth_pct) if market.ma20_breadth_pct is not none else '資料不足' }}</dd></div>
       <div><dt>20 日已實現波動</dt><dd>{{ '%.1f%%'|format(market.realized_volatility_20d_pct) if market.realized_volatility_20d_pct is not none else '資料不足' }}</dd></div>
     </dl>
+    <div class="report-evidence-bars" aria-label="市場視覺摘要">
+      <div><span>上漲家數占比</span><progress value="{{ advancing_ratio or 0 }}" max="100">{{ advancing_ratio or 0 }}</progress><strong>{{ '%.1f%%'|format(advancing_ratio) if advancing_ratio is not none else '—' }}</strong></div>
+      <div><span>站上 MA20</span><progress value="{{ market.ma20_breadth_pct or 0 }}" max="100">{{ market.ma20_breadth_pct or 0 }}</progress><strong>{{ '%.1f%%'|format(market.ma20_breadth_pct) if market.ma20_breadth_pct is not none else '—' }}</strong></div>
+      <div><span>20 日波動</span><progress value="{{ market.realized_volatility_20d_pct or 0 }}" max="50">{{ market.realized_volatility_20d_pct or 0 }}</progress><strong>{{ '%.1f%%'|format(market.realized_volatility_20d_pct) if market.realized_volatility_20d_pct is not none else '—' }}</strong></div>
+    </div>
   </section>
 
   <section class="panel" aria-labelledby="industry-report-title">
     <h2 id="industry-report-title">產業觀察</h2>
     <div class="industry-detail-list">
       {% for industry in content.industry_observations[:12] %}
-        <article class="industry-detail"><header><div><h3>{{ industry.name }}</h3><p>{{ industry.available_count }}／{{ industry.component_count }} 檔可用</p></div><strong class="return {{ 'up' if industry.relative_return_5d_pct is not none and industry.relative_return_5d_pct >= 0 else 'down' }}">{{ '%+.2f%%'|format(industry.relative_return_5d_pct) if industry.relative_return_5d_pct is not none else '資料不足' }}</strong></header></article>
+        <article class="industry-detail"><header><div><h3>{{ industry.name }}</h3><p>{{ industry.available_count }}／{{ industry.component_count }} 檔可用</p></div><strong class="return {{ 'up' if industry.relative_return_5d_pct is not none and industry.relative_return_5d_pct >= 0 else 'down' }}">{{ '%+.2f%%'|format(industry.relative_return_5d_pct) if industry.relative_return_5d_pct is not none else '資料不足' }}</strong></header>{% if industry.relative_return_5d_pct is not none %}<progress class="industry-strength-bar {{ 'negative' if industry.relative_return_5d_pct < 0 else '' }}" value="{{ industry.relative_return_5d_pct|abs }}" max="10">{{ industry.relative_return_5d_pct|abs }}</progress>{% endif %}</article>
       {% else %}<div class="empty-state">產業觀察資料不足。</div>{% endfor %}
     </div>
   </section>
 
+  {% set severity_labels = {'high':'極端','medium':'顯著','low':'注意'} %}
+  {% set unit_labels = {'pct':'%','ratio':'倍','index':'','price':'','flag':''} %}
+  {% set report_groups = namespace(up=[], down=[], volume=[], institution=[], technical=[], data=[]) %}
+  {% for item in content.stock_events[:30] %}{% if item.event_type == 'price_move' and item.metric_value > 0 %}{% set report_groups.up = report_groups.up + [item] %}{% elif item.event_type == 'price_move' %}{% set report_groups.down = report_groups.down + [item] %}{% elif item.event_type in ('volume_surge','volume_dry_up') %}{% set report_groups.volume = report_groups.volume + [item] %}{% elif item.event_type == 'institution_flow' %}{% set report_groups.institution = report_groups.institution + [item] %}{% elif item.event_type in ('rsi_overbought','rsi_oversold','new_high_20d','new_low_20d') %}{% set report_groups.technical = report_groups.technical + [item] %}{% elif item.event_type == 'data_warning' %}{% set report_groups.data = report_groups.data + [item] %}{% endif %}{% endfor %}
   <section class="panel" aria-labelledby="event-report-title">
     <h2 id="event-report-title">個股異常事件</h2>
-    <div class="mops-list">{% for item in content.stock_events[:30] %}<a href="{{ url_for('stock_page', code=item.symbol) }}"><strong>{{ item.name }}（{{ item.symbol }}）</strong><span>{{ item.observation }}</span><small>{{ item.as_of }}｜{{ item.metric_value }} {{ item.unit }}</small></a>{% else %}<div class="empty-state">目前沒有通過條件的異常事件。</div>{% endfor %}</div>
+    <p class="muted">漲跌、量能、法人、技術、官方狀態與資料警示分開呈現；事件條件不代表因果關係。</p>
+    <div class="report-event-columns">
+      {% for title, items in [('異常上漲', report_groups.up), ('異常下跌', report_groups.down), ('量能異常', report_groups.volume), ('法人動向', report_groups.institution), ('技術面', report_groups.technical), ('資料警示', report_groups.data)] %}<section><h3>{{ title }}</h3><div class="mops-list">{% for item in items %}<a href="{{ url_for('stock_page', code=item.symbol) }}"><strong>{{ item.name }}（{{ item.symbol }}）</strong><span>{{ item.observation }}</span><b class="event-severity">{{ severity_labels.get(item.severity, '注意') }}</b><small>{{ item.as_of }}｜{{ item.metric_value }}{{ unit_labels.get(item.unit, item.unit or '') }}</small></a>{% else %}<div class="empty-state">目前沒有{{ title }}事件。</div>{% endfor %}</div></section>{% endfor %}
+      <section><h3>官方事件</h3><div class="mops-list">{% for item in content.trading_status_observations[:100] %}<a href="{{ url_for('stock_page', code=item.symbol) }}"><strong>{{ item.name }}（{{ item.symbol }}）</strong><span>{{ item.label }}</span><b class="event-severity">官方</b><small>驗證日 {{ item.observation_as_of }}</small></a>{% else %}<div class="empty-state">目前沒有官方事件。</div>{% endfor %}</div></section>
+    </div>
   </section>
 
   <section class="panel" aria-labelledby="status-report-title">

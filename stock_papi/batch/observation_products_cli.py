@@ -31,7 +31,7 @@ def _resolve_validation_date(args, today):
     return validation_date
 
 
-def build(args, *, today=None):
+def build(args, *, today=None, load_market_index=None):
     from reporting.cli import _load_industry_map
     from reporting.config import ReportConfig
     from reporting.observation_v2 import build_post_close_observation_metadata
@@ -51,10 +51,16 @@ def build(args, *, today=None):
         config=ReportConfig(root=args.root, market="TW"),
     )
     capability = PredictionCapabilityState.from_environment()
+    market_index = None
+    if load_market_index is not None:
+        market_index = load_market_index(source.manifest.market_as_of)
+        if market_index is None:
+            raise ValueError("verified TAIEX actuals are unavailable")
     dashboard = build_observation_dashboard(
         source,
         _load_industry_map(args.root),
         capability,
+        market_index=market_index,
         generated_at=datetime.datetime.fromisoformat(
             source.manifest.generated_at.replace("Z", "+00:00")
         ),
@@ -96,6 +102,7 @@ def main(argv=None, *, today=None):
     )
     create.add_argument("--source-manifest", required=True)
     create.add_argument("--source-manifest-sha256", required=True)
+    create.add_argument("--include-market-index", action="store_true")
     create.add_argument(
         "--calendar-artifact", type=Path, action="append", required=True
     )
@@ -107,7 +114,17 @@ def main(argv=None, *, today=None):
     args = parser.parse_args(argv)
     if args.command == "build":
         validation_date = _resolve_validation_date(args, today)
-        result = build(args, today=validation_date)
+        load_market_index = None
+        if args.include_market_index:
+            import requests
+            from stock_papi.services.market_index import fetch_twse_index_snapshot
+
+            load_market_index = lambda target: fetch_twse_index_snapshot(
+                target, http_get=requests.get
+            )
+        result = build(
+            args, today=validation_date, load_market_index=load_market_index
+        )
     else:
         from stock_papi.batch.observation_products import (
             promote_observation_candidate,

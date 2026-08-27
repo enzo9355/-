@@ -4,8 +4,6 @@ import datetime
 import json
 import math
 
-from stock_papi.services.forecast import build_five_session_forecast
-
 from stock_papi.integrations.market_data.tw_trading_status import (
     validate_status_evidence,
 )
@@ -37,89 +35,6 @@ def _sum(rows, field):
     values = [_number(row.get(field)) for row in rows]
     values = [value for value in values if value is not None]
     return sum(values) if values else None
-
-
-def _published_prediction_display(snapshot, *, as_of, close):
-    """Validate an explicit display artifact; never infer it from raw model columns."""
-    candidate = snapshot.get("prediction_display")
-    if not isinstance(candidate, dict) or candidate.get("status") != "published":
-        return None
-    if _date_text(candidate.get("as_of")) != as_of:
-        return None
-    horizon = candidate.get("horizon_sessions")
-    direction = candidate.get("direction")
-    points = candidate.get("points")
-    probability = _number(candidate.get("probability_up_pct"))
-    target_price = _number(candidate.get("target_price"))
-    expected_return = _number(candidate.get("expected_return_pct"))
-    model_version = candidate.get("model_version")
-    validation = candidate.get("validation")
-    if (
-        type(horizon) is not int
-        or not 1 <= horizon <= 20
-        or direction not in {"up", "neutral", "down"}
-        or not isinstance(points, list)
-        or not 2 <= len(points) <= 21
-        or probability is None
-        or not 0 <= probability <= 100
-        or target_price is None
-        or expected_return is None
-        or not isinstance(model_version, str)
-        or not model_version
-        or not isinstance(validation, dict)
-    ):
-        return None
-    oos_samples = validation.get("oos_samples")
-    direction_accuracy = _number(validation.get("direction_accuracy_pct"))
-    brier = _number(validation.get("brier"))
-    price_mae = _number(validation.get("price_mae_pct"))
-    if (
-        type(oos_samples) is not int
-        or oos_samples < 30
-        or direction_accuracy is None
-        or not 0 <= direction_accuracy <= 100
-        or brier is None
-        or price_mae is None
-    ):
-        return None
-    normalized = []
-    previous_date = None
-    for point in points:
-        if not isinstance(point, dict):
-            return None
-        date_text = _date_text(point.get("time"))
-        value = _number(point.get("value"))
-        if date_text is None or value is None or value <= 0:
-            return None
-        if previous_date is not None and date_text <= previous_date:
-            return None
-        normalized.append({"time": date_text, "value": value})
-        previous_date = date_text
-    if normalized[0]["time"] != as_of or not math.isclose(
-        normalized[0]["value"], close, rel_tol=1e-9, abs_tol=1e-6
-    ):
-        return None
-    direction_label = {"up": "偏多", "neutral": "中性", "down": "偏空"}[direction]
-    return {
-        "status": "published",
-        "as_of": as_of,
-        "horizon_sessions": horizon,
-        "direction": direction,
-        "label": f"AI {horizon} 日{direction_label}情境",
-        "probability_up_pct": probability,
-        "target_price": target_price,
-        "expected_return_pct": expected_return,
-        "model_version": model_version,
-        "validation": {
-            "oos_samples": oos_samples,
-            "direction_accuracy_pct": direction_accuracy,
-            "brier": brier,
-            "price_mae_pct": price_mae,
-        },
-        "line": json.dumps(
-            normalized, ensure_ascii=False, separators=(",", ":"), allow_nan=False
-        ),
-    }
 
 
 def _risk_events(rows):
@@ -305,15 +220,6 @@ def build_stock_observation(snapshot, *, get_stock_name=None):
     change_pct = (
         change / previous_close * 100 if change is not None and previous_close else None
     )
-    prediction_display = _published_prediction_display(
-        snapshot, as_of=as_of, close=close
-    )
-    if prediction_display is None:
-        generated = build_five_session_forecast(rows, market=snapshot["market"])
-        if generated is not None:
-            prediction_display = _published_prediction_display(
-                {"prediction_display": generated}, as_of=as_of, close=close
-            )
     result = {
         "code": str(snapshot.get("symbol") or ""),
         "name": _observation_name(snapshot, get_stock_name),
@@ -352,6 +258,7 @@ def build_stock_observation(snapshot, *, get_stock_name=None):
         "candles": json.dumps(
             candles, ensure_ascii=False, separators=(",", ":"), allow_nan=False
         ),
+        "recent_candles": candles[-5:],
         "ma20_line": json.dumps(
             ma20_line,
             ensure_ascii=False,
@@ -360,6 +267,4 @@ def build_stock_observation(snapshot, *, get_stock_name=None):
         ),
         "news": [],
     }
-    if prediction_display is not None:
-        result["prediction_display"] = prediction_display
     return result

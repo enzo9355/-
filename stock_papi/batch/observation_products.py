@@ -107,6 +107,64 @@ def validate_trading_status_observations(value, observation_as_of):
     return normalized
 
 
+def _validated_market_index(value, observation_as_of):
+    allowed = {
+        "symbol", "name", "source", "as_of", "price", "change", "change_pct",
+        "open", "high", "low", "candles", "ma20", "returns",
+    }
+    if not isinstance(value, dict) or set(value) != allowed:
+        raise ValueError("market index actuals are invalid")
+    if (
+        value.get("symbol") != "TAIEX"
+        or value.get("name") != "加權指數"
+        or value.get("source") != "臺灣證券交易所"
+        or value.get("as_of") != observation_as_of
+    ):
+        raise ValueError("market index identity is invalid")
+    numbers = [value.get(key) for key in ("price", "change", "change_pct", "open", "high", "low")]
+    if any(_number(item) is None for item in numbers) or value["price"] <= 0:
+        raise ValueError("market index quote is invalid")
+    if value["high"] < max(value["open"], value["price"]) or value["low"] > min(value["open"], value["price"]):
+        raise ValueError("market index OHLC is invalid")
+    candles = value.get("candles")
+    if not isinstance(candles, list) or not 2 <= len(candles) <= 260:
+        raise ValueError("market index candles are invalid")
+    previous = None
+    for candle in candles:
+        if not isinstance(candle, dict) or set(candle) != {"time", "open", "high", "low", "close"}:
+            raise ValueError("market index candle schema is invalid")
+        try:
+            date = datetime.date.fromisoformat(str(candle["time"]))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("market index candle date is invalid") from exc
+        values = [_number(candle.get(key)) for key in ("open", "high", "low", "close")]
+        if any(item is None or item <= 0 for item in values) or (previous is not None and date <= previous):
+            raise ValueError("market index candle value is invalid")
+        if candle["high"] < max(candle["open"], candle["close"]) or candle["low"] > min(candle["open"], candle["close"]):
+            raise ValueError("market index candle OHLC is invalid")
+        previous = date
+    if candles[-1]["time"] != observation_as_of or not math.isclose(candles[-1]["close"], value["price"]):
+        raise ValueError("market index latest candle is invalid")
+    if not isinstance(value.get("ma20"), list) or not isinstance(value.get("returns"), dict):
+        raise ValueError("market index indicators are invalid")
+    previous = None
+    for point in value["ma20"]:
+        if not isinstance(point, dict) or set(point) != {"time", "value"}:
+            raise ValueError("market index MA20 is invalid")
+        try:
+            date = datetime.date.fromisoformat(str(point["time"]))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("market index MA20 is invalid") from exc
+        if _number(point.get("value")) is None or point["value"] <= 0 or (previous is not None and date <= previous):
+            raise ValueError("market index MA20 is invalid")
+        previous = date
+    if set(value["returns"]) != {"1d", "5d", "20d", "60d"} or any(
+        item is not None and _number(item) is None for item in value["returns"].values()
+    ):
+        raise ValueError("market index returns are invalid")
+    return value
+
+
 def _mean(values):
     values = [value for value in values if value is not None]
     return statistics.fmean(values) if values else None
@@ -786,6 +844,8 @@ def validate_observation_dashboard(document):
         or capability.get("performance_endorsement_allowed") is not False
     ):
         raise ValueError("observation dashboard capability is invalid")
+    if "market_index" in document:
+        _validated_market_index(document["market_index"], document["observation_as_of"])
     statuses = validate_trading_status_observations(
         document.get("trading_status_observations"),
         document["observation_as_of"],
@@ -839,6 +899,7 @@ def build_observation_dashboard(
     industry_map,
     prediction_capability,
     *,
+    market_index=None,
     generated_at=None,
     today=None,
 ):
@@ -952,6 +1013,10 @@ def build_observation_dashboard(
             "prediction_separation": "PASS",
         },
     }
+    if market_index is not None:
+        document["market_index"] = _validated_market_index(
+            market_index, document["observation_as_of"]
+        )
     return validate_observation_dashboard(document)
 
 

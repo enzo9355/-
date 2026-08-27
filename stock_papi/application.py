@@ -68,7 +68,6 @@ from stock_papi.shared.logging import (
     safe_exception_text,
 )
 from stock_papi.services.observation_view import build_stock_observation
-from stock_papi.services.market_index import fetch_twse_index_snapshot
 from stock_papi.integrations.line.flex import (
     _alert_condition_text,
     _alert_management_card,
@@ -1550,12 +1549,6 @@ def route_dependencies():
         ),
         "dashboard_sector_cards": lambda: dashboard_sector_cards(),
         "dashboard_snapshot": lambda: _published_dashboard_snapshot(),
-        "market_index_snapshot": lambda target_date: (
-            fetch_twse_index_snapshot(target_date, http_get=requests.get)
-            if os.environ.get("K_SERVICE")
-            or os.environ.get("ABSORB_ENABLE_LIVE_TWSE_INDEX") == "1"
-            else None
-        ),
         "us_securities_observation": lambda: _published_us_securities_observation(),
         "prediction_capability": prediction_capability,
         "cached_opportunities": lambda: cached_opportunities(),

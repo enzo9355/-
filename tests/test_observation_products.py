@@ -9,7 +9,10 @@ from reporting.schemas import (
     StockSnapshot,
 )
 from stock_papi.config.capabilities import PredictionCapabilityState
-from stock_papi.batch.observation_products import build_observation_dashboard
+from stock_papi.batch.observation_products import (
+    build_observation_dashboard,
+    validate_observation_dashboard,
+)
 from tests.report_fixtures import warmup_stock_document
 from stock_papi.integrations.market_data.tw_trading_status import (
     evidence_sha256,
@@ -326,6 +329,54 @@ class ObservationProductsTests(unittest.TestCase):
         self.assertEqual(
             set(_walk_keys(document)).intersection(FORBIDDEN_KEYS), set()
         )
+
+    def test_verified_taiex_actuals_can_be_published_without_prediction_fields(self):
+        market_index = {
+            "symbol": "TAIEX",
+            "name": "加權指數",
+            "source": "臺灣證券交易所",
+            "as_of": "2026-07-16",
+            "price": 23150.25,
+            "change": 188.4,
+            "change_pct": 0.82,
+            "open": 22982.1,
+            "high": 23210.8,
+            "low": 22940.6,
+            "candles": [
+                {"time": "2026-07-15", "open": 22800.0, "high": 23010.0, "low": 22760.0, "close": 22961.85},
+                {"time": "2026-07-16", "open": 22982.1, "high": 23210.8, "low": 22940.6, "close": 23150.25},
+            ],
+            "ma20": [],
+            "returns": {"1d": 0.82, "5d": 1.4, "20d": 2.1, "60d": None},
+        }
+
+        document = build_observation_dashboard(
+            _source(copy.deepcopy(self.stocks)),
+            self.industry_map,
+            _capability(),
+            market_index=market_index,
+            generated_at=self.generated_at,
+            today=datetime.date(2026, 7, 17),
+        )
+
+        self.assertEqual(document["market_index"], market_index)
+        self.assertNotIn("prediction_display", document["market_index"])
+
+        malformed = copy.deepcopy(document)
+        malformed["market_index"] = "not-an-index"
+        with self.assertRaisesRegex(ValueError, "market index"):
+            validate_observation_dashboard(malformed)
+
+        market_index["prediction_display"] = {"probability": 60}
+        with self.assertRaisesRegex(ValueError, "market index"):
+            build_observation_dashboard(
+                _source(copy.deepcopy(self.stocks)),
+                self.industry_map,
+                _capability(),
+                market_index=market_index,
+                generated_at=self.generated_at,
+                today=datetime.date(2026, 7, 17),
+            )
 
     def test_industry_display_order_uses_actual_relative_return(self):
         document = self.build()

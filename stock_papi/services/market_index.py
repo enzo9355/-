@@ -6,9 +6,6 @@ import datetime
 import math
 import time
 
-from stock_papi.services.forecast import build_five_session_forecast
-
-
 TWSE_INDEX_URL = "https://www.twse.com.tw/indicesReport/MI_5MINS_HIST"
 TWSE_INDEX_FIELDS = ["日期", "開盤指數", "最高指數", "最低指數", "收盤指數"]
 MARKET_INDEX_CACHE = {}
@@ -140,7 +137,6 @@ def fetch_twse_index_snapshot(
         or len({item["time"] for item in candles}) != len(candles)
     ):
         return None
-    prediction_display = build_five_session_forecast(candles, market="TW")
     candles = candles[-90:]
     ma20 = []
     closes = [item["close"] for item in candles]
@@ -174,7 +170,5 @@ def fetch_twse_index_snapshot(
             "60d": _return_pct(candles, 60),
         },
     }
-    if prediction_display is not None:
-        result["prediction_display"] = prediction_display
     cache[key] = (result, timestamp)
     return result

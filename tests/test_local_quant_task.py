@@ -142,7 +142,8 @@ class LocalQuantTaskTests(unittest.TestCase):
 
                 self.assertNotEqual(result.returncode, 0)
                 self.assertFalse(call_log.exists(), result.stdout + result.stderr)
-                self.assertIn(expected_error, result.stdout + result.stderr)
+                output = (result.stdout + result.stderr).replace("\r", "").replace("\n", "")
+                self.assertIn(expected_error, output)
 
     def test_uploader_validates_v3_partition_and_status_hashes_before_copy(self):
         with tempfile.TemporaryDirectory() as temporary:

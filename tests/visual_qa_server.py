@@ -222,60 +222,14 @@ def visual_dashboard():
         "low": latest["low"],
         "candles": candles,
         "ma20": ma20,
-        "prediction_display": {
-            "status": "published",
-            "as_of": latest["time"],
-            "horizon_sessions": 5,
-            "direction": "up",
-            "probability_up_pct": 68.4,
-            "target_price": round(latest["close"] * 1.018, 2),
-            "expected_return_pct": 1.8,
-            "model_version": "lgbm-ohlc-5d-v1",
-            "validation": {
-                "oos_samples": 145,
-                "direction_accuracy_pct": 56.6,
-                "brier": 0.244,
-                "price_mae_pct": 2.83,
-            },
-            "points": [
-                {"time": latest["time"], "value": latest["close"]},
-                {"time": "2026-07-22", "value": round(latest["close"] * 1.018, 2)},
-            ],
-        },
+        "returns": {},
+        "source": {"provider": "TWSE", "kind": "official_index_daily"},
     }
     return snapshot
 
 
 def visual_quant_snapshot(code="2330", market="TW"):
-    snapshot = quant_snapshot(symbol=code, market=market)
-    if code == "2330":
-        as_of = snapshot["as_of"]
-        close = float(snapshot["daily"][-1]["Close"])
-        snapshot["prediction_display"] = {
-            "status": "published",
-            "as_of": as_of,
-            "horizon_sessions": 5,
-            "direction": "up",
-            "probability_up_pct": 64.7,
-            "target_price": close + 4.6,
-            "expected_return_pct": round(4.6 / close * 100, 2),
-            "model_version": "lgbm-ohlc-5d-v1",
-            "validation": {
-                "oos_samples": 105,
-                "direction_accuracy_pct": 55.2,
-                "brier": 0.251,
-                "price_mae_pct": 3.14,
-            },
-            "points": [
-                {"time": as_of, "value": close},
-                {"time": "2026-07-17", "value": close + 1.4},
-                {"time": "2026-07-20", "value": close + 2.3},
-                {"time": "2026-07-21", "value": close + 3.1},
-                {"time": "2026-07-22", "value": close + 3.8},
-                {"time": "2026-07-23", "value": close + 4.6},
-            ],
-        }
-    return snapshot
+    return quant_snapshot(symbol=code, market=market)
 
 
 REPORT_ITEM = {

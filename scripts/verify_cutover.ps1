@@ -334,6 +334,7 @@ foreach ($Key in @(
     'forecast_probability',
     'probability',
     'ranking_score',
+    'model_version',
     'backtest_version',
     'recommendation'
 )) {
@@ -966,6 +967,7 @@ function Test-ObservationDashboardPointer {
         $Dashboard.kind -ne 'absorb-observation-dashboard' -or
         $Dashboard.product_mode -ne 'observation' -or
         $Dashboard.market -ne 'TW' -or
+        $null -eq $Dashboard.market_index -or
         [string]$Dashboard.observation_as_of -ne [string]$Latest.observation_as_of
     ) {
         throw 'Observation dashboard immutable object schema mismatch'

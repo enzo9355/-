@@ -158,10 +158,17 @@ function renderDashboard(data) {
   const events = bySelector("[data-stock-events]");
   if (events) {
     const items = Array.isArray(data.stock_events) ? data.stock_events : [];
+    const official = (Array.isArray(data.trading_status_observations) ? data.trading_status_observations : []).map((item) => ({
+      ...item, observation: item.label, as_of: item.observation_as_of, severity: "high", official: true,
+    }));
     const groups = [
-      ["up", "異常上漲", items.filter((item) => item.observation === "單日漲幅異常")],
-      ["down", "異常下跌", items.filter((item) => item.observation === "單日跌幅異常")],
-      ["other", "其他事件", items.filter((item) => !["單日漲幅異常", "單日跌幅異常"].includes(item.observation))],
+      ["up", "異常上漲", items.filter((item) => item.event_type === "price_move" && Number(item.metric_value) > 0)],
+      ["down", "異常下跌", items.filter((item) => item.event_type === "price_move" && Number(item.metric_value) <= 0)],
+      ["volume", "量能異常", items.filter((item) => ["volume_surge", "volume_dry_up"].includes(item.event_type))],
+      ["institution", "法人動向", items.filter((item) => item.event_type === "institution_flow")],
+      ["technical", "技術面", items.filter((item) => ["rsi_overbought", "rsi_oversold", "new_high_20d", "new_low_20d"].includes(item.event_type))],
+      ["official", "官方事件", official],
+      ["data", "資料警示", items.filter((item) => item.event_type === "data_warning")],
     ];
     replaceContent(events, groups.map(([key, title, groupItems]) => {
       const section = element("section", `event-group event-${key}`);
@@ -169,13 +176,17 @@ function renderDashboard(data) {
       const heading = element("div", "event-group-heading");
       heading.append(element("h3", "", title), element("span", "", `${groupItems.length} 檔`));
       const list = element("div", "top-picks");
-      replaceContent(list, groupItems.length ? groupItems.map((item) =>
-        card("a", "pick-card", [
+      replaceContent(list, groupItems.length ? groupItems.map((item) => {
+        const severity = item.official ? "官方" : ({ high: "極端", medium: "顯著", low: "注意" }[item.severity] || "注意");
+        const unit = ({ pct: "%", ratio: "倍", index: "", price: "", flag: "" })[item.unit] ?? item.unit ?? "";
+        return card("a", `pick-card event-card severity-${item.severity || "low"}`, [
           ["span", "badge-stock", `${item.name} · ${item.symbol}`],
           ["strong", "", item.observation],
-          ["p", Number(item.metric_value) > 0 ? "positive" : Number(item.metric_value) < 0 ? "negative" : "", `${item.metric_value ?? "—"} ${item.unit || ""}`],
-          ["small", "", `資料日 ${item.as_of || data.observation_as_of}`],
-        ], stockHref(item.symbol))
+          ["p", Number(item.metric_value) > 0 ? "positive" : Number(item.metric_value) < 0 ? "negative" : "", `${item.metric_value ?? "—"}${unit}`],
+          ["b", "event-severity", severity],
+          ["small", "", `${item.official ? "驗證日" : "資料日"} ${item.as_of || data.observation_as_of}`],
+        ], stockHref(item.symbol));
+      }
       ) : [emptyState(`目前沒有${title}事件。`)]);
       section.append(heading, list);
       return section;
@@ -359,6 +370,21 @@ function initQuickAsk() {
       event.preventDefault();
       open(true);
     }
+  });
+}
+
+function initSidebar() {
+  const toggle = bySelector("[data-sidebar-toggle]");
+  const sidebar = bySelector("#dashboard-sidebar");
+  if (!toggle || !sidebar) return;
+  const setCollapsed = (collapsed) => {
+    document.body.classList.toggle("sidebar-collapsed", collapsed);
+    toggle.setAttribute("aria-expanded", String(!collapsed));
+    toggle.setAttribute("aria-label", collapsed ? "展開 Dashboard 導覽" : "收合 Dashboard 導覽");
+  };
+  toggle.addEventListener("click", () => setCollapsed(!document.body.classList.contains("sidebar-collapsed")));
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && document.body.classList.contains("sidebar-collapsed")) setCollapsed(false);
   });
 }
 
@@ -593,3 +619,4 @@ initMarketIndexChart();
 initReturnCalculator();
 initConversations();
 initQuickAsk();
+initSidebar();

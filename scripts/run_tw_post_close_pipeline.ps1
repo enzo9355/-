@@ -213,7 +213,8 @@ $CandidateArguments = @(
     '--root', $DataRoot,
     '--source-market-date', $SourceMarketDate,
     '--source-manifest', "quant/v1/$ManifestRelative",
-    '--source-manifest-sha256', $Latest.manifest_sha256
+    '--source-manifest-sha256', $Latest.manifest_sha256,
+    '--include-market-index'
 )
 foreach ($Path in $CalendarPaths) {
     $CandidateArguments += @('--calendar-artifact', $Path)

@@ -191,7 +191,7 @@ class ObservationPublicSurfaceTests(unittest.TestCase):
             "今日焦點",
             "產業觀察",
             "個股與 ETF",
-            "Ask ABSORB",
+            "ASK ABSORB",
             "AI 五日情境",
         ):
             self.assertIn(label, html)
@@ -210,7 +210,7 @@ class ObservationPublicSurfaceTests(unittest.TestCase):
         self.assertEqual(industries.status_code, 200)
         self.assertEqual(stocks.status_code, 200)
         for label in (
-            "產業實際強弱",
+            "產業強弱與關注清單",
             "半導體",
             "+1.85%",
             "個股異常事件",
@@ -236,7 +236,7 @@ class ObservationPublicSurfaceTests(unittest.TestCase):
             "籌碼觀察",
             "技術指標",
             "風險事件",
-            "AI 預測研究中",
+            "AI 五日預測尚未發布",
         ):
             self.assertIn(label, html)
         for text in self.forbidden:

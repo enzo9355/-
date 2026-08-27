@@ -112,3 +112,19 @@ class USPresentationRegressionTests(unittest.TestCase):
         tmpl = Path("templates/report_observation.html").read_text(encoding="utf-8")
         self.assertIn("資料基準日", tmpl)
         self.assertIn("適用交易日", tmpl)
+
+    def test_observation_report_visualizes_actual_market_and_industry_evidence(self):
+        tmpl = Path("templates/report_observation.html").read_text(encoding="utf-8")
+        self.assertIn('class="report-evidence-bars"', tmpl)
+        self.assertIn('class="industry-strength-bar', tmpl)
+        self.assertGreaterEqual(tmpl.count("<progress"), 4)
+
+    def test_observation_report_keeps_seven_event_categories_and_severity(self):
+        tmpl = Path("templates/report_observation.html").read_text(encoding="utf-8")
+        for label in (
+            "異常上漲", "異常下跌", "量能異常", "法人動向",
+            "技術面", "官方事件", "資料警示",
+        ):
+            self.assertIn(label, tmpl)
+        self.assertIn("severity_labels", tmpl)
+        self.assertNotIn("('其他事件', report_groups.other)", tmpl)

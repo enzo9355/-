@@ -60,6 +60,7 @@ foreach ($Key in @(
     'forecast_probability',
     'probability',
     'ranking_score',
+    'model_version',
     'backtest_version',
     'recommendation'
 )) {
@@ -244,6 +245,7 @@ function Invoke-ObservationSmoke {
             if (
                 $Document.product_mode -ne 'observation' -or
                 $null -eq $Document.market_observation -or
+                $null -eq $Document.market_index -or
                 $null -eq $Document.industry_observations -or
                 $null -eq $Document.data_quality
             ) {

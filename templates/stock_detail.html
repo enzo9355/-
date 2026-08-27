@@ -37,7 +37,7 @@
     </div>
   </header>
   {% else %}
-  <div class="error-banner" role="status">{% if prediction %}{{ prediction.label }}已標示於 K 線；提供機率與價格估計，不產生買賣指令。{% else %}{{ prediction_status }}。模型資料不足時不補入示意數字。{% endif %}</div>
+  <div class="error-banner" role="status">{% if prediction %}{{ prediction.label }}已標示於 K 線；提供機率與價格估計，不產生買賣指令。{% else %}AI 五日預測尚未發布；未通過驗證時不補入示意數字。{% endif %}</div>
 
   <header class="stock-hero" id="summary">
     <div class="hero-copy">
@@ -75,11 +75,14 @@
 
   <section class="panel chart-shell" id="chart">
     <div class="section-heading">
-      <div><p class="eyebrow">PRICE, MOVING AVERAGE & AI SCENARIO</p><h2>價格與均線</h2>{% if prediction %}<p class="chart-prediction-note"><span></span>{{ prediction.label }}｜以虛線延伸，不代表保證走勢</p>{% else %}<p class="chart-prediction-note unavailable">AI 預測標記尚未發布</p>{% endif %}</div>
+      <div><p class="eyebrow">PRICE, MOVING AVERAGE & AI SCENARIO</p><h2>價格與均線</h2>{% if prediction %}<p class="chart-prediction-note"><span></span>{{ prediction.label }}｜虛線只連接目前價格與第 5 交易日估計，不代表每日路徑</p>{% else %}<p class="chart-prediction-note unavailable">AI 五日預測尚未發布</p>{% endif %}</div>
       <div class="segmented glass-segmented" aria-label="圖表顯示期間"><button type="button" data-chart-range="30" aria-pressed="false">1月</button><button type="button" class="active" data-chart-range="90" aria-pressed="true">3月</button><button type="button" data-chart-range="260" aria-pressed="false">1年</button></div>
     </div>
     {% if prediction %}<div class="stock-forecast-strip" aria-label="五日 AI 預測摘要"><article><span>五日上漲機率</span><strong>{{ '%.1f%%'|format(prediction.probability_up_pct) }}</strong></article><article><span>第 5 個交易日預測價</span><strong>{{ '{:,.2f}'.format(prediction.target_price) }}</strong></article><article><span>預測變動</span><strong class="{{ 'positive' if prediction.expected_return_pct > 0 else 'negative' if prediction.expected_return_pct < 0 else '' }}">{{ '%+.2f%%'|format(prediction.expected_return_pct) }}</strong></article><article><span>樣本外驗證</span><strong>方向準確率 {{ '%.1f%%'|format(prediction.validation.direction_accuracy_pct) }}</strong><small>{{ prediction.validation.oos_samples }} 筆｜價格 MAE {{ '%.2f%%'|format(prediction.validation.price_mae_pct) }}</small></article></div>{% endif %}
-    <div id="stock-chart" class="stock-chart" aria-label="{{ d.name }}互動式價格圖"></div>
+    <div id="stock-chart" class="stock-chart" role="img" aria-label="{{ d.name }}互動式價格圖" aria-describedby="stock-chart-table"></div>
+    <div id="stock-chart-table" class="sr-only">
+      <table><caption>個股最近五個交易日 OHLC</caption><thead><tr><th>日期</th><th>開盤</th><th>最高</th><th>最低</th><th>收盤</th></tr></thead><tbody>{% for row in d.get('recent_candles', []) %}<tr><td>{{ row.time }}</td><td>{{ row.open }}</td><td>{{ row.high }}</td><td>{{ row.low }}</td><td>{{ row.close }}</td></tr>{% endfor %}</tbody></table>
+    </div>
   </section>
 
   <div class="analysis-grid">
@@ -123,7 +126,7 @@
     </div>
   </section>
 
-  {% if prediction %}<script id="stock-chart-data" type="application/json">{{ {"candles": candles, "ma20": ma20_line, "prediction": prediction.line}|tojson }}</script>{% else %}<script id="stock-chart-data" type="application/json">{{ {"candles": candles, "ma20": ma20_line}|tojson }}</script>{% endif %}
+  <script id="stock-chart-data" type="application/json">{{ ({"candles": candles, "ma20": ma20_line, "prediction": prediction.line} if prediction else {"candles": candles, "ma20": ma20_line})|tojson }}</script>
   {% endif %}
 </div>
 {% endblock %}

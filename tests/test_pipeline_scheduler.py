@@ -183,6 +183,7 @@ foreach ($definition in @($ast.FindAll({{ param($node) $node -is [Management.Aut
         self.assertIn("$ExplicitTargetDate = $PSBoundParameters.ContainsKey('TargetDate')", post_close)
         self.assertIn("if ($ExplicitTargetDate)", post_close)
         self.assertIn("'--source-validation-date'", post_close)
+        self.assertIn("'--include-market-index'", post_close)
         self.assertIn(
             "$HistoricalTargetDate = $ParsedTargetDate.Date -lt [DateTime]::Today",
             post_close,
