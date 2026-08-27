@@ -37,12 +37,19 @@ def _training_frame(frame, add_prediction_target):
     return training
 
 
-def _fit_latest(frame, training, classifier):
+def _fit_latest(frame, training, classifier, regressor):
     model = classifier(**MODEL_SETTINGS)
     model.fit(training[MODEL_FEATURES], training["T"].astype(int))
     probability = float(
         model.predict_proba(frame.iloc[[-1]][MODEL_FEATURES])[0, 1] * 100
     )
+    price_model = regressor(**MODEL_SETTINGS)
+    price_model.fit(training[MODEL_FEATURES], training["FUTURE_RET_5"])
+    predicted_return = float(
+        price_model.predict(frame.iloc[[-1]][MODEL_FEATURES])[0]
+    )
+    current_price = float(frame.iloc[-1]["Close"])
+    predicted_price = current_price * (1.0 + predicted_return)
     importances = model.feature_importances_
     total_importance = max(float(importances.sum()), 1.0)
     top_features = [
@@ -51,23 +58,33 @@ def _fit_latest(frame, training, classifier):
             zip(MODEL_FEATURES, importances), key=lambda item: item[1], reverse=True
         )[:3]
     ]
-    return probability, top_features
+    return probability, predicted_return, predicted_price, top_features
 
 
 def run_latest_inference(frame, *, add_prediction_target, pd, np, logger):
     del pd
     try:
-        from lightgbm import LGBMClassifier
+        from lightgbm import LGBMClassifier, LGBMRegressor
 
         training = _training_frame(frame, add_prediction_target)
         if training is None:
             return None
-        probability, top_features = _fit_latest(frame, training, LGBMClassifier)
+        probability, predicted_return, predicted_price, top_features = _fit_latest(
+            frame, training, LGBMClassifier, LGBMRegressor
+        )
+        if not all(map(np.isfinite, (probability, predicted_return, predicted_price))):
+            return None
         frame["AI_P"] = np.nan
+        frame["AI_PRED_RET_5"] = np.nan
+        frame["AI_PRED_PRICE_5"] = np.nan
         frame.loc[frame.index[-1], "AI_P"] = probability
+        frame.loc[frame.index[-1], "AI_PRED_RET_5"] = predicted_return
+        frame.loc[frame.index[-1], "AI_PRED_PRICE_5"] = predicted_price
         return {
             "model_version": MODEL_VERSION,
             "probability": probability,
+            "predicted_return_5d": predicted_return,
+            "predicted_price_5d": predicted_price,
             "top_features": top_features,
             "training_observations": len(training),
         }
@@ -81,12 +98,13 @@ def run_ai_engine(
     score_oos_predictions, pd, np, logger, include_oos=False,
 ):
     try:
-        from lightgbm import LGBMClassifier
+        from lightgbm import LGBMClassifier, LGBMRegressor
 
         training = _training_frame(frame, add_prediction_target)
         if training is None:
             return None
         oos_prob = pd.Series(np.nan, index=training.index, dtype=float)
+        oos_return = pd.Series(np.nan, index=training.index, dtype=float)
         oos_fold = pd.Series(-1, index=training.index, dtype=int)
         for fold_index, (train_index, test_index) in enumerate(
             build_time_splits(len(training))
@@ -99,26 +117,59 @@ def run_ai_engine(
             oos_prob.iloc[test_index] = model.predict_proba(
                 training.iloc[test_index][MODEL_FEATURES]
             )[:, 1]
+            price_model = LGBMRegressor(**MODEL_SETTINGS)
+            price_model.fit(fold[MODEL_FEATURES], fold["FUTURE_RET_5"])
+            oos_return.iloc[test_index] = price_model.predict(
+                training.iloc[test_index][MODEL_FEATURES]
+            )
             oos_fold.iloc[test_index] = fold_index
-        valid = oos_prob.notna()
+        valid = oos_prob.notna() & oos_return.notna()
         if valid.sum() < 30:
             return None
         metrics = score_oos_predictions(
             training.loc[valid, "FUTURE_RET_5"], oos_prob.loc[valid]
         )
-        latest_probability, top_features = _fit_latest(
-            frame, training, LGBMClassifier
+        latest_probability, latest_return, latest_price, top_features = _fit_latest(
+            frame, training, LGBMClassifier, LGBMRegressor
         )
+        actual_return = training.loc[valid, "FUTURE_RET_5"].astype(float)
+        errors = oos_return.loc[valid] - actual_return
+        naive_mae = float(actual_return.abs().mean())
+        price_metrics = {
+            "sample_count": int(valid.sum()),
+            "mae": float(errors.abs().mean()),
+            "rmse": float(np.sqrt(np.mean(np.square(errors)))),
+            "naive_mae": naive_mae,
+            "mae_ratio": (
+                float(errors.abs().mean() / naive_mae) if naive_mae > 0 else None
+            ),
+        }
+        if not all(
+            np.isfinite(value)
+            for value in price_metrics.values()
+            if value is not None
+        ):
+            return None
         frame["AI_P"] = np.nan
+        frame["AI_PRED_RET_5"] = np.nan
+        frame["AI_PRED_PRICE_5"] = np.nan
         frame.loc[oos_prob.loc[valid].index, "AI_P"] = oos_prob.loc[valid] * 100
         frame.loc[frame.index[-1], "AI_P"] = latest_probability
+        frame.loc[oos_return.loc[valid].index, "AI_PRED_RET_5"] = oos_return.loc[valid]
+        frame.loc[frame.index[-1], "AI_PRED_RET_5"] = latest_return
+        frame.loc[oos_return.loc[valid].index, "AI_PRED_PRICE_5"] = (
+            training.loc[valid, "Close"] * (1.0 + oos_return.loc[valid])
+        )
+        frame.loc[frame.index[-1], "AI_PRED_PRICE_5"] = latest_price
         metrics["top_features"] = top_features
+        metrics["price_metrics"] = price_metrics
         if include_oos:
             # 僅供 immutable full-backtest artifact 使用；預設 daily 回傳不變。
             metrics["oos_predictions"] = [
                 {
                     "source_market_date": pd.Timestamp(index).date().isoformat(),
                     "probability": float(oos_prob.loc[index]),
+                    "predicted_return": float(oos_return.loc[index]),
                     "future_return": float(training.loc[index, "FUTURE_RET_5"]),
                     "direction": int(training.loc[index, "T"]),
                     "fold_index": int(oos_fold.loc[index]),

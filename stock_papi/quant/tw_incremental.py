@@ -39,6 +39,8 @@ _RECONCILIATION_HISTORY_FIELDS = frozenset({
 RECOVERY_DERIVED_FIELDS: frozenset[str] = frozenset((
     *CALCULATED_COLUMNS,
     "AI_P",
+    "AI_PRED_RET_5",
+    "AI_PRED_PRICE_5",
     "FUTURE_RET_5",
     "T",
 ))
