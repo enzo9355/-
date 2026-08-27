@@ -232,6 +232,36 @@ def visual_quant_snapshot(code="2330", market="TW"):
     return quant_snapshot(symbol=code, market=market)
 
 
+def visual_prediction_snapshot(market):
+    if market != "TW":
+        return None
+    index = visual_dashboard()["market_index"]
+    current = index["price"]
+    predicted_return = 0.028
+    return {
+        "schema_version": 1,
+        "kind": "absorb-five-session-predictions",
+        "market": "TW",
+        "as_of": index["as_of"],
+        "model_version": "lgbm-5d-v1",
+        "backtest_sha256": "b" * 64,
+        "entities": {
+            "TAIEX": {
+                "symbol": "TAIEX",
+                "entity_type": "market_index",
+                "as_of": index["as_of"],
+                "target_session": "2026-07-22",
+                "current_price": current,
+                "up_probability": 0.64,
+                "predicted_return_5d": predicted_return,
+                "predicted_price": current * (1 + predicted_return),
+                "predicted_change_pct": predicted_return * 100,
+                "candles": index["candles"],
+            }
+        },
+    }
+
+
 REPORT_ITEM = {
     "report_date": "2026-07-11", "data_as_of": "2026-07-11", "coverage": 0.94,
     "market_action": "控制追價", "headline": "市場偏多，但高檔波動仍需控制部位",
@@ -276,6 +306,7 @@ REPORT_METADATA = {
 
 
 stock_app._published_dashboard_snapshot = visual_dashboard
+stock_app._published_prediction_snapshot = visual_prediction_snapshot
 stock_app.fetch_published_quant_snapshot = visual_quant_snapshot
 stock_app.find_industry_peers = lambda _code: {"category": "半導體", "codes": ["2454"]}
 stock_app.get_stock_name = lambda code: "聯發科" if code == "2454" else "台積電"
