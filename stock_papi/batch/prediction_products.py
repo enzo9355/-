@@ -73,6 +73,28 @@ def _validate_entity(market, symbol, value, as_of):
         or not math.isclose(change_pct, predicted_return * 100, rel_tol=1e-9)
     ):
         raise ValueError("prediction entity is invalid")
+    if expected_type == "market_index":
+        candles = value.get("candles")
+        if not isinstance(candles, list) or len(candles) < 2:
+            raise ValueError("prediction index candles are invalid")
+        previous = None
+        for candle in candles:
+            date = _date(candle.get("time") if isinstance(candle, dict) else None, "candle time")
+            open_value = _number(candle.get("open"), "candle open")
+            high = _number(candle.get("high"), "candle high")
+            low = _number(candle.get("low"), "candle low")
+            close = _number(candle.get("close"), "candle close")
+            if (
+                (previous is not None and date <= previous)
+                or date > as_of
+                or min(open_value, high, low, close) <= 0
+                or high < max(open_value, close, low)
+                or low > min(open_value, close, high)
+            ):
+                raise ValueError("prediction index candles are invalid")
+            previous = date
+        if previous != as_of or not math.isclose(candles[-1]["close"], current, rel_tol=1e-9):
+            raise ValueError("prediction index candles are invalid")
 
 
 def validate_prediction_product(document):
@@ -178,6 +200,19 @@ def build_prediction_product(
             "predicted_price": predicted_price,
             "predicted_change_pct": predicted_return * 100,
         }
+        if symbol in INDEX_SYMBOLS[market]:
+            candles = []
+            for row in rows[-90:]:
+                if not isinstance(row, dict):
+                    raise ValueError("prediction index candles are invalid")
+                candles.append({
+                    "time": str(row.get("Date"))[:10],
+                    "open": _number(row.get("Open"), "candle open"),
+                    "high": _number(row.get("High"), "candle high"),
+                    "low": _number(row.get("Low"), "candle low"),
+                    "close": _number(row.get("Close"), "candle close"),
+                })
+            entities[symbol]["candles"] = candles
     product = {
         "schema_version": 1,
         "kind": "absorb-five-session-predictions",

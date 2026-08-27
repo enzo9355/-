@@ -51,6 +51,25 @@ class PredictionViewTests(unittest.TestCase):
         bad["entities"]["2330"]["predicted_price"] = "104"
         self.assertIsNone(prediction_for(bad, "TW", "2330", "2026-08-26"))
 
+    def test_index_view_preserves_verified_actual_candles(self):
+        value = product()
+        value["entities"] = {
+            "TAIEX": {
+                **value["entities"]["2330"],
+                "symbol": "TAIEX",
+                "entity_type": "market_index",
+                "candles": [
+                    {"time": "2026-08-25", "open": 98.0, "high": 100.0, "low": 97.0, "close": 99.0},
+                    {"time": "2026-08-26", "open": 99.0, "high": 101.0, "low": 98.0, "close": 100.0},
+                ],
+            }
+        }
+
+        result = prediction_for(value, "TW", "TAIEX", "2026-08-26")
+
+        self.assertEqual(len(result["candles"]), 2)
+        self.assertEqual(result["candles"][-1]["close"], 100.0)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -28,6 +28,7 @@ from reporting.regression_schema import (
 from reporting.schemas import ReportMetadataV2
 from stock_papi.services.report_view import build_observation_report_view
 from stock_papi.services.market_summary import build_market_summary_view
+from stock_papi.services.prediction_view import prediction_for
 from reporting.config import MAX_CANONICAL_REPORT_BYTES
 from werkzeug.exceptions import HTTPException
 
@@ -46,6 +47,7 @@ def register_report_routes(
     load_canonical_object=None, load_regression_artifact=None,
     prediction_capability=None,
     load_data_freshness=None,
+    load_prediction_snapshot=None,
 ):
     observation_mode = (
         prediction_capability is not None
@@ -479,10 +481,28 @@ def register_report_routes(
             )
             if report.identity.market != "US":
                 raise ReportWebError("美股 Canonical Object 市場不一致")
+            summary = build_market_summary_view(report)
             context = {
-                "summary": build_market_summary_view(report),
+                "summary": summary,
                 "market": "US",
             }
+            if template_name == "us_dashboard.html" and load_prediction_snapshot:
+                predictions = []
+                try:
+                    product = load_prediction_snapshot("US")
+                    for symbol, name in (
+                        ("^GSPC", "S&P 500"),
+                        ("^IXIC", "Nasdaq Composite"),
+                        ("^DJI", "道瓊工業指數"),
+                    ):
+                        value = prediction_for(
+                            product, "US", symbol, summary["source_market_date"]
+                        )
+                        if value is not None:
+                            predictions.append({**value, "symbol": symbol, "name": name})
+                except Exception:
+                    predictions = []
+                context["index_predictions"] = predictions
             if template_name == "us_dashboard.html" and load_data_freshness:
                 try:
                     context["data_freshness"] = {

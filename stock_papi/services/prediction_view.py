@@ -52,8 +52,10 @@ def prediction_for(snapshot, market, symbol, observation_as_of):
         or not math.isclose(change, predicted_return * 100, rel_tol=1e-9)
     ):
         return None
-    return {
-        "status": "current" if as_of == observed else "previous",
+    status = "current" if as_of == observed else "previous"
+    result = {
+        "status": status,
+        "label": "AI 五日預測" if status == "current" else "前次 AI 五日預測",
         "as_of": as_of.isoformat(),
         "target_session": target.isoformat(),
         "current_price": current,
@@ -63,4 +65,11 @@ def prediction_for(snapshot, market, symbol, observation_as_of):
         "predicted_change_pct": change,
         "model_version": snapshot.get("model_version"),
         "backtest_sha256": snapshot.get("backtest_sha256"),
+        "line": [
+            {"time": as_of.isoformat(), "value": current},
+            {"time": target.isoformat(), "value": predicted_price},
+        ],
     }
+    if entity.get("entity_type") == "market_index" and isinstance(entity.get("candles"), list):
+        result["candles"] = list(entity["candles"])
+    return result

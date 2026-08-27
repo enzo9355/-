@@ -534,6 +534,36 @@ function initMarketIndexChart() {
   if (marketChart) marketChart.chart.timeScale().fitContent();
 }
 
+function initUsIndexChart() {
+  const container = bySelector("#us-index-chart");
+  const source = bySelector("#us-index-chart-data");
+  const tabs = document.querySelectorAll("[data-us-index-tab]");
+  if (!container || !source || !tabs.length || !window.LightweightCharts) return;
+  const items = JSON.parse(source.textContent);
+  let activeChart = null;
+  const select = (symbol) => {
+    const item = items.find((value) => value.symbol === symbol);
+    if (!item) return;
+    if (activeChart) activeChart.chart.remove();
+    container.replaceChildren();
+    activeChart = createPriceChart(container, {
+      candles: item.candles,
+      prediction: item.line,
+    }, { compact: true, predictionMarker: true });
+    if (activeChart) activeChart.chart.timeScale().fitContent();
+    tabs.forEach((tab) => {
+      const active = tab.dataset.usIndexTab === symbol;
+      tab.classList.toggle("active", active);
+      tab.setAttribute("aria-pressed", String(active));
+    });
+    document.querySelectorAll("[data-us-index-panel]").forEach((panel) => {
+      panel.hidden = panel.dataset.usIndexPanel !== symbol;
+    });
+  };
+  tabs.forEach((tab) => tab.addEventListener("click", () => select(tab.dataset.usIndexTab)));
+  select(tabs[0].dataset.usIndexTab);
+}
+
 document.addEventListener("click", (event) => {
   const reportRetry = event.target.closest("[data-report-retry]");
   if (reportRetry) {
@@ -616,6 +646,7 @@ loadDashboard();
 loadAccountState();
 initStockChart();
 initMarketIndexChart();
+initUsIndexChart();
 initReturnCalculator();
 initConversations();
 initQuickAsk();

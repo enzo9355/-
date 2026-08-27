@@ -42,6 +42,21 @@ def quant_manifest(market="TW", symbols=("2330", "TAIEX")):
 
 
 def snapshot(symbol, market="TW"):
+    daily = [{
+        "Date": "2026-08-26",
+        "Open": 99.0,
+        "High": 101.0,
+        "Low": 98.0,
+        "Close": 100.0,
+        "AI_P": 64.5,
+        "AI_PRED_RET_5": 0.04,
+        "AI_PRED_PRICE_5": 104.0,
+    }]
+    if symbol in {"TAIEX", "^GSPC", "^IXIC", "^DJI"}:
+        daily.insert(0, {
+            "Date": "2026-08-25", "Open": 97.0, "High": 100.0,
+            "Low": 96.0, "Close": 99.0,
+        })
     return {
         "schema_version": 2,
         "market": market,
@@ -49,13 +64,7 @@ def snapshot(symbol, market="TW"):
         "as_of": "2026-08-26",
         "model_version": "lgbm-5d-v1",
         "feature_schema_version": 1,
-        "daily": [{
-            "Date": "2026-08-26",
-            "Close": 100.0,
-            "AI_P": 64.5,
-            "AI_PRED_RET_5": 0.04,
-            "AI_PRED_PRICE_5": 104.0,
-        }],
+        "daily": daily,
     }
 
 
@@ -80,6 +89,9 @@ class PredictionProductTests(unittest.TestCase):
         self.assertEqual(product["entities"]["2330"]["up_probability"], 0.645)
         self.assertEqual(product["entities"]["2330"]["predicted_price"], 104.0)
         self.assertEqual(product["entities"]["2330"]["predicted_change_pct"], 4.0)
+        self.assertEqual(len(product["entities"]["TAIEX"]["candles"]), 2)
+        self.assertEqual(product["entities"]["TAIEX"]["candles"][-1]["close"], 100.0)
+        self.assertNotIn("candles", product["entities"]["2330"])
         self.assertIs(validate_prediction_product(product), product)
 
     def test_builder_requires_price_quality_and_rejects_unknown_index(self):

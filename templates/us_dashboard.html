@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% block title %}美股市場研究摘要｜ABSORB{% endblock %}
+{% block head %}{% if index_predictions %}<script src="https://unpkg.com/lightweight-charts@4.2.2/dist/lightweight-charts.standalone.production.js" integrity="sha384-qQnpH1Chlwm0r93GZ6NgZoEehIelWkhwbBtJMWh0P5wPqySGEt8UjETGKMF0GUdn" crossorigin="anonymous"></script>{% endif %}{% endblock %}
 {% block content %}
 {% set freshness = (data_freshness|default({}, true)).get('US', {}) %}
 {% set freshness_label = {'current':'資料最新','updating':'更新中','stale':'資料過期','unavailable':'暫時無法取得'}.get(freshness.get('status'), '暫時無法取得') %}
@@ -17,6 +18,18 @@
   <section class="freshness-status" data-freshness-status="{{ freshness.get('status', 'unavailable') }}" aria-labelledby="us-freshness-title">
     <div><h2 id="us-freshness-title">已驗證資料狀態</h2><p aria-live="polite">資料狀態：{{ freshness_label }}</p></div>
     <dl><div><dt>來源交易日</dt><dd>{{ freshness.get('source_market_date') or '尚無已驗證日期' }}</dd></div><div><dt>適用交易日</dt><dd>{{ freshness.get('applicable_trading_date') or '尚無已驗證日期' }}</dd></div></dl>
+  </section>
+  <section class="panel us-index-workspace" aria-labelledby="us-index-title">
+    <div class="section-heading"><div><p class="eyebrow">US MARKET INDEXES</p><h2 id="us-index-title">主要指數與 AI 五日情境</h2></div></div>
+    {% if index_predictions %}
+    <div class="segmented us-index-tabs" aria-label="選擇美股指數">{% for item in index_predictions %}<button type="button" data-us-index-tab="{{ item.symbol }}" aria-pressed="{{ 'true' if loop.first else 'false' }}" class="{{ 'active' if loop.first else '' }}">{{ item.name }}</button>{% endfor %}</div>
+    <div class="us-index-layout">
+      <div id="us-index-chart" class="market-index-chart" role="img" aria-label="美股主要指數實際 K 線與五日預測終點"></div>
+      <div class="us-index-forecast-list">{% for item in index_predictions %}<article data-us-index-panel="{{ item.symbol }}"{% if not loop.first %} hidden{% endif %}><span>{{ item.name }}</span><strong>{{ '{:,.2f}'.format(item.current_price) }}</strong><dl><div><dt>五日上漲機率</dt><dd>{{ '%.1f%%'|format(item.probability_pct) }}</dd></div><div><dt>第 5 個交易日預測價</dt><dd>{{ '{:,.2f}'.format(item.predicted_price) }}</dd></div><div><dt>預估漲跌幅</dt><dd class="{{ 'positive' if item.predicted_change_pct > 0 else 'negative' if item.predicted_change_pct < 0 else '' }}">{{ '%+.2f%%'|format(item.predicted_change_pct) }}</dd></div><div><dt>目標交易日</dt><dd>{{ item.target_session }}</dd></div></dl><small>{{ '正式預測' if item.status == 'current' else '前次預測｜資料日 ' ~ item.as_of }}</small></article>{% endfor %}</div>
+    </div>
+    <script id="us-index-chart-data" type="application/json">{{ index_predictions|tojson }}</script>
+    <p class="muted small">實線為已發生的指數 K 線；虛線只連接目前收盤與第 5 交易日估計，不代表中間每日路徑，也不是買賣指令。</p>
+    {% else %}<p class="empty-state">本交易日預測尚未發布；未通過正式驗證時不顯示機率或預測價。</p>{% endif %}
   </section>
   <section class="panel summary-conclusion" aria-labelledby="summary-conclusion-title">
     <h2 id="summary-conclusion-title">{{ summary.executive_summary.one_line_conclusion }}</h2>

@@ -157,6 +157,10 @@ from stock_papi.repositories.quant_snapshots import (
     fetch_quant_snapshot,
     published_quant_manifest,
 )
+from stock_papi.repositories.prediction_snapshots import (
+    PREDICTION_CACHE as _PREDICTION_CACHE,
+    load_prediction_snapshot,
+)
 from stock_papi.repositories.report_store import (
     load_report_index,
     load_report_metadata,
@@ -582,6 +586,10 @@ def _gcs_get_preview_object(object_name, max_bytes):
     return _gcs_get_allowed_object(object_name, max_bytes, "previews/")
 
 
+def _gcs_get_prediction_object(object_name, max_bytes):
+    return _gcs_get_allowed_object(object_name, max_bytes, "predictions/v1/")
+
+
 def _published_dashboard_snapshot(today=None):
     if PREVIEW_CANDIDATE_PREFIX:
         return load_preview_dashboard_snapshot(
@@ -593,6 +601,15 @@ def _published_dashboard_snapshot(today=None):
         today=today,
         load_object=_gcs_get_dashboard_object,
         cache=_DASHBOARD_CACHE,
+    )
+
+
+def _published_prediction_snapshot(market, today=None):
+    return load_prediction_snapshot(
+        market,
+        today=today,
+        load_object=_gcs_get_prediction_object,
+        cache=_PREDICTION_CACHE,
     )
 
 
@@ -1549,6 +1566,7 @@ def route_dependencies():
         ),
         "dashboard_sector_cards": lambda: dashboard_sector_cards(),
         "dashboard_snapshot": lambda: _published_dashboard_snapshot(),
+        "prediction_snapshot": lambda market: _published_prediction_snapshot(market),
         "us_securities_observation": lambda: _published_us_securities_observation(),
         "prediction_capability": prediction_capability,
         "cached_opportunities": lambda: cached_opportunities(),

@@ -24,9 +24,36 @@ from tests.test_observation_public_surfaces import (
 )
 
 
+def prediction_product(market="TW", symbol="2330", as_of="2026-07-15"):
+    return {
+        "schema_version": 1,
+        "kind": "absorb-five-session-predictions",
+        "market": market,
+        "as_of": as_of,
+        "model_version": "lgbm-5d-v1",
+        "backtest_sha256": "b" * 64,
+        "entities": {
+            symbol: {
+                "symbol": symbol,
+                "entity_type": "market_index" if symbol.startswith("^") or symbol == "TAIEX" else "security",
+                "as_of": as_of,
+                "target_session": "2026-07-22",
+                "current_price": 23150.25 if symbol == "TAIEX" else 164.0,
+                "up_probability": 0.68,
+                "predicted_return_5d": 0.0427,
+                "predicted_price": 24138.765675 if symbol == "TAIEX" else 171.0028,
+                "predicted_change_pct": 4.27,
+            }
+        },
+    }
+
+
 class WebProductTests(unittest.TestCase):
+    @patch.object(stock_app, "_published_prediction_snapshot")
     @patch.object(stock_app, "_published_dashboard_snapshot")
-    def test_dashboard_renders_verified_market_index_level_and_candles(self, load_snapshot):
+    def test_dashboard_renders_verified_market_index_level_and_candles(
+        self, load_snapshot, load_prediction
+    ):
         snapshot = observation_dashboard()
         snapshot["market_index"] = {
             "symbol": "TAIEX",
@@ -62,6 +89,7 @@ class WebProductTests(unittest.TestCase):
             "source": {"provider": "TWSE", "kind": "official_index_daily"},
         }
         load_snapshot.return_value = snapshot
+        load_prediction.return_value = prediction_product(symbol="TAIEX")
 
         html = stock_app.app.test_client().get("/dashboard").get_data(as_text=True)
 
@@ -75,7 +103,11 @@ class WebProductTests(unittest.TestCase):
             "加權指數最近五個交易日 OHLC",
             'id="market-index-chart-data"',
             '"time": "2026-07-15"',
-            "AI 五日預測尚未通過正式發布驗證",
+            "五日上漲機率",
+            "68.0%",
+            "24,138.77",
+            "+4.27%",
+            "2026-07-22",
         ):
             with self.subTest(marker=marker):
                 self.assertIn(marker, html)
@@ -866,6 +898,53 @@ class WebProductTests(unittest.TestCase):
         self.assertIn('data-market="US"', detail_html)
         self.assertIn('class="back-link" href="/us"', detail_html)
 
+    def test_us_dashboard_renders_three_index_forecasts_and_actual_charts(self):
+        summary = {
+            "source_market_date": "2026-08-26",
+            "applicable_trading_date": "2026-08-27",
+            "executive_summary": {
+                "one_line_conclusion": "美股市場摘要",
+                "largest_risk": "波動仍需觀察",
+            },
+            "key_events": [],
+            "validation": {"status": "unavailable", "reason": ""},
+            "market": {"status": "available"},
+            "industries": {"status": "available"},
+        }
+        forecasts = []
+        for symbol, name, price in (
+            ("^GSPC", "S&P 500", 6500.0),
+            ("^IXIC", "Nasdaq Composite", 22000.0),
+            ("^DJI", "道瓊工業指數", 46000.0),
+        ):
+            forecasts.append({
+                "symbol": symbol, "name": name, "status": "current",
+                "as_of": "2026-08-26", "target_session": "2026-09-02",
+                "current_price": price, "probability_pct": 61.0,
+                "predicted_price": price * 1.02, "predicted_change_pct": 2.0,
+                "line": [
+                    {"time": "2026-08-26", "value": price},
+                    {"time": "2026-09-02", "value": price * 1.02},
+                ],
+                "candles": [
+                    {"time": "2026-08-25", "open": price - 20, "high": price + 10, "low": price - 30, "close": price - 10},
+                    {"time": "2026-08-26", "open": price - 10, "high": price + 20, "low": price - 15, "close": price},
+                ],
+            })
+
+        with stock_app.app.test_request_context("/us"):
+            html = render_template(
+                "us_dashboard.html", summary=summary, market="US",
+                index_predictions=forecasts, data_freshness={},
+            )
+
+        for marker in (
+            "S&amp;P 500", "Nasdaq Composite", "道瓊工業指數",
+            "五日上漲機率", "61.0%", "2026-09-02",
+            'id="us-index-chart"', 'id="us-index-chart-data"',
+        ):
+            self.assertIn(marker, html)
+
     def test_us_stocks_disables_tw_dashboard_hydration(self):
         client = stock_app.app.test_client()
         with patch.object(
@@ -1080,6 +1159,26 @@ class WebProductTests(unittest.TestCase):
         ):
             with self.subTest(marker=marker):
                 self.assertIn(marker, html)
+
+    @patch.object(stock_app, "_published_prediction_snapshot")
+    @patch.object(stock_app, "fetch_published_quant_snapshot")
+    def test_stock_chart_renders_only_verified_prediction_product(
+        self, fetch, load_prediction
+    ):
+        fetch.return_value = quant_snapshot()
+        load_prediction.return_value = prediction_product()
+
+        response = stock_app.app.test_client().get("/stock/2330")
+        html = response.get_data(as_text=True)
+
+        self.assertEqual(response.status_code, 200)
+        for marker in (
+            "五日上漲機率", "68.0%", "171.00", "+4.27%", "2026-07-22",
+            '"time": "2026-07-22"', '"value": 171.0028',
+        ):
+            self.assertIn(marker, html)
+        self.assertNotIn("買進", html)
+        self.assertNotIn("賣出", html)
 
     def test_dashboard_destinations_live_in_sidebar_navigation(self):
         html = stock_app.app.test_client().get("/dashboard").get_data(as_text=True)
