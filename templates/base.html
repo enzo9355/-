@@ -51,6 +51,8 @@
         <a class="nav-link{{ ' active' if industries_active else '' }}" href="{{ industries_url }}"{% if industries_active %} aria-current="page"{% endif %}>產業觀察</a>
         <a class="nav-link{{ ' active' if stocks_active else '' }}" href="{{ stocks_url }}"{% if stocks_active %} aria-current="page"{% endif %}>個股與 ETF</a>
         <a class="nav-link{{ ' active' if reports_active else '' }}" href="{{ reports_url }}"{% if reports_active %} aria-current="page"{% endif %}>每日報告</a>
+        <a class="nav-link{{ ' active' if ask_active else '' }}" href="/ask"{% if ask_active %} aria-current="page"{% endif %}>ASK ABSORB</a>
+        <a class="nav-link{{ ' active' if learn_active else '' }}" href="/learn"{% if learn_active %} aria-current="page"{% endif %}>學習</a>
       </nav>
       <nav class="market-switch" data-market-switch aria-label="切換市場內容">
         <a class="{{ 'active' if not us_market_active else '' }}" href="/"{% if not us_market_active %} aria-current="true"{% endif %}>台股</a>

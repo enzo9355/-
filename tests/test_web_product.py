@@ -733,9 +733,9 @@ class WebProductTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         for label in (
-            "產業實際強弱",
+            "產業強弱與關注清單",
             "近 5 日相對大盤報酬",
-            "產業觀察",
+            "關注公司",
         ):
             self.assertIn(label, html)
         for forbidden in (
@@ -799,7 +799,7 @@ class WebProductTests(unittest.TestCase):
         self.assertIn(".market-switch a{display:grid;min-height:44px", css)
         self.assertIn(".quick-ask-backdrop[hidden]{display:none}", css)
         self.assertIn(".quick-ask-header button{display:grid;width:44px;height:44px", css)
-        self.assertIn("--command-content-max:1760px", css)
+        self.assertIn("--command-content-max:3200px", css)
         self.assertIn("--command-muted:#536575", css)
         self.assertIn(".evidence-canvas{", css)
         self.assertIn("background:var(--command-accent-surface)", css)
@@ -960,7 +960,7 @@ class WebProductTests(unittest.TestCase):
             "產業觀察",
             "市場實況",
             "個股與 ETF",
-            "Ask ABSORB",
+            "ASK ABSORB",
             "AI 五日情境",
         ):
             self.assertIn(label, html)
@@ -1066,6 +1066,77 @@ class WebProductTests(unittest.TestCase):
         ):
             with self.subTest(marker=marker):
                 self.assertIn(marker, html)
+
+    def test_dashboard_destinations_live_in_top_navigation(self):
+        html = stock_app.app.test_client().get("/dashboard").get_data(as_text=True)
+        primary_nav = html.split('<nav class="nav-list">', 1)[1].split("</nav>", 1)[0]
+
+        self.assertIn('href="/ask"', primary_nav)
+        self.assertIn(">ASK ABSORB</a>", primary_nav)
+        self.assertIn('href="/learn"', primary_nav)
+        self.assertIn(">學習</a>", primary_nav)
+        self.assertNotIn('class="dashboard-destinations"', html)
+
+    @patch.object(stock_app, "_published_dashboard_snapshot")
+    def test_industries_merge_strength_and_attention_companies(self, load_snapshot):
+        snapshot = observation_dashboard()
+        snapshot["industry_observations"][0].update(
+            {
+                "relative_return_5d_pct": 2.85,
+                "ranking_basis": "actual_momentum",
+                "attention_companies": [
+                    {
+                        "symbol": "2330",
+                        "name": "台積電",
+                        "price": 1245.0,
+                        "return_5d_pct": 8.2,
+                        "above_ma20": True,
+                        "volume_ratio": 1.8,
+                        "as_of": "2026-07-15",
+                    }
+                ],
+            }
+        )
+        load_snapshot.return_value = snapshot
+
+        html = stock_app.app.test_client().get("/industries").get_data(as_text=True)
+
+        self.assertNotIn("產業實際強弱", html)
+        self.assertEqual(html.count('data-industry-disclosure'), 1)
+        self.assertIn('class="industry-disclosure hot"', html)
+        self.assertIn("實際動能排序", html)
+        self.assertIn('href="/stock/2330"', html)
+        self.assertIn("台積電 · 2330", html)
+        self.assertIn("5 日 +8.20%", html)
+
+    @patch.object(stock_app, "_published_dashboard_snapshot")
+    def test_industries_render_verified_ai_fields_when_published(self, load_snapshot):
+        snapshot = observation_dashboard()
+        snapshot["industry_observations"][0].update(
+            {
+                "ranking_basis": "verified_ai_forecast",
+                "attention_companies": [
+                    {
+                        "symbol": "2330",
+                        "name": "台積電",
+                        "price": 1245.0,
+                        "return_5d_pct": 8.2,
+                        "above_ma20": True,
+                        "volume_ratio": 1.8,
+                        "as_of": "2026-07-15",
+                        "probability_up_pct": 68.4,
+                        "target_price": 1272.5,
+                    }
+                ],
+            }
+        )
+        load_snapshot.return_value = snapshot
+
+        html = stock_app.app.test_client().get("/industries").get_data(as_text=True)
+
+        self.assertIn("AI 五日模型排序", html)
+        self.assertIn("68.4%", html)
+        self.assertIn("第 5 日 1,272.50", html)
 
     @patch.object(
         stock_app, "_published_dashboard_snapshot", return_value=observation_dashboard()
@@ -1433,6 +1504,21 @@ class WebProductTests(unittest.TestCase):
         self.assertIn("--command-paper:#f7f6f2", css)
         self.assertIn("rgb(247 246 242 / 92%)", css)
         self.assertEqual(manifest["background_color"], "#f7f6f2")
+
+    def test_research_layout_supports_4k_and_tall_ask_workspace(self):
+        css = Path(stock_app.app.static_folder, "app.css").read_text(
+            encoding="utf-8"
+        ).replace(" ", "").replace("\n", "")
+
+        self.assertIn("--command-content-max:3200px", css)
+        self.assertIn("@media(min-width:1800px)", css)
+        self.assertIn("body{font-size:18px}", css)
+        self.assertIn(".nav-link{font-size:17px}", css)
+        self.assertIn("height:60vh", css)
+        self.assertIn(".quick-ask-log{flex:1", css)
+        self.assertIn(".industry-disclosure-list{", css)
+        self.assertIn(".industry-disclosure.hot{", css)
+        self.assertIn(".industry-disclosure.cold{", css)
 
     def test_browser_bundle_has_no_local_watchlist_storage(self):
         source = Path(stock_app.app.static_folder, "app.js").read_text(

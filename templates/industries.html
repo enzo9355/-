@@ -1,10 +1,47 @@
 {% extends "base.html" %}
 {% block title %}產業觀察｜ABSORB{% endblock %}
 {% block content %}
-<div class="page dashboard-page" data-dashboard-endpoint="/api/dashboard">
-  <header class="page-header"><div><p class="eyebrow">INDUSTRY ACTUALS</p><h1>產業觀察</h1><p class="page-intro">以實際相對報酬、廣度、量能與機構流向整理產業狀態。</p></div></header>
-  <section class="panel heatmap-panel" aria-labelledby="heatmap-title"><div class="section-heading"><div><h2 id="heatmap-title">產業實際強弱</h2></div><span class="muted small">近 5 日相對大盤報酬</span></div><div class="heatmap-grid" data-market-heatmap>{% for item in observation.heatmap or [] %}<article class="heatmap-cell {{ item.tone }}"><span>{{ item.name }}</span><strong>{{ '%+.2f%%'|format(item.metric_value_pct) }}</strong></article>{% else %}<div class="empty-state">產業熱圖資料不足。</div>{% endfor %}</div></section>
-  <section class="panel forecast-panel" aria-labelledby="industry-title"><div class="section-heading"><div><h2 id="industry-title">產業觀察清單</h2></div></div><div class="forecast-grid" data-industry-observations>{% for item in observation.industry_observations or [] %}<article class="forecast-card"><span>{{ item.name }}</span><strong>相對大盤 {{ '%+.2f%%'|format(item.relative_return_5d_pct) if item.relative_return_5d_pct is not none else '資料不足' }}</strong><small>可用 {{ item.available_count }}／{{ item.component_count }} 檔</small></article>{% else %}<div class="empty-state">產業觀察資料不足。</div>{% endfor %}</div></section>
-  <div class="error-banner" data-dashboard-error hidden>產業觀察資料暫時無法取得。</div>
+<div class="page industries-page">
+  <header class="page-header"><div><p class="eyebrow">INDUSTRY ACTUALS</p><h1>產業觀察</h1><p class="page-intro">以實際相對報酬、廣度與量能整理產業狀態，展開即可查看本次發布的關注公司。</p></div></header>
+  <section class="panel industry-observation-panel" aria-labelledby="industry-title">
+    <div class="section-heading"><div><h2 id="industry-title">產業強弱與關注清單</h2><p>近 5 日相對大盤報酬</p></div><span class="muted small">點選產業查看公司</span></div>
+    <div class="industry-disclosure-list">
+      {% for item in observation.industry_observations or [] %}
+      {% set value = item.relative_return_5d_pct %}
+      {% set tone = 'hot' if value is not none and value >= 2 else ('cold' if value is not none and value <= -2 else 'steady') %}
+      <details class="industry-disclosure {{ tone }}" data-industry-disclosure{% if loop.first %} open{% endif %}>
+        <summary>
+          <span><strong>{{ item.name }}</strong><small>可用 {{ item.available_count }}／{{ item.component_count }} 檔 · 覆蓋 {{ '%.1f%%'|format(item.coverage * 100) if item.coverage is not none else '資料不足' }}</small></span>
+          <span class="industry-disclosure-return">{{ '%+.2f%%'|format(value) if value is not none else '資料不足' }}</span>
+        </summary>
+        <div class="industry-disclosure-body">
+          <dl class="industry-metric-grid">
+            <div><dt>上漲家數</dt><dd>{{ '%.1f%%'|format(item.advancing_ratio_pct) if item.advancing_ratio_pct is not none else '—' }}</dd></div>
+            <div><dt>站上 MA20</dt><dd>{{ '%.1f%%'|format(item.ma20_breadth_pct) if item.ma20_breadth_pct is not none else '—' }}</dd></div>
+            <div><dt>量比中位數</dt><dd>{{ '%.2f'|format(item.median_volume_ratio) if item.median_volume_ratio is not none else '—' }}</dd></div>
+            <div><dt>法人淨流中位</dt><dd>{{ '%+.2f%%'|format(item.median_institution_net_ratio_pct) if item.median_institution_net_ratio_pct is not none else '—' }}</dd></div>
+          </dl>
+          <div class="industry-attention-heading"><div><h3>關注公司</h3><p>{{ 'AI 五日模型排序' if item.ranking_basis == 'verified_ai_forecast' else '實際動能排序' }}</p></div><span>最多 5 檔</span></div>
+          <div class="industry-company-grid">
+            {% for company in item.attention_companies or [] %}
+            <a class="industry-company" href="{{ url_for('stock_page', code=company.symbol) }}">
+              <span><strong>{{ company.name }} · {{ company.symbol }}</strong><small>{{ '站上 MA20' if company.above_ma20 else '低於 MA20' }} · 量比 {{ '%.2f'|format(company.volume_ratio) if company.volume_ratio is not none else '—' }}</small></span>
+              {% if company.probability_up_pct is defined and company.target_price is defined %}
+              <span><strong>{{ '%.1f%%'|format(company.probability_up_pct) }}</strong><small>第 5 日 {{ '{:,.2f}'.format(company.target_price) }}</small></span>
+              {% else %}
+              <span><strong>5 日 {{ '%+.2f%%'|format(company.return_5d_pct) }}</strong><small>收盤 {{ '{:,.2f}'.format(company.price) }}</small></span>
+              {% endif %}
+            </a>
+            {% else %}
+            <p class="empty-state">本次發布沒有足夠資料形成關注名單。</p>
+            {% endfor %}
+          </div>
+        </div>
+      </details>
+      {% else %}
+      <div class="empty-state">產業觀察資料不足。</div>
+      {% endfor %}
+    </div>
+  </section>
 </div>
 {% endblock %}

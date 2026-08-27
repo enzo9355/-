@@ -477,6 +477,39 @@ def _phase(relative_5d, relative_20d):
     return "weak"
 
 
+def _attention_companies(stocks):
+    items = []
+    for stock in stocks:
+        return_5d = _return_pct(stock, 5)
+        if return_5d is None:
+            continue
+        latest = stock.daily[-1]
+        close = _number(latest.get("Close"))
+        ma20 = _number(latest.get("MA20"))
+        volume_ratio = _number(latest.get("VOL_RATIO"))
+        items.append(
+            {
+                "symbol": stock.symbol,
+                "name": stock.name,
+                "price": _rounded(close),
+                "return_5d_pct": _rounded(return_5d),
+                "above_ma20": close is not None and ma20 is not None and close >= ma20,
+                "volume_ratio": _rounded(volume_ratio),
+                "as_of": stock.as_of.isoformat(),
+            }
+        )
+    items.sort(
+        key=lambda item: (
+            -item["return_5d_pct"],
+            not item["above_ma20"],
+            item["volume_ratio"] is None,
+            -(item["volume_ratio"] or 0),
+            item["symbol"],
+        )
+    )
+    return items[:5]
+
+
 def _industry_observations(industry_map, stock_by_symbol, market):
     observations = []
     for name, raw_symbols in industry_map.items():
@@ -547,6 +580,8 @@ def _industry_observations(industry_map, stock_by_symbol, market):
                     else statistics.median(institution_ratios) * 100
                 ),
                 "phase": _phase(relative_5d, relative_20d),
+                "ranking_basis": "actual_momentum",
+                "attention_companies": _attention_companies(stocks),
             }
         )
     observations.sort(

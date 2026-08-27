@@ -342,6 +342,55 @@ class ObservationProductsTests(unittest.TestCase):
             document["heatmap"][0]["metric_name"], "relative_return_5d_pct"
         )
 
+    def test_industry_attention_companies_are_deterministic_actual_observations(self):
+        stocks = [
+            _stock("1001", [100.0] * 60 + [100, 102, 104, 106, 108, 110], name="甲", volume_ratio=1.0),
+            _stock("1002", [100.0] * 60 + [100, 102, 104, 106, 108, 110], name="乙", volume_ratio=5.0),
+            _stock("1003", [100.0] * 60 + [100, 101, 103, 105, 107, 108], name="丙", volume_ratio=2.0),
+            _stock("1004", [100.0] * 60 + [100, 101, 103, 105, 107, 108], name="丁", volume_ratio=1.0),
+            _stock("1005", [100.0] * 60 + [100, 101, 102, 103, 104, 105], name="戊", volume_ratio=3.0),
+            _stock("1006", [100.0] * 60 + [100, 100, 100, 101, 101, 102], name="己", volume_ratio=4.0),
+        ]
+        stocks[1].daily[-1]["MA20"] = stocks[1].daily[-1]["Close"] + 1
+        industry_map = {
+            "全市場": [stock.symbol for stock in stocks],
+            "測試產業": [stock.symbol for stock in reversed(stocks)],
+            "ETF專區": [],
+        }
+
+        document = build_observation_dashboard(
+            _source(stocks),
+            industry_map,
+            _capability(),
+            generated_at=self.generated_at,
+            today=datetime.date(2026, 7, 17),
+        )
+        industry = document["industry_observations"][0]
+
+        self.assertEqual(industry["ranking_basis"], "actual_momentum")
+        self.assertEqual(
+            [item["symbol"] for item in industry["attention_companies"]],
+            ["1001", "1002", "1003", "1004", "1005"],
+        )
+        self.assertEqual(industry["attention_companies"][0]["name"], "甲")
+        self.assertEqual(industry["attention_companies"][0]["return_5d_pct"], 10.0)
+        self.assertTrue(industry["attention_companies"][0]["above_ma20"])
+        self.assertFalse(industry["attention_companies"][1]["above_ma20"])
+        for item in industry["attention_companies"]:
+            self.assertEqual(
+                set(item),
+                {
+                    "symbol",
+                    "name",
+                    "price",
+                    "return_5d_pct",
+                    "above_ma20",
+                    "volume_ratio",
+                    "as_of",
+                },
+            )
+            self.assertFalse(set(item).intersection(FORBIDDEN_KEYS))
+
     def test_rejects_sample_low_coverage_stale_and_non_finite_sources(self):
         sample = _source(copy.deepcopy(self.stocks))
         sample.stocks[0].sample_data = True
