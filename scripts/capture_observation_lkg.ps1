@@ -45,6 +45,10 @@ $Definitions = @(
         uri = "gs://$Bucket/dashboard/v1/latest-TW.json"
     },
     @{
+        name = 'predictions-latest'
+        uri = "gs://$Bucket/predictions/v1/latest-TW.json"
+    },
+    @{
         name = 'reports-v1-index'
         uri = "gs://$Bucket/reports/v1/index-TW.json"
     },
@@ -75,6 +79,10 @@ $Definitions = @(
     @{
         name = 'dashboard-latest-us'
         uri = "gs://$Bucket/dashboard/v1/latest-US.json"
+    },
+    @{
+        name = 'predictions-latest-us'
+        uri = "gs://$Bucket/predictions/v1/latest-US.json"
     },
     @{
         name = 'reports-v2-index-us'

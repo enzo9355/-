@@ -271,6 +271,8 @@ $results = @(Invoke-ObservationSmoke -BaseUrl 'https://candidate.example')
             "ABSORB_PREDICTION_MODE",
             "ABSORB_PREVIEW_CANDIDATE_PREFIX",
             "dashboard/v1/latest-TW.json",
+            "predictions/v1/latest-TW.json",
+            "predictions/v1/latest-US.json",
             "reports/v2/index-TW.json",
             "/api/dashboard",
         ):

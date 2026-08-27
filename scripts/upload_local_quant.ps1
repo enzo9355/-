@@ -46,7 +46,9 @@ $ObservationOnlyPointerAllowlist = @(
     "gs://$Bucket/reports/v2/latest-TW-pre_market.json",
     "gs://$Bucket/reports/v2/latest-US-pre_market.json",
     "gs://$Bucket/dashboard/v1/latest-TW.json",
-    "gs://$Bucket/dashboard/v1/latest-US.json"
+    "gs://$Bucket/dashboard/v1/latest-US.json",
+    "gs://$Bucket/predictions/v1/latest-TW.json",
+    "gs://$Bucket/predictions/v1/latest-US.json"
 )
 $ReceiptUpdated = $false
 $script:PublicationMutex = $null
@@ -779,6 +781,76 @@ function Publish-DashboardV1 {
     return $PublishedAny
 }
 
+function Publish-PredictionsV1 {
+    $Root = Join-Path $DataRoot 'publish\predictions\v1'
+    if (-not (Test-Path -LiteralPath $Root -PathType Container)) { return @() }
+    $Resolved = (Resolve-Path -LiteralPath $Root).Path
+    if (((Get-Item -LiteralPath $Resolved).Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw 'Prediction root must not be a reparse point'
+    }
+    $PredictionMarkets = if ($Market) { @($Market) } else { @('TW', 'US') }
+    $Uploaded = New-Object System.Collections.Generic.List[string]
+    foreach ($PredictionMarket in $PredictionMarkets) {
+        $PredictionLatestPath = Join-Path $Resolved "latest-$PredictionMarket.json"
+        if (-not (Test-Path -LiteralPath $PredictionLatestPath -PathType Leaf)) { continue }
+        $PredictionLatestPath = Assert-PathWithinRoot -Path $PredictionLatestPath -Root $Resolved
+        $PointerHash = (Get-FileHash -LiteralPath $PredictionLatestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        $Pointer = Get-Content -LiteralPath $PredictionLatestPath -Raw -Encoding utf8 | ConvertFrom-Json
+        $Relative = [string]$Pointer.path
+        if (
+            [int]$Pointer.schema_version -ne 1 -or
+            [string]$Pointer.kind -ne 'absorb-five-session-predictions-pointer' -or
+            [string]$Pointer.market -ne $PredictionMarket -or
+            $Relative -notmatch '^objects/[0-9a-f]{64}\.json$' -or
+            [string]$Pointer.sha256 -notmatch '^[0-9a-f]{64}$' -or
+            [long]$Pointer.size -le 0 -or [long]$Pointer.size -gt 5MB -or
+            [string]$Pointer.source_manifest -notmatch "^quant/v1/manifests/$PredictionMarket-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}\.json$" -or
+            [string]$Pointer.source_manifest_sha256 -notmatch '^[0-9a-f]{64}$' -or
+            [string]$Pointer.backtest_sha256 -notmatch '^[0-9a-f]{64}$'
+        ) { throw "Invalid prediction latest pointer for $PredictionMarket" }
+        $ObjectPath = Assert-PathWithinRoot -Path (Join-Path $Resolved $Relative) -Root $Resolved
+        $Object = Get-Item -LiteralPath $ObjectPath
+        $Digest = (Get-FileHash -LiteralPath $ObjectPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        if (
+            $Object.Length -ne [long]$Pointer.size -or
+            $Digest -ne [string]$Pointer.sha256 -or
+            $Relative -ne "objects/$Digest.json"
+        ) { throw "Prediction object hash mismatch for $PredictionMarket" }
+        $Document = Get-Content -LiteralPath $ObjectPath -Raw -Encoding utf8 | ConvertFrom-Json
+        if (
+            [int]$Document.schema_version -ne 1 -or
+            [string]$Document.kind -ne 'absorb-five-session-predictions' -or
+            [string]$Document.market -ne $PredictionMarket -or
+            [int]$Document.horizon_sessions -ne 5 -or
+            [string]$Document.as_of -ne [string]$Pointer.as_of -or
+            [string]$Document.source_manifest -ne [string]$Pointer.source_manifest -or
+            [string]$Document.source_manifest_sha256 -ne [string]$Pointer.source_manifest_sha256 -or
+            [string]$Document.backtest_sha256 -ne [string]$Pointer.backtest_sha256 -or
+            @($Document.entities.PSObject.Properties).Count -lt 1
+        ) { throw "Prediction object schema mismatch for $PredictionMarket" }
+        $SourceRelative = [string]$Document.source_manifest
+        $SourcePath = Assert-AllowlistedPath (Join-Path $ResolvedRoot $SourceRelative.Substring('quant/v1/'.Length))
+        if ((Get-FileHash -LiteralPath $SourcePath -Algorithm SHA256).Hash.ToLowerInvariant() -ne [string]$Document.source_manifest_sha256) {
+            throw "Prediction source manifest hash mismatch for $PredictionMarket"
+        }
+        Invoke-GcloudCopy $ObjectPath "gs://$Bucket/predictions/v1/$Relative" -NoClobber
+        Assert-GcloudFileMatches -Gcloud $Gcloud -LocalPath $ObjectPath -Uri "gs://$Bucket/predictions/v1/$Relative"
+        if ((Get-FileHash -LiteralPath $PredictionLatestPath -Algorithm SHA256).Hash.ToLowerInvariant() -ne $PointerHash) {
+            throw "Prediction latest pointer changed during validation for $PredictionMarket"
+        }
+        Set-GcloudMutablePointer `
+            -Source $PredictionLatestPath `
+            -Destination "gs://$Bucket/predictions/v1/latest-$PredictionMarket.json" `
+            -ExpectedSha256 $PointerHash | Out-Null
+        $Remote = Get-GcloudJson -Gcloud $Gcloud -Uri "gs://$Bucket/predictions/v1/latest-$PredictionMarket.json"
+        if ([string]$Remote.sha256 -ne $Digest -or [string]$Remote.as_of -ne [string]$Document.as_of) {
+            throw "Prediction remote read-back mismatch for $PredictionMarket"
+        }
+        $Uploaded.Add($PredictionMarket) | Out-Null
+    }
+    return $Uploaded.ToArray()
+}
+
 if ($ObservationOnly -and -not $LkgReceiptPath) {
     $CaptureText = (& (Join-Path $PSScriptRoot 'capture_observation_lkg.ps1') `
         -DataRoot $DataRoot `
@@ -1396,6 +1468,18 @@ try {
         }
     }
 
+    $PredictionUploadedMarkets = @()
+    $PredictionUploadError = $null
+    if (-not $ReportV2Only) {
+        try {
+            $PredictionUploadedMarkets = @(Publish-PredictionsV1)
+        } catch {
+            $PredictionUploadError = $_.Exception.Message
+            Write-Warning "Prediction 上傳失敗：$PredictionUploadError"
+            Send-ReportUploadFailureNotification "Prediction 上傳失敗：$PredictionUploadError"
+        }
+    }
+
     Exit-AbsorbPublicationMutex
     $Status = @{
         uploaded_at = [DateTimeOffset]::Now.ToString('o')
@@ -1407,6 +1491,8 @@ try {
         report_v2_error = $ReportV2UploadError
         dashboard_uploaded = $DashboardUploaded
         dashboard_error = $DashboardUploadError
+        prediction_markets = $PredictionUploadedMarkets
+        prediction_error = $PredictionUploadError
         pointer_updates = $Global:PointerUpdates.ToArray()
         lkg_receipt = $LkgReceiptPath
         bucket = $Bucket

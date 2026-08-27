@@ -95,6 +95,10 @@ Write-Output "US PostClose observation pipeline completed successfully for $Targ
 
 # Upload if requested
 if ($PublishObservation) {
+    & $PythonExe -m stock_papi.batch.prediction_products_cli --root $DataRoot --market US
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warning 'US prediction product did not pass its gates; previous pointer remains.'
+    }
     Write-Output "Uploading US observation products to GCS..."
     & (Join-Path $PSScriptRoot 'upload_local_quant.ps1') `
         -DataRoot $DataRoot `

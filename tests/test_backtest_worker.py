@@ -52,6 +52,38 @@ def promoted_candidate(model_version="lgbm-5d-v1"):
 
 
 class BacktestWorkerTests(unittest.TestCase):
+    def test_price_quality_gate_and_us_store_are_supported(self):
+        self.assertIn("price_quality", REQUIRED_PROMOTION_GATES)
+        with tempfile.TemporaryDirectory() as temporary:
+            document = candidate()
+            document.update(
+                market="US",
+                dataset_manifest="quant/v1/manifests/US-20260714T090000Z-aaaaaaaaaaaa.json",
+            )
+            store = BacktestStore(Path(temporary), "US")
+            digest = store.write_candidate(document)
+            self.assertEqual(store._candidate(digest)["market"], "US")
+
+    def test_us_worker_uses_an_isolated_checkpoint(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            worker = FullBacktestWorker(
+                temporary,
+                market="US",
+                dataset_manifest="quant/v1/manifests/US-20260714T090000Z-aaaaaaaaaaaa.json",
+                dataset_sha256="a" * 64,
+                model_version="lgbm-5d-v1",
+                feature_schema_version=1,
+                cutoff=datetime.date(2026, 7, 14),
+                items=("AAPL",),
+            )
+            result = worker.run(
+                lambda _item: None,
+                now=datetime.datetime(2026, 7, 14, 12, tzinfo=UTC),
+            )
+
+            self.assertEqual(result["market"], "US")
+            self.assertIn("full_backtest_us", str(worker.checkpoint_path))
+
     def test_completed_checkpoint_verifier_binds_every_source_identity_field(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

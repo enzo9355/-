@@ -137,6 +137,9 @@ class ObservationReleaseScriptTests(unittest.TestCase):
             "reports/v2/index-TW.json",
             "reports/v2/$LatestName",
             "dashboard/v1/latest-TW.json",
+            "predictions/v1/latest-TW.json",
+            "predictions/v1/latest-US.json",
+            "predictions/v1/latest-$PredictionMarket.json",
         ):
             with self.subTest(destination=destination):
                 self.assertIn(destination, uploader)
@@ -150,6 +153,12 @@ class ObservationReleaseScriptTests(unittest.TestCase):
             uploader,
         )
         self.assertIn("$Latest.product_mode -ne 'observation'", uploader)
+        self.assertIn("Publish-PredictionsV1", uploader)
+        self.assertIn("absorb-five-session-predictions-pointer", uploader)
+        self.assertNotIn(
+            'Invoke-GcloudCopy $PredictionLatestPath "gs://$Bucket/predictions/v1/latest-$PredictionMarket.json"',
+            uploader,
+        )
 
     def test_pointer_snapshot_binds_upload_bytes_to_validation_hash(self):
         common = SCRIPTS / "observation_release_common.ps1"
@@ -444,6 +453,8 @@ class ObservationReleaseScriptTests(unittest.TestCase):
             "quant/v1/latest-TW.json",
             "quant/v1/latest-insights.json",
             "dashboard/v1/latest-TW.json",
+            "predictions/v1/latest-TW.json",
+            "predictions/v1/latest-US.json",
             "reports/v1/index-TW.json",
             "reports/v1/latest-TW.json",
             "reports/v2/index-TW.json",

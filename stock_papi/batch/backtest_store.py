@@ -10,7 +10,10 @@ from pathlib import Path
 
 
 REQUIRED_PROMOTION_GATES = frozenset(
-    {"parity", "leakage", "calibration", "schema", "security", "quality"}
+    {
+        "parity", "leakage", "calibration", "schema", "security", "quality",
+        "price_quality",
+    }
 )
 
 
@@ -55,7 +58,7 @@ def _validate_candidate(document, market):
     if not isinstance(document, dict):
         raise BacktestStoreError("candidate must be an object")
     sha = r"[0-9a-f]{64}"
-    manifest = r"quant/v1/manifests/TW-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}\.json"
+    manifest = rf"quant/v1/manifests/{market}-[0-9]{{8}}T[0-9]{{6}}Z-[0-9a-f]{{12}}\.json"
     oos_path = rf"backtests/v1/oos/{sha}\.json\.gz"
     start = _date(document.get("data_start"), "data_start")
     end = _date(document.get("data_end"), "data_end")
@@ -130,7 +133,7 @@ def _write_atomic(path, content):
 
 class BacktestStore:
     def __init__(self, root, market):
-        if market != "TW":
+        if market not in {"TW", "US"}:
             raise BacktestStoreError("unsupported backtest market")
         self.market = market
         self.root = Path(root) / "publish" / "backtests" / "v1"

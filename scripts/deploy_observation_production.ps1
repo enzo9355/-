@@ -56,6 +56,15 @@ $Git = (Get-Command git -ErrorAction Stop).Source
 $ForbiddenPredictionKeys = [Collections.Generic.HashSet[string]]::new(
     [StringComparer]::OrdinalIgnoreCase
 )
+$PredictionPointerUris = @(
+    "gs://$([string]$ObservationLkg.bucket)/predictions/v1/latest-TW.json",
+    "gs://$([string]$ObservationLkg.bucket)/predictions/v1/latest-US.json"
+)
+foreach ($PredictionPointerUri in $PredictionPointerUris) {
+    if (@($ObservationLkg.pointers | Where-Object { [string]$_.uri -eq $PredictionPointerUri }).Count -ne 1) {
+        throw "Observation LKG is missing prediction pointer: $PredictionPointerUri"
+    }
+}
 foreach ($Key in @(
     'forecast_probability',
     'probability',

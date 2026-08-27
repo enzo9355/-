@@ -35,6 +35,10 @@ $RequiredSecrets = @(
     'stock-papi-finmind-password',
     'stock-papi-alert-task-token'
 )
+$PredictionPointerUris = @(
+    "gs://$Bucket/predictions/v1/latest-TW.json",
+    "gs://$Bucket/predictions/v1/latest-US.json"
+)
 
 function Add-Check {
     param([string]$Name, [bool]$Ready, [string]$Detail)
@@ -264,8 +268,8 @@ function Test-MarketPointer {
     ) {
         throw 'Latest pointer schema or market is invalid'
     }
-    if ($Latest.schema_version -in @(3, 4) -and $Market -ne 'TW') {
-        throw 'Manifest v3/v4 is TW-only'
+    if ($Latest.schema_version -eq 3 -and $Market -ne 'TW') {
+        throw 'Manifest v3 is TW-only'
     }
     if ([string]$Latest.manifest -notmatch "^manifests/$Market-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}\.json$") {
         throw 'Latest manifest path is invalid'
@@ -567,8 +571,8 @@ function Get-ObservationManifestCoverage {
     if ($SchemaVersion -notin @(2, 3, 4) -or [string]$Manifest.market -ne $ExpectedMarket) {
         throw 'Observation source manifest schema or market is invalid'
     }
-    if ($SchemaVersion -in @(3, 4) -and $ExpectedMarket -ne 'TW') {
-        throw 'Manifest v3/v4 is TW-only'
+    if ($SchemaVersion -eq 3 -and $ExpectedMarket -ne 'TW') {
+        throw 'Manifest v3 is TW-only'
     }
     if (
         $Manifest.PSObject.Properties['sample_data'] -and
@@ -1080,6 +1084,43 @@ function Test-ObservationReportPointers {
     return "reports/v2/index-TW.json generation $($IndexEvidence.metadata.generation) and post-close latest generation $($LatestEvidence.metadata.generation) are verified"
 }
 
+function Test-PredictionPointer {
+    param([string]$Market, [string]$TemporaryRoot)
+
+    $LatestEvidence = Get-GcsJsonEvidence `
+        -Uri "gs://$Bucket/predictions/v1/latest-$Market.json" `
+        -TemporaryRoot $TemporaryRoot `
+        -Name "prediction-latest-$Market.json"
+    $Latest = $LatestEvidence.document
+    if (
+        [int]$Latest.schema_version -ne 1 -or
+        [string]$Latest.kind -ne 'absorb-five-session-predictions-pointer' -or
+        [string]$Latest.market -ne $Market -or
+        [string]$Latest.path -notmatch '^objects/[0-9a-f]{64}\.json$' -or
+        [string]$Latest.sha256 -notmatch '^[0-9a-f]{64}$' -or
+        [long]$Latest.size -le 0 -or [long]$Latest.size -gt 5MB
+    ) { throw "Prediction pointer is invalid for $Market" }
+    $ObjectEvidence = Get-GcsJsonEvidence `
+        -Uri "gs://$Bucket/predictions/v1/$($Latest.path)" `
+        -TemporaryRoot $TemporaryRoot `
+        -Name "prediction-object-$Market.json" `
+        -ExpectedSha256 ([string]$Latest.sha256)
+    $Document = $ObjectEvidence.document
+    if (
+        $ObjectEvidence.file.Length -ne [long]$Latest.size -or
+        [int]$Document.schema_version -ne 1 -or
+        [string]$Document.kind -ne 'absorb-five-session-predictions' -or
+        [string]$Document.market -ne $Market -or
+        [int]$Document.horizon_sessions -ne 5 -or
+        [string]$Document.as_of -ne [string]$Latest.as_of -or
+        [string]$Document.source_manifest -ne [string]$Latest.source_manifest -or
+        [string]$Document.source_manifest_sha256 -ne [string]$Latest.source_manifest_sha256 -or
+        [string]$Document.backtest_sha256 -ne [string]$Latest.backtest_sha256 -or
+        @($Document.entities.PSObject.Properties).Count -lt 1
+    ) { throw "Prediction object is invalid for $Market" }
+    return "predictions/v1/latest-$Market.json generation $($LatestEvidence.metadata.generation) is verified"
+}
+
 function Test-ObservationHttp {
     $ServiceInfo = Get-CloudRunService
     $TrafficEvidence = Get-CloudRunTrafficEvidence $ServiceInfo
@@ -1182,6 +1223,12 @@ try {
         }
         Invoke-Checked 'observation_reports' {
             Test-ObservationReportPointers $TemporaryRoot
+        }
+        Invoke-Checked 'prediction_tw' {
+            Test-PredictionPointer 'TW' $TemporaryRoot
+        }
+        Invoke-Checked 'prediction_us' {
+            Test-PredictionPointer 'US' $TemporaryRoot
         }
         Invoke-Checked 'observation_http' { Test-ObservationHttp }
     } else {

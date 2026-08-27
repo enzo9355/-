@@ -34,6 +34,7 @@ class FullBacktestWorker:
         self,
         root,
         *,
+        market="TW",
         dataset_manifest,
         dataset_sha256,
         model_version,
@@ -41,9 +42,9 @@ class FullBacktestWorker:
         cutoff,
         items,
     ):
-        manifest_pattern = (
-            r"quant/v1/manifests/TW-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}\.json"
-        )
+        if market not in {"TW", "US"}:
+            raise BacktestStoreError("full backtest market is invalid")
+        manifest_pattern = rf"quant/v1/manifests/{market}-[0-9]{{8}}T[0-9]{{6}}Z-[0-9a-f]{{12}}\.json"
         normalized_items = tuple(str(item) for item in items)
         if (
             re.fullmatch(manifest_pattern, str(dataset_manifest)) is None
@@ -59,6 +60,8 @@ class FullBacktestWorker:
         ):
             raise BacktestStoreError("full backtest worker input is invalid")
         self.root = Path(root)
+        self.market = market
+        self.job_type = "full_backtest" if market == "TW" else "full_backtest_us"
         self.dataset_manifest = dataset_manifest
         self.dataset_sha256 = dataset_sha256
         self.model_version = model_version
@@ -68,10 +71,10 @@ class FullBacktestWorker:
         self.items_sha256 = hashlib.sha256(
             json.dumps(normalized_items, separators=(",", ":")).encode("utf-8")
         ).hexdigest()
-        self.checkpoint_path = job_namespace(root, "full_backtest").checkpoint
+        self.checkpoint_path = job_namespace(root, self.job_type).checkpoint
 
     def _identity(self):
-        return {
+        identity = {
             "dataset_manifest": self.dataset_manifest,
             "dataset_sha256": self.dataset_sha256,
             "model_version": self.model_version,
@@ -80,6 +83,9 @@ class FullBacktestWorker:
             "items_sha256": self.items_sha256,
             "item_count": len(self.items),
         }
+        if self.market == "US":
+            identity["market"] = self.market
+        return identity
 
     def verify_completed_checkpoint(self):
         """Return True only for a fully completed checkpoint of this exact source."""
@@ -94,7 +100,7 @@ class FullBacktestWorker:
         if (
             not isinstance(checkpoint, dict)
             or checkpoint.get("schema_version") != 1
-            or checkpoint.get("job_type") != "full_backtest"
+            or checkpoint.get("job_type") != self.job_type
             or any(checkpoint.get(key) != value for key, value in identity.items())
             or type(next_index) is not int
             or not 0 <= next_index <= len(self.items)
@@ -121,7 +127,7 @@ class FullBacktestWorker:
                 raise BacktestStoreError("full backtest checkpoint is invalid") from exc
             if (
                 checkpoint.get("schema_version") != 1
-                or checkpoint.get("job_type") != "full_backtest"
+                or checkpoint.get("job_type") != self.job_type
                 or any(checkpoint.get(key) != value for key, value in identity.items())
                 or type(checkpoint.get("next_index")) is not int
                 or not 0 <= checkpoint["next_index"] <= len(self.items)
@@ -130,7 +136,7 @@ class FullBacktestWorker:
             return checkpoint
         checkpoint = {
             "schema_version": 1,
-            "job_type": "full_backtest",
+            "job_type": self.job_type,
             "run_id": (
                 f"{self.cutoff.strftime('%Y%m%d')}T000000Z-"
                 f"{self.dataset_sha256[:8]}"
@@ -160,7 +166,7 @@ class FullBacktestWorker:
 
         with acquire_job_lock(
             self.root,
-            "full_backtest",
+            self.job_type,
             self.cutoff,
             now=checked_at,
         ):
