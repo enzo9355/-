@@ -479,7 +479,7 @@ button:focus-visible,a:focus-visible,input:focus-visible,summary:focus-visible{
   border-radius:10px;
   overflow:hidden;
 }
-.chart-prediction-note{display:flex;align-items:center;gap:8px;margin:7px 0 0;color:#7c1f31;font-size:12px;font-weight:700}.chart-prediction-note span{width:24px;border-top:2px dashed #7c1f31}.chart-prediction-note.unavailable{color:var(--muted);font-weight:500}
+.chart-prediction-note{display:flex;align-items:center;gap:8px;margin:7px 0 0;color:#2563eb;font-size:12px;font-weight:700}.chart-prediction-note span{width:24px;border-top:2px dashed #2563eb}.chart-prediction-note.unavailable{color:var(--muted);font-weight:500}
 .analysis-grid{
   display:grid;
   grid-template-columns:1.2fr 1fr;

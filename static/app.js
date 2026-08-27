@@ -457,7 +457,7 @@ function createPriceChart(container, raw, { predictionMarker = false, compact = 
   const prediction = parseChartPoints(raw.prediction);
   if (predictionMarker && prediction.length > 1) {
     const predictionSeries = chart.addLineSeries({
-      color: "#7c1f31",
+      color: "#2563eb",
       lineWidth: 2,
       lineStyle: LightweightCharts.LineStyle.Dashed,
       title: "AI 研究情境",
@@ -468,7 +468,7 @@ function createPriceChart(container, raw, { predictionMarker = false, compact = 
     predictionSeries.setMarkers([{
       time: prediction[prediction.length - 1].time,
       position: "aboveBar",
-      color: "#7c1f31",
+      color: "#2563eb",
       shape: "circle",
       text: "AI 5日",
     }]);
