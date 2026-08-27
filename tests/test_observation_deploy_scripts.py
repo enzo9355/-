@@ -243,7 +243,7 @@ $results = @(Invoke-ObservationSmoke -BaseUrl 'https://candidate.example')
         self.assertGreaterEqual(source.count("rev-parse HEAD"), 2)
         self.assertGreaterEqual(source.count("rev-parse 'HEAD^{tree}'"), 2)
 
-    def test_smoke_and_cutover_verification_forbid_prediction_payloads(self) -> None:
+    def test_smoke_allows_model_metadata_but_forbids_action_payloads(self) -> None:
         deploy = DEPLOY.read_text(encoding="utf-8")
         verify = VERIFY.read_text(encoding="utf-8")
 
@@ -251,13 +251,17 @@ $results = @(Invoke-ObservationSmoke -BaseUrl 'https://candidate.example')
             "forecast_probability",
             "probability",
             "ranking_score",
-            "model_version",
             "backtest_version",
             "recommendation",
         )
         for key in forbidden:
             self.assertIn(key, deploy)
             self.assertIn(key, verify)
+
+        deploy_forbidden = deploy[deploy.index("$ForbiddenPredictionKeys"):deploy.index("function Invoke-Gcloud")]
+        verify_forbidden = verify[verify.index("$ObservationForbiddenKeys"):verify.index("function Assert-ObservationNoPredictionKeys")]
+        self.assertNotIn("'model_version'", deploy_forbidden)
+        self.assertNotIn("'model_version'", verify_forbidden)
 
         for required in (
             "ObservationOnly",

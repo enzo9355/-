@@ -192,7 +192,7 @@ class ObservationPublicSurfaceTests(unittest.TestCase):
             "產業觀察",
             "個股與 ETF",
             "Ask ABSORB",
-            "AI 預測研究中",
+            "AI 五日情境",
         ):
             self.assertIn(label, html)
         for text in self.forbidden:

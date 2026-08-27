@@ -58,6 +58,26 @@ class WebProductTests(unittest.TestCase):
                 {"time": "2026-07-14", "value": 22790.0},
                 {"time": "2026-07-15", "value": 22820.0},
             ],
+            "prediction_display": {
+                "status": "published",
+                "as_of": "2026-07-15",
+                "horizon_sessions": 5,
+                "direction": "up",
+                "probability_up_pct": 67.4,
+                "target_price": 23610.5,
+                "expected_return_pct": 1.99,
+                "model_version": "lgbm-ohlc-5d-v1",
+                "validation": {
+                    "oos_samples": 80,
+                    "direction_accuracy_pct": 58.8,
+                    "brier": 0.238,
+                    "price_mae_pct": 2.1,
+                },
+                "points": [
+                    {"time": "2026-07-15", "value": 23150.25},
+                    {"time": "2026-07-22", "value": 23610.5},
+                ],
+            },
         }
         load_snapshot.return_value = snapshot
 
@@ -71,6 +91,11 @@ class WebProductTests(unittest.TestCase):
             'id="market-index-chart"',
             'id="market-index-chart-data"',
             '"time": "2026-07-15"',
+            "五日上漲機率",
+            "67.4%",
+            "23,610.50",
+            "樣本 80 筆",
+            '"prediction"',
         ):
             with self.subTest(marker=marker):
                 self.assertIn(marker, html)
@@ -83,10 +108,20 @@ class WebProductTests(unittest.TestCase):
             "as_of": snapshot["as_of"],
             "horizon_sessions": 5,
             "direction": "up",
+            "probability_up_pct": 68.0,
+            "target_price": 171.0,
+            "expected_return_pct": 4.27,
+            "model_version": "lgbm-ohlc-5d-v1",
+            "validation": {
+                "oos_samples": 75,
+                "direction_accuracy_pct": 57.3,
+                "brier": 0.241,
+                "price_mae_pct": 3.2,
+            },
             "points": [
                 {"time": snapshot["as_of"], "value": 164.0},
                 {"time": "2026-07-20", "value": 166.0},
-                {"time": "2026-07-21", "value": 168.0},
+                {"time": "2026-07-21", "value": 171.0},
             ],
         }
         fetch.return_value = snapshot
@@ -96,10 +131,32 @@ class WebProductTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertIn("AI 5 日偏多情境", html)
+        self.assertIn("五日上漲機率", html)
+        self.assertIn("68.0%", html)
+        self.assertIn("171.00", html)
+        self.assertIn("方向準確率 57.3%", html)
         self.assertIn('"prediction"', html)
         self.assertIn("2026-07-21", html)
         self.assertNotIn('"AI_P"', html)
-        self.assertNotIn('"probability"', html)
+
+    @patch.object(stock_app, "_published_dashboard_snapshot")
+    def test_stock_events_are_split_into_up_down_and_other_groups(self, load):
+        snapshot = observation_dashboard()
+        snapshot["stock_events"] = [
+            {"symbol": "6955", "name": "邦睿生技-創", "observation": "單日跌幅異常", "metric_value": -10.83, "unit": "pct", "as_of": "2026-08-26"},
+            {"symbol": "3313", "name": "斐成", "observation": "單日漲幅異常", "metric_value": 10.0, "unit": "pct", "as_of": "2026-08-26"},
+            {"symbol": "2603", "name": "長榮", "observation": "量能異常放大", "metric_value": 2.8, "unit": "倍", "as_of": "2026-08-26"},
+        ]
+        load.return_value = snapshot
+
+        html = stock_app.app.test_client().get("/stocks").get_data(as_text=True)
+
+        self.assertIn("異常上漲", html)
+        self.assertIn("異常下跌", html)
+        self.assertIn("其他事件", html)
+        self.assertIn('data-event-group="up"', html)
+        self.assertIn('data-event-group="down"', html)
+        self.assertLess(html.index("斐成"), html.index("邦睿生技-創"))
 
     def test_chart_renderer_draws_market_candles_and_prediction_marker(self):
         script = Path(stock_app.app.static_folder, "app.js").read_text(
@@ -111,7 +168,7 @@ class WebProductTests(unittest.TestCase):
             'bySelector("#market-index-chart")',
             'bySelector("#market-index-chart-data")',
             "predictionSeries.setMarkers",
-            'text: "AI 預測"',
+            'text: "AI 5日"',
             "LineStyle.Dashed",
         ):
             with self.subTest(marker=marker):
@@ -809,7 +866,9 @@ class WebProductTests(unittest.TestCase):
         self.assertIn('data-market="US"', html)
         self.assertNotIn('data-dashboard-endpoint', html)
         self.assertNotIn("TAIEX", html)
-        self.assertIn("目前沒有通過條件的異常事件。", html)
+        self.assertIn("目前沒有異常上漲事件。", html)
+        self.assertIn("目前沒有異常下跌事件。", html)
+        self.assertIn("目前沒有其他異常事件。", html)
         self.assertIn('action="/search"', html)
         self.assertIn('name="market" value="US"', html)
 
@@ -902,7 +961,7 @@ class WebProductTests(unittest.TestCase):
             "市場實況",
             "個股與 ETF",
             "Ask ABSORB",
-            "AI 預測研究中",
+            "AI 五日情境",
         ):
             self.assertIn(label, html)
         for forbidden in (
@@ -1360,7 +1419,7 @@ class WebProductTests(unittest.TestCase):
             css,
         )
 
-    def test_web_shell_uses_greek_villa_for_neutral_paper_surfaces(self):
+    def test_web_shell_uses_softened_neutral_paper_surfaces(self):
         css = Path(stock_app.app.static_folder, "app.css").read_text(
             encoding="utf-8"
         )
@@ -1370,10 +1429,10 @@ class WebProductTests(unittest.TestCase):
             )
         )
 
-        self.assertIn("--absorb-surface:#f0ebe3", css)
-        self.assertIn("--command-paper:#f0ebe3", css)
-        self.assertIn("rgb(240 235 227 / 92%)", css)
-        self.assertEqual(manifest["background_color"], "#f0ebe3")
+        self.assertIn("--absorb-surface:#f5f5f2", css)
+        self.assertIn("--command-paper:#f7f6f2", css)
+        self.assertIn("rgb(247 246 242 / 92%)", css)
+        self.assertEqual(manifest["background_color"], "#f7f6f2")
 
     def test_browser_bundle_has_no_local_watchlist_storage(self):
         source = Path(stock_app.app.static_folder, "app.js").read_text(

@@ -86,7 +86,7 @@ class MarketIndexTests(unittest.TestCase):
         self.assertEqual(result["candles"][-1]["time"], "2026-08-25")
         self.assertGreaterEqual(len(result["candles"]), 60)
         self.assertTrue(result["ma20"])
-        self.assertEqual(len(calls), 4)
+        self.assertEqual(len(calls), 12)
         self.assertEqual(result["source"], "臺灣證券交易所")
 
     def test_snapshot_fails_closed_when_official_latest_date_does_not_match(self):

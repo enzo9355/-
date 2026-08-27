@@ -158,14 +158,28 @@ function renderDashboard(data) {
   const events = bySelector("[data-stock-events]");
   if (events) {
     const items = Array.isArray(data.stock_events) ? data.stock_events : [];
-    replaceContent(events, items.length ? items.map((item) =>
-      card("a", "pick-card", [
-        ["span", "badge-stock", `${item.name} · ${item.symbol}`],
-        ["strong", "", item.observation],
-        ["p", "", `${item.metric_value ?? "—"} ${item.unit || ""}`],
-        ["small", "", `資料日 ${item.as_of || data.observation_as_of}`],
-      ], stockHref(item.symbol))
-    ) : [emptyState("目前沒有通過條件的異常事件。")]);
+    const groups = [
+      ["up", "異常上漲", items.filter((item) => item.observation === "單日漲幅異常")],
+      ["down", "異常下跌", items.filter((item) => item.observation === "單日跌幅異常")],
+      ["other", "其他事件", items.filter((item) => !["單日漲幅異常", "單日跌幅異常"].includes(item.observation))],
+    ];
+    replaceContent(events, groups.map(([key, title, groupItems]) => {
+      const section = element("section", `event-group event-${key}`);
+      section.dataset.eventGroup = key;
+      const heading = element("div", "event-group-heading");
+      heading.append(element("h3", "", title), element("span", "", `${groupItems.length} 檔`));
+      const list = element("div", "top-picks");
+      replaceContent(list, groupItems.length ? groupItems.map((item) =>
+        card("a", "pick-card", [
+          ["span", "badge-stock", `${item.name} · ${item.symbol}`],
+          ["strong", "", item.observation],
+          ["p", Number(item.metric_value) > 0 ? "positive" : Number(item.metric_value) < 0 ? "negative" : "", `${item.metric_value ?? "—"} ${item.unit || ""}`],
+          ["small", "", `資料日 ${item.as_of || data.observation_as_of}`],
+        ], stockHref(item.symbol))
+      ) : [emptyState(`目前沒有${title}事件。`)]);
+      section.append(heading, list);
+      return section;
+    }));
   }
 
   const etfs = bySelector("[data-etf-observations]");
@@ -452,11 +466,11 @@ function createPriceChart(container, raw, { predictionMarker = false, compact = 
     });
     predictionSeries.setData(prediction);
     predictionSeries.setMarkers([{
-      time: prediction[1].time,
+      time: prediction[prediction.length - 1].time,
       position: "aboveBar",
       color: "#7c1f31",
       shape: "circle",
-      text: "AI 預測",
+      text: "AI 5日",
     }]);
   }
   const resize = () => {
@@ -490,7 +504,7 @@ function initMarketIndexChart() {
   const container = bySelector("#market-index-chart");
   const source = bySelector("#market-index-chart-data");
   if (!container || !source || !window.LightweightCharts) return;
-  const marketChart = createPriceChart(container, JSON.parse(source.textContent), { compact: true });
+  const marketChart = createPriceChart(container, JSON.parse(source.textContent), { compact: true, predictionMarker: true });
   if (marketChart) marketChart.chart.timeScale().fitContent();
 }
 

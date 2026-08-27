@@ -37,7 +37,7 @@
     </div>
   </header>
   {% else %}
-  <div class="error-banner" role="status">{% if prediction %}{{ prediction.label }}已標示於 K 線；屬回歸研究情境，不是目標價或買賣指令。{% else %}{{ prediction_status }}。目前只顯示已驗證的價格、均線、技術、籌碼與風險事件。{% endif %}</div>
+  <div class="error-banner" role="status">{% if prediction %}{{ prediction.label }}已標示於 K 線；提供機率與價格估計，不產生買賣指令。{% else %}{{ prediction_status }}。模型資料不足時不補入示意數字。{% endif %}</div>
 
   <header class="stock-hero" id="summary">
     <div class="hero-copy">
@@ -78,6 +78,7 @@
       <div><p class="eyebrow">PRICE, MOVING AVERAGE & AI SCENARIO</p><h2>價格與均線</h2>{% if prediction %}<p class="chart-prediction-note"><span></span>{{ prediction.label }}｜以虛線延伸，不代表保證走勢</p>{% else %}<p class="chart-prediction-note unavailable">AI 預測標記尚未發布</p>{% endif %}</div>
       <div class="segmented glass-segmented" aria-label="圖表顯示期間"><button type="button" data-chart-range="30" aria-pressed="false">1月</button><button type="button" class="active" data-chart-range="90" aria-pressed="true">3月</button><button type="button" data-chart-range="260" aria-pressed="false">1年</button></div>
     </div>
+    {% if prediction %}<div class="stock-forecast-strip" aria-label="五日 AI 預測摘要"><article><span>五日上漲機率</span><strong>{{ '%.1f%%'|format(prediction.probability_up_pct) }}</strong></article><article><span>第 5 個交易日預測價</span><strong>{{ '{:,.2f}'.format(prediction.target_price) }}</strong></article><article><span>預測變動</span><strong class="{{ 'positive' if prediction.expected_return_pct > 0 else 'negative' if prediction.expected_return_pct < 0 else '' }}">{{ '%+.2f%%'|format(prediction.expected_return_pct) }}</strong></article><article><span>樣本外驗證</span><strong>方向準確率 {{ '%.1f%%'|format(prediction.validation.direction_accuracy_pct) }}</strong><small>{{ prediction.validation.oos_samples }} 筆｜價格 MAE {{ '%.2f%%'|format(prediction.validation.price_mae_pct) }}</small></article></div>{% endif %}
     <div id="stock-chart" class="stock-chart" aria-label="{{ d.name }}互動式價格圖"></div>
   </section>
 

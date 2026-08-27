@@ -60,7 +60,6 @@ foreach ($Key in @(
     'forecast_probability',
     'probability',
     'ranking_score',
-    'model_version',
     'backtest_version',
     'recommendation'
 )) {

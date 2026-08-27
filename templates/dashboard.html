@@ -6,6 +6,7 @@
 {% set industries = observation.industry_observations or [] %}
 {% set focus = observation.daily_focus or [] %}
 {% set market_index = observation.market_index or {} %}
+{% set market_prediction = market_index.get('prediction_display') %}
 {% set advancing = market.get('advancing_count') %}
 {% set declining = market.get('declining_count') %}
 {% set unchanged = market.get('unchanged_count') %}
@@ -16,7 +17,7 @@
 {% set freshness = (data_freshness|default({}, true)).get('TW', {}) %}
 {% set freshness_label = {'current':'資料最新','updating':'更新中','stale':'資料過期','unavailable':'暫時無法取得'}.get(freshness.get('status'), '暫時無法取得') %}
 <div class="page dashboard-page research-dashboard" data-dashboard-endpoint="/api/dashboard">
-  <div class="error-banner bootstrap-banner" role="status">AI 預測研究中。目前正式頁面只呈現已驗證的市場觀察，不提供機率預測或買賣指令。</div>
+  <div class="error-banner bootstrap-banner" role="status">AI 五日情境提供上漲機率與預測價格；使用者自行判讀，不產生買賣指令。</div>
   {% if search_error %}<div class="error-banner" role="alert">找不到「{{ search_query }}」，請輸入台股代碼、名稱或美股代碼。</div>{% endif %}
 
   <header class="research-summary" data-research-summary>
@@ -67,6 +68,14 @@
       </section>
 
       <div class="command-insights">
+        <section class="forecast-panel" aria-labelledby="market-forecast-title">
+          <div class="insight-heading"><h3 id="market-forecast-title">AI 五日情境</h3><span>{{ market_prediction.model_version if market_prediction else '尚未發布' }}</span></div>
+          {% if market_prediction %}
+          <div class="forecast-primary"><div><span>五日上漲機率</span><strong>{{ '%.1f%%'|format(market_prediction.probability_up_pct) }}</strong></div><div><span>第 5 個交易日預測價</span><strong>{{ '{:,.2f}'.format(market_prediction.target_price) }}</strong></div></div>
+          <dl class="forecast-evidence"><div><dt>預測變動</dt><dd class="{{ 'positive' if market_prediction.expected_return_pct > 0 else 'negative' if market_prediction.expected_return_pct < 0 else '' }}">{{ '%+.2f%%'|format(market_prediction.expected_return_pct) }}</dd></div><div><dt>OOS 方向準確率</dt><dd>{{ '%.1f%%'|format(market_prediction.validation.direction_accuracy_pct) }}</dd></div><div><dt>價格 MAE</dt><dd>{{ '%.2f%%'|format(market_prediction.validation.price_mae_pct) }}</dd></div><div><dt>驗證樣本</dt><dd>樣本 {{ market_prediction.validation.oos_samples }} 筆</dd></div></dl>
+          <p>時間序列切分與五日間隔驗證；數字是模型估計，不是目標價或買賣指令。</p>
+          {% else %}<p class="empty-state">模型資料不足，暫不顯示預測數字。</p>{% endif %}
+        </section>
         <section class="breadth-panel" data-breadth-visual aria-labelledby="breadth-title">
           <div class="insight-heading"><h3 id="breadth-title">市場廣度</h3><span>{{ total_count if total_count is not none else '資料不足' }} 檔</span></div>
           {% if advancing_pct is not none and declining_pct is not none %}
@@ -89,7 +98,7 @@
 
   <nav class="dashboard-destinations" aria-label="研究功能入口"><a href="{{ url_for('market_page') }}"><strong>市場實況</strong><span>廣度、報酬與波動</span></a><a href="{{ url_for('industries_page') }}"><strong>產業觀察</strong><span>相對強度與產業廣度</span></a><a href="{{ url_for('stocks_page') }}"><strong>個股與 ETF</strong><span>事件與標的觀察</span></a><a href="{{ url_for('ask_page') }}"><strong>Ask ABSORB</strong><span>以已發布資料回答</span></a><a href="{{ url_for('learn_page') }}"><strong>學習</strong><span>市場觀察小辭典</span></a></nav>
   <div class="error-banner" data-dashboard-error aria-live="polite" hidden>已驗證的市場觀察資料暫時無法取得，請稍後再試。</div>
-  {% if market_index.get('candles') %}<script id="market-index-chart-data" type="application/json">{{ {"candles": market_index.get('candles'), "ma20": market_index.get('ma20', [])}|tojson }}</script>{% endif %}
+  {% if market_index.get('candles') %}<script id="market-index-chart-data" type="application/json">{{ {"candles": market_index.get('candles'), "ma20": market_index.get('ma20', []), "prediction": market_prediction.get('points', []) if market_prediction else []}|tojson }}</script>{% endif %}
 </div>
 {% endblock %}
 
