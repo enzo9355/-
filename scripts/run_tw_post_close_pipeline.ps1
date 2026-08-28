@@ -213,7 +213,8 @@ $CandidateArguments = @(
     '--root', $DataRoot,
     '--source-market-date', $SourceMarketDate,
     '--source-manifest', "quant/v1/$ManifestRelative",
-    '--source-manifest-sha256', $Latest.manifest_sha256
+    '--source-manifest-sha256', $Latest.manifest_sha256,
+    '--include-market-index'
 )
 foreach ($Path in $CalendarPaths) {
     $CandidateArguments += @('--calendar-artifact', $Path)
@@ -228,6 +229,10 @@ Write-Output $CandidateJson
 if (-not $PublishObservation) { exit 0 }
 & $PythonExe -m stock_papi.batch.observation_products_cli promote --root $DataRoot --candidate $Candidate.candidate_path
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+& $PythonExe -m stock_papi.batch.prediction_products_cli --root $DataRoot --market TW
+if ($LASTEXITCODE -ne 0) {
+    Write-Warning 'TW prediction product did not pass its gates; previous pointer remains.'
+}
 & (Join-Path $PSScriptRoot 'upload_local_quant.ps1') -DataRoot $DataRoot -RequireReportV2 -RequireDashboard -ObservationOnly
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 & $PythonExe -m stock_papi.batch.cli notify --root $DataRoot --report-type post_close --audience admin --audience broadcast

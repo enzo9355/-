@@ -950,6 +950,7 @@ File Creation Time: 07082026||||||
                     "schema",
                     "security",
                     "quality",
+                    "price_quality",
                 )
             },
         }

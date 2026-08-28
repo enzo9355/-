@@ -3,6 +3,7 @@
 from flask import abort, render_template, request
 
 from reporting.exceptions import ReportWebError
+from stock_papi.services.prediction_view import prediction_for
 
 
 def register_dashboard_page(
@@ -11,6 +12,7 @@ def register_dashboard_page(
     load_report_index_v2,
     load_dashboard_snapshot,
     load_data_freshness=None,
+    load_prediction_snapshot=None,
     preview_enabled=False,
 ):
     def _snapshot():
@@ -35,6 +37,18 @@ def register_dashboard_page(
             for report_type in ("post_close", "pre_market")
         }
         snapshot = _snapshot()
+        market_index = snapshot.get("market_index") or {}
+        prediction = None
+        if load_prediction_snapshot is not None and market_index.get("as_of"):
+            try:
+                prediction = prediction_for(
+                    load_prediction_snapshot("TW"),
+                    "TW",
+                    "TAIEX",
+                    market_index["as_of"],
+                )
+            except Exception:
+                prediction = None
         data_freshness = {}
         if load_data_freshness is not None:
             try:
@@ -50,6 +64,7 @@ def register_dashboard_page(
             daily_cards=daily_cards,
             model_presentation=snapshot.get("presentation") or {},
             observation=snapshot,
+            market_prediction=prediction,
             data_freshness=data_freshness,
         )
 

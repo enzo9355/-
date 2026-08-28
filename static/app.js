@@ -158,14 +158,39 @@ function renderDashboard(data) {
   const events = bySelector("[data-stock-events]");
   if (events) {
     const items = Array.isArray(data.stock_events) ? data.stock_events : [];
-    replaceContent(events, items.length ? items.map((item) =>
-      card("a", "pick-card", [
-        ["span", "badge-stock", `${item.name} · ${item.symbol}`],
-        ["strong", "", item.observation],
-        ["p", "", `${item.metric_value ?? "—"} ${item.unit || ""}`],
-        ["small", "", `資料日 ${item.as_of || data.observation_as_of}`],
-      ], stockHref(item.symbol))
-    ) : [emptyState("目前沒有通過條件的異常事件。")]);
+    const official = (Array.isArray(data.trading_status_observations) ? data.trading_status_observations : []).map((item) => ({
+      ...item, observation: item.label, as_of: item.observation_as_of, severity: "high", official: true,
+    }));
+    const groups = [
+      ["up", "異常上漲", items.filter((item) => item.event_type === "price_move" && Number(item.metric_value) > 0)],
+      ["down", "異常下跌", items.filter((item) => item.event_type === "price_move" && Number(item.metric_value) <= 0)],
+      ["volume", "量能異常", items.filter((item) => ["volume_surge", "volume_dry_up"].includes(item.event_type))],
+      ["institution", "法人動向", items.filter((item) => item.event_type === "institution_flow")],
+      ["technical", "技術面", items.filter((item) => ["rsi_overbought", "rsi_oversold", "new_high_20d", "new_low_20d"].includes(item.event_type))],
+      ["official", "官方事件", official],
+      ["data", "資料警示", items.filter((item) => item.event_type === "data_warning")],
+    ];
+    replaceContent(events, groups.map(([key, title, groupItems]) => {
+      const section = element("section", `event-group event-${key}`);
+      section.dataset.eventGroup = key;
+      const heading = element("div", "event-group-heading");
+      heading.append(element("h3", "", title), element("span", "", `${groupItems.length} 檔`));
+      const list = element("div", "top-picks");
+      replaceContent(list, groupItems.length ? groupItems.map((item) => {
+        const severity = item.official ? "官方" : ({ high: "極端", medium: "顯著", low: "注意" }[item.severity] || "注意");
+        const unit = ({ pct: "%", ratio: "倍", index: "", price: "", flag: "" })[item.unit] ?? item.unit ?? "";
+        return card("a", `pick-card event-card severity-${item.severity || "low"}`, [
+          ["span", "badge-stock", `${item.name} · ${item.symbol}`],
+          ["strong", "", item.observation],
+          ["p", Number(item.metric_value) > 0 ? "positive" : Number(item.metric_value) < 0 ? "negative" : "", `${item.metric_value ?? "—"}${unit}`],
+          ["b", "event-severity", severity],
+          ["small", "", `${item.official ? "驗證日" : "資料日"} ${item.as_of || data.observation_as_of}`],
+        ], stockHref(item.symbol));
+      }
+      ) : [emptyState(`目前沒有${title}事件。`)]);
+      section.append(heading, list);
+      return section;
+    }));
   }
 
   const etfs = bySelector("[data-etf-observations]");
@@ -348,6 +373,21 @@ function initQuickAsk() {
   });
 }
 
+function initSidebar() {
+  const toggle = bySelector("[data-sidebar-toggle]");
+  const sidebar = bySelector("#dashboard-sidebar");
+  if (!toggle || !sidebar) return;
+  const setCollapsed = (collapsed) => {
+    document.body.classList.toggle("sidebar-collapsed", collapsed);
+    toggle.setAttribute("aria-expanded", String(!collapsed));
+    toggle.setAttribute("aria-label", collapsed ? "展開 Dashboard 導覽" : "收合 Dashboard 導覽");
+  };
+  toggle.addEventListener("click", () => setCollapsed(!document.body.classList.contains("sidebar-collapsed")));
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && document.body.classList.contains("sidebar-collapsed")) setCollapsed(false);
+  });
+}
+
 async function toggleWatchlist(button) {
   const account = window.absorbAccount;
   if (!account) {
@@ -407,6 +447,69 @@ function measureChartHeight(container) {
   return Math.max(320, Math.min(460, Math.round(container.clientWidth * 0.62)));
 }
 
+function parseChartPoints(value) {
+  if (Array.isArray(value)) return value;
+  if (typeof value !== "string" || !value.trim()) return [];
+  const parsed = JSON.parse(value);
+  return Array.isArray(parsed) ? parsed : [];
+}
+
+function createPriceChart(container, raw, { predictionMarker = false, compact = false } = {}) {
+  const candles = parseChartPoints(raw.candles);
+  if (!candles.length) return null;
+  const height = compact
+    ? Math.max(250, Math.min(350, Math.round(container.clientWidth * 0.46)))
+    : measureChartHeight(container);
+  const chart = LightweightCharts.createChart(container, {
+    width: container.clientWidth,
+    height,
+    layout: { background: { color: "transparent" }, textColor: "#536575" },
+    grid: { vertLines: { color: "#cbd8de" }, horzLines: { color: "#cbd8de" } },
+    rightPriceScale: { borderColor: "#aebfc8" },
+    timeScale: { borderColor: "#aebfc8", rightOffset: predictionMarker ? 6 : 1 },
+  });
+  const candleSeries = chart.addCandlestickSeries({
+    upColor: "#7c1f31",
+    downColor: "#3f8060",
+    borderVisible: false,
+    wickUpColor: "#7c1f31",
+    wickDownColor: "#3f8060",
+  });
+  candleSeries.setData(candles);
+  const ma20 = parseChartPoints(raw.ma20);
+  if (ma20.length) {
+    chart.addLineSeries({ color: "#7aa6b3", lineWidth: 2, title: "MA20" }).setData(ma20);
+  }
+  const prediction = parseChartPoints(raw.prediction);
+  if (predictionMarker && prediction.length > 1) {
+    const predictionSeries = chart.addLineSeries({
+      color: "#2563eb",
+      lineWidth: 2,
+      lineStyle: LightweightCharts.LineStyle.Dashed,
+      title: "AI 研究情境",
+      lastValueVisible: true,
+      priceLineVisible: false,
+    });
+    predictionSeries.setData(prediction);
+    predictionSeries.setMarkers([{
+      time: prediction[prediction.length - 1].time,
+      position: "aboveBar",
+      color: "#2563eb",
+      shape: "circle",
+      text: "AI 5日",
+    }]);
+  }
+  const resize = () => {
+    const nextHeight = compact
+      ? Math.max(250, Math.min(350, Math.round(container.clientWidth * 0.46)))
+      : measureChartHeight(container);
+    chart.resize(container.clientWidth, nextHeight);
+  };
+  if (window.ResizeObserver) new ResizeObserver(resize).observe(container);
+  window.addEventListener("resize", resize);
+  return { chart, length: candles.length };
+}
+
 function setChartRange(days) {
   if (!window.stockChart) return;
   const { chart, length } = window.stockChart;
@@ -418,29 +521,47 @@ function initStockChart() {
   const source = bySelector("#stock-chart-data");
   if (!container || !source || !window.LightweightCharts) return;
   const raw = JSON.parse(source.textContent);
-  const candles = JSON.parse(raw.candles);
-  const height = measureChartHeight(container);
-  const chart = LightweightCharts.createChart(container, {
-    width: container.clientWidth,
-    height,
-    layout: { background: { color: "transparent" }, textColor: "#586579" },
-    grid: { vertLines: { color: "#d9e0e8" }, horzLines: { color: "#d9e0e8" } },
-    timeScale: { borderColor: "#b7c1cf" },
-  });
-  const candleSeries = chart.addCandlestickSeries({
-    upColor: "#d94b63",
-    downColor: "#1f9a72",
-    borderVisible: false,
-    wickUpColor: "#d94b63",
-    wickDownColor: "#1f9a72",
-  });
-  candleSeries.setData(candles);
-  chart.addLineSeries({ color: "#2b6cb0", lineWidth: 1, title: "MA20" }).setData(JSON.parse(raw.ma20));
-  window.stockChart = { chart, length: candles.length };
+  window.stockChart = createPriceChart(container, raw, { predictionMarker: true });
+  if (!window.stockChart) return;
   setChartRange(90);
-  const resize = () => chart.resize(container.clientWidth, measureChartHeight(container));
-  if (window.ResizeObserver) new ResizeObserver(resize).observe(container);
-  window.addEventListener("resize", resize);
+}
+
+function initMarketIndexChart() {
+  const container = bySelector("#market-index-chart");
+  const source = bySelector("#market-index-chart-data");
+  if (!container || !source || !window.LightweightCharts) return;
+  const marketChart = createPriceChart(container, JSON.parse(source.textContent), { compact: true, predictionMarker: true });
+  if (marketChart) marketChart.chart.timeScale().fitContent();
+}
+
+function initUsIndexChart() {
+  const container = bySelector("#us-index-chart");
+  const source = bySelector("#us-index-chart-data");
+  const tabs = document.querySelectorAll("[data-us-index-tab]");
+  if (!container || !source || !tabs.length || !window.LightweightCharts) return;
+  const items = JSON.parse(source.textContent);
+  let activeChart = null;
+  const select = (symbol) => {
+    const item = items.find((value) => value.symbol === symbol);
+    if (!item) return;
+    if (activeChart) activeChart.chart.remove();
+    container.replaceChildren();
+    activeChart = createPriceChart(container, {
+      candles: item.candles,
+      prediction: item.line,
+    }, { compact: true, predictionMarker: true });
+    if (activeChart) activeChart.chart.timeScale().fitContent();
+    tabs.forEach((tab) => {
+      const active = tab.dataset.usIndexTab === symbol;
+      tab.classList.toggle("active", active);
+      tab.setAttribute("aria-pressed", String(active));
+    });
+    document.querySelectorAll("[data-us-index-panel]").forEach((panel) => {
+      panel.hidden = panel.dataset.usIndexPanel !== symbol;
+    });
+  };
+  tabs.forEach((tab) => tab.addEventListener("click", () => select(tab.dataset.usIndexTab)));
+  select(tabs[0].dataset.usIndexTab);
 }
 
 document.addEventListener("click", (event) => {
@@ -524,6 +645,9 @@ migrateLegacyHashRoute();
 loadDashboard();
 loadAccountState();
 initStockChart();
+initMarketIndexChart();
+initUsIndexChart();
 initReturnCalculator();
 initConversations();
 initQuickAsk();
+initSidebar();

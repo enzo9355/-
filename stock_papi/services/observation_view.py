@@ -215,7 +215,12 @@ def build_stock_observation(snapshot, *, get_stock_name=None):
         moving_average = _number(row.get("MA20"))
         if moving_average is not None:
             ma20_line.append({"time": date_text, "value": moving_average})
-    return {
+    previous_close = _number(rows[-2].get("Close")) if len(rows) > 1 else None
+    change = close - previous_close if previous_close not in (None, 0) else None
+    change_pct = (
+        change / previous_close * 100 if change is not None and previous_close else None
+    )
+    result = {
         "code": str(snapshot.get("symbol") or ""),
         "name": _observation_name(snapshot, get_stock_name),
         "market": snapshot["market"],
@@ -223,6 +228,11 @@ def build_stock_observation(snapshot, *, get_stock_name=None):
         "observation_as_of": as_of,
         "latest_regular_price_date": as_of,
         "price": close,
+        "change": change,
+        "change_pct": change_pct,
+        "open": _number(latest.get("Open")),
+        "high": _number(latest.get("High")),
+        "low": _number(latest.get("Low")),
         "as_of": as_of,
         "quant_source": "已驗證本地快照",
         "prediction_status": "AI 預測研究中",
@@ -248,6 +258,7 @@ def build_stock_observation(snapshot, *, get_stock_name=None):
         "candles": json.dumps(
             candles, ensure_ascii=False, separators=(",", ":"), allow_nan=False
         ),
+        "recent_candles": candles[-5:],
         "ma20_line": json.dumps(
             ma20_line,
             ensure_ascii=False,
@@ -256,3 +267,4 @@ def build_stock_observation(snapshot, *, get_stock_name=None):
         ),
         "news": [],
     }
+    return result

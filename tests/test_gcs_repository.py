@@ -11,6 +11,7 @@ class GcsRepositoryTests(unittest.TestCase):
             "reports/v1/",
             "reports/v2/",
             "dashboard/v1/",
+            "predictions/v1/",
             "previews/",
         )
         for prefix in allowed:

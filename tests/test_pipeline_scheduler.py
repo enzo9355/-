@@ -172,6 +172,7 @@ foreach ($definition in @($ast.FindAll({{ param($node) $node -is [Management.Aut
         )
         self.assertIn("stock_papi.batch.observation_products_cli", post_close)
         self.assertIn("stock_papi.batch.tw_official_post_close_cli", post_close)
+        self.assertIn("stock_papi.batch.prediction_products_cli", post_close)
         self.assertIn("[switch]$PublishObservation", post_close)
         self.assertIn("[switch]$ReconcileLegacyOverlaps", post_close)
         self.assertIn(
@@ -183,6 +184,11 @@ foreach ($definition in @($ast.FindAll({{ param($node) $node -is [Management.Aut
         self.assertIn("$ExplicitTargetDate = $PSBoundParameters.ContainsKey('TargetDate')", post_close)
         self.assertIn("if ($ExplicitTargetDate)", post_close)
         self.assertIn("'--source-validation-date'", post_close)
+        us_post_close = (scripts / "run_us_post_close_pipeline.ps1").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("stock_papi.batch.prediction_products_cli", us_post_close)
+        self.assertIn("'--include-market-index'", post_close)
         self.assertIn(
             "$HistoricalTargetDate = $ParsedTargetDate.Date -lt [DateTime]::Today",
             post_close,
@@ -1030,7 +1036,7 @@ if ($Global:DisabledTasks.Count -ne 1 -or $Global:DisabledTasks[0] -ne 'ABSORB-F
                         "job_type": "full_backtest",
                         "dataset_manifest": "quant/v1/manifests/TW-20260821T000000Z-aaaaaaaaaaaa.json",
                         "dataset_sha256": "a" * 64,
-                        "model_version": "model-v1",
+                        "model_version": "lgbm-5d-v1",
                         "feature_schema_version": 1,
                         "cutoff": "2026-08-21",
                         "items_sha256": hashlib.sha256(
@@ -1065,8 +1071,8 @@ if ($Global:DisabledTasks.Count -ne 1 -or $Global:DisabledTasks[0] -ne 'ABSORB-F
                 "sys.modules['local_quant'] = local_quant\n"
                 "source_loader = types.ModuleType('reporting.source_loader')\n"
                 "source_loader.load_report_source = lambda _root, market: SimpleNamespace(\n"
-                "    manifest=SimpleNamespace(manifest_path='manifests/TW-20260821T000000Z-aaaaaaaaaaaa.json', manifest_sha256='a' * 64, market_as_of=datetime.date(2026, 8, 21)),\n"
-                "    stocks=(SimpleNamespace(model_version='model-v1', symbol='2330'),))\n"
+                "    manifest=SimpleNamespace(schema_version=4, manifest_path='manifests/TW-20260821T000000Z-aaaaaaaaaaaa.json', manifest_sha256='a' * 64, market_as_of=datetime.date(2026, 8, 21)),\n"
+                "    stocks=(SimpleNamespace(model_version='observation-source-v1', symbol='2330'),))\n"
                 "sys.modules['reporting.source_loader'] = source_loader\n"
                 "raise SystemExit(full_backtest_cli.main(['--root', sys.argv[1]]))\n",
                 encoding="utf-8",

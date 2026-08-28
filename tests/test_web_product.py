@@ -24,7 +24,227 @@ from tests.test_observation_public_surfaces import (
 )
 
 
+def prediction_product(market="TW", symbol="2330", as_of="2026-07-15"):
+    return {
+        "schema_version": 1,
+        "kind": "absorb-five-session-predictions",
+        "market": market,
+        "as_of": as_of,
+        "model_version": "lgbm-5d-v1",
+        "backtest_sha256": "b" * 64,
+        "entities": {
+            symbol: {
+                "symbol": symbol,
+                "entity_type": "market_index" if symbol.startswith("^") or symbol == "TAIEX" else "security",
+                "as_of": as_of,
+                "target_session": "2026-07-22",
+                "current_price": 23150.25 if symbol == "TAIEX" else 164.0,
+                "up_probability": 0.68,
+                "predicted_return_5d": 0.0427,
+                "predicted_price": 24138.765675 if symbol == "TAIEX" else 171.0028,
+                "predicted_change_pct": 4.27,
+            }
+        },
+    }
+
+
 class WebProductTests(unittest.TestCase):
+    @patch.object(stock_app, "_published_prediction_snapshot")
+    @patch.object(stock_app, "_published_dashboard_snapshot")
+    def test_dashboard_plainly_marks_uncalibrated_research_prediction(
+        self, load_snapshot, load_prediction
+    ):
+        snapshot = observation_dashboard()
+        snapshot["market_index"] = {
+            "symbol": "TAIEX", "name": "加權指數", "as_of": "2026-07-15",
+            "price": 23150.25, "change": 188.4, "change_pct": 0.82,
+            "open": 22982.1, "high": 23210.8, "low": 22940.6,
+            "candles": [], "ma20": [], "returns": {},
+            "source": {"provider": "TWSE", "kind": "official_index_daily"},
+        }
+        estimate = prediction_product(symbol="TAIEX")
+        estimate["schema_version"] = 2
+        estimate["validation_mode"] = "research"
+        estimate.pop("backtest_sha256")
+        load_snapshot.return_value = snapshot
+        load_prediction.return_value = estimate
+
+        html = stock_app.app.test_client().get("/dashboard").get_data(as_text=True)
+
+        self.assertIn("模型推估上漲機率（未校準）", html)
+        self.assertIn("未經回測校準", html)
+        self.assertNotIn("目前正式預測", html)
+
+    @patch.object(stock_app, "_published_prediction_snapshot")
+    @patch.object(stock_app, "_published_dashboard_snapshot")
+    def test_dashboard_renders_verified_market_index_level_and_candles(
+        self, load_snapshot, load_prediction
+    ):
+        snapshot = observation_dashboard()
+        snapshot["market_index"] = {
+            "symbol": "TAIEX",
+            "name": "加權指數",
+            "as_of": "2026-07-15",
+            "price": 23150.25,
+            "change": 188.4,
+            "change_pct": 0.82,
+            "open": 22982.1,
+            "high": 23210.8,
+            "low": 22940.6,
+            "candles": [
+                {
+                    "time": "2026-07-14",
+                    "open": 22800.0,
+                    "high": 23010.0,
+                    "low": 22760.0,
+                    "close": 22961.85,
+                },
+                {
+                    "time": "2026-07-15",
+                    "open": 22982.1,
+                    "high": 23210.8,
+                    "low": 22940.6,
+                    "close": 23150.25,
+                },
+            ],
+            "ma20": [
+                {"time": "2026-07-14", "value": 22790.0},
+                {"time": "2026-07-15", "value": 22820.0},
+            ],
+            "returns": {},
+            "source": {"provider": "TWSE", "kind": "official_index_daily"},
+        }
+        load_snapshot.return_value = snapshot
+        load_prediction.return_value = prediction_product(symbol="TAIEX")
+
+        html = stock_app.app.test_client().get("/dashboard").get_data(as_text=True)
+
+        for marker in (
+            "加權指數",
+            "23,150.25",
+            "+188.40",
+            "+0.82%",
+            'id="market-index-chart"',
+            'role="img"',
+            "加權指數最近五個交易日 OHLC",
+            'id="market-index-chart-data"',
+            '"time": "2026-07-15"',
+            "五日上漲機率",
+            "68.0%",
+            "24,138.77",
+            "+4.27%",
+            "2026-07-22",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, html)
+
+    @patch.object(stock_app, "fetch_published_quant_snapshot")
+    def test_stock_chart_rejects_unverified_embedded_prediction_display(self, fetch):
+        snapshot = quant_snapshot()
+        snapshot["prediction_display"] = {
+            "status": "published",
+            "as_of": snapshot["as_of"],
+            "horizon_sessions": 5,
+            "direction": "up",
+            "probability_up_pct": 68.0,
+            "target_price": 171.0,
+            "expected_return_pct": 4.27,
+            "model_version": "lgbm-ohlc-5d-v1",
+            "validation": {
+                "oos_samples": 75,
+                "direction_accuracy_pct": 57.3,
+                "brier": 0.241,
+                "price_mae_pct": 3.2,
+            },
+            "points": [
+                {"time": snapshot["as_of"], "value": 164.0},
+                {"time": "2026-07-21", "value": 171.0},
+            ],
+        }
+        fetch.return_value = snapshot
+
+        response = stock_app.app.test_client().get("/stock/2330")
+        html = response.get_data(as_text=True)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("AI 五日預測尚未發布", html)
+        self.assertIn("個股最近五個交易日 OHLC", html)
+        self.assertNotIn("五日上漲機率", html)
+        self.assertNotIn("171.00", html)
+        self.assertNotIn('"prediction"', html)
+        self.assertNotIn('"AI_P"', html)
+
+    @patch.object(stock_app, "_published_dashboard_snapshot")
+    def test_stock_events_are_split_into_supported_categories_with_severity(self, load):
+        snapshot = observation_dashboard()
+        snapshot["stock_events"] = [
+            {"symbol": "6955", "name": "邦睿生技-創", "event_type": "price_move", "severity": "high", "observation": "單日跌幅異常", "metric_value": -10.83, "unit": "pct", "as_of": "2026-08-26"},
+            {"symbol": "3313", "name": "斐成", "event_type": "price_move", "severity": "high", "observation": "單日漲幅異常", "metric_value": 10.0, "unit": "pct", "as_of": "2026-08-26"},
+            {"symbol": "2603", "name": "長榮", "event_type": "volume_surge", "severity": "medium", "observation": "量能異常放大", "metric_value": 2.8, "unit": "ratio", "as_of": "2026-08-26"},
+            {"symbol": "2330", "name": "台積電", "event_type": "institution_flow", "severity": "medium", "observation": "機構淨流入偏高", "metric_value": 3.1, "unit": "pct", "as_of": "2026-08-26"},
+            {"symbol": "2454", "name": "聯發科", "event_type": "rsi_overbought", "severity": "medium", "observation": "RSI 進入過熱區", "metric_value": 74.0, "unit": "index", "as_of": "2026-08-26"},
+            {"symbol": "0050", "name": "元大台灣50", "event_type": "data_warning", "severity": "high", "observation": "資料來源價差警示", "metric_value": 1, "unit": "flag", "as_of": "2026-08-26"},
+        ]
+        snapshot["trading_status_observations"] = [{
+            "symbol": "1589", "name": "永冠-KY", "label": "停止買賣",
+            "observation_as_of": "2026-08-26",
+        }]
+        load.return_value = snapshot
+
+        html = stock_app.app.test_client().get("/stocks").get_data(as_text=True)
+
+        self.assertIn("異常上漲", html)
+        self.assertIn("異常下跌", html)
+        for label in ("量能異常", "法人動向", "技術面", "官方事件", "資料警示"):
+            self.assertIn(label, html)
+        self.assertIn('data-event-group="up"', html)
+        self.assertIn('data-event-group="down"', html)
+        self.assertIn('data-event-group="volume"', html)
+        self.assertIn('data-event-group="official"', html)
+        self.assertIn("極端", html)
+        self.assertIn("顯著", html)
+        self.assertLess(html.index("斐成"), html.index("邦睿生技-創"))
+
+    def test_shell_uses_collapsible_dashboard_sidebar_with_accessible_toggle(self):
+        html = stock_app.app.test_client().get("/dashboard").get_data(as_text=True)
+        script = Path(stock_app.app.static_folder, "app.js").read_text(encoding="utf-8")
+
+        for marker in (
+            'class="dashboard-sidebar"',
+            'data-sidebar-toggle',
+            'aria-controls="dashboard-sidebar"',
+            'aria-expanded="true"',
+            'id="dashboard-sidebar"',
+        ):
+            self.assertIn(marker, html)
+        self.assertIn("initSidebar", script)
+        self.assertIn('event.key === "Escape"', script)
+
+    @patch.object(stock_app, "fetch_published_quant_snapshot")
+    def test_stock_page_does_not_train_or_infer_a_forecast_during_request(self, fetch):
+        fetch.return_value = quant_snapshot()
+
+        html = stock_app.app.test_client().get("/stock/2330").get_data(as_text=True)
+
+        self.assertIn("AI 五日預測尚未發布", html)
+        self.assertNotIn("五日上漲機率", html)
+
+    def test_chart_renderer_draws_market_candles_and_prediction_marker(self):
+        script = Path(stock_app.app.static_folder, "app.js").read_text(
+            encoding="utf-8"
+        )
+
+        for marker in (
+            "initMarketIndexChart",
+            'bySelector("#market-index-chart")',
+            'bySelector("#market-index-chart-data")',
+            "predictionSeries.setMarkers",
+            'text: "AI 5日"',
+            "LineStyle.Dashed",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, script)
+
     def test_data_freshness_classifier_preserves_verified_dates_and_states(self):
         classifier = getattr(web_routes.system, "classify_data_freshness", None)
 
@@ -584,9 +804,9 @@ class WebProductTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         for label in (
-            "產業實際強弱",
+            "產業強弱與關注清單",
             "近 5 日相對大盤報酬",
-            "產業觀察",
+            "關注公司",
         ):
             self.assertIn(label, html)
         for forbidden in (
@@ -650,7 +870,7 @@ class WebProductTests(unittest.TestCase):
         self.assertIn(".market-switch a{display:grid;min-height:44px", css)
         self.assertIn(".quick-ask-backdrop[hidden]{display:none}", css)
         self.assertIn(".quick-ask-header button{display:grid;width:44px;height:44px", css)
-        self.assertIn("--command-content-max:1760px", css)
+        self.assertIn("--command-content-max:3200px", css)
         self.assertIn("--command-muted:#536575", css)
         self.assertIn(".evidence-canvas{", css)
         self.assertIn("background:var(--command-accent-surface)", css)
@@ -704,6 +924,54 @@ class WebProductTests(unittest.TestCase):
         self.assertIn('data-market="US"', detail_html)
         self.assertIn('class="back-link" href="/us"', detail_html)
 
+    def test_us_dashboard_renders_three_index_forecasts_and_actual_charts(self):
+        summary = {
+            "source_market_date": "2026-08-26",
+            "applicable_trading_date": "2026-08-27",
+            "executive_summary": {
+                "one_line_conclusion": "美股市場摘要",
+                "largest_risk": "波動仍需觀察",
+            },
+            "key_events": [],
+            "validation": {"status": "unavailable", "reason": ""},
+            "market": {"status": "available"},
+            "industries": {"status": "available"},
+        }
+        forecasts = []
+        for symbol, name, price in (
+            ("^GSPC", "S&P 500", 6500.0),
+            ("^IXIC", "Nasdaq Composite", 22000.0),
+            ("^DJI", "道瓊工業指數", 46000.0),
+        ):
+            forecasts.append({
+                "symbol": symbol, "name": name, "status": "current",
+                "as_of": "2026-08-26", "target_session": "2026-09-02",
+                "current_price": price, "probability_pct": 61.0,
+                "probability_label": "五日上漲機率",
+                "predicted_price": price * 1.02, "predicted_change_pct": 2.0,
+                "line": [
+                    {"time": "2026-08-26", "value": price},
+                    {"time": "2026-09-02", "value": price * 1.02},
+                ],
+                "candles": [
+                    {"time": "2026-08-25", "open": price - 20, "high": price + 10, "low": price - 30, "close": price - 10},
+                    {"time": "2026-08-26", "open": price - 10, "high": price + 20, "low": price - 15, "close": price},
+                ],
+            })
+
+        with stock_app.app.test_request_context("/us"):
+            html = render_template(
+                "us_dashboard.html", summary=summary, market="US",
+                index_predictions=forecasts, data_freshness={},
+            )
+
+        for marker in (
+            "S&amp;P 500", "Nasdaq Composite", "道瓊工業指數",
+            "五日上漲機率", "61.0%", "2026-09-02",
+            'id="us-index-chart"', 'id="us-index-chart-data"',
+        ):
+            self.assertIn(marker, html)
+
     def test_us_stocks_disables_tw_dashboard_hydration(self):
         client = stock_app.app.test_client()
         with patch.object(
@@ -717,7 +985,10 @@ class WebProductTests(unittest.TestCase):
         self.assertIn('data-market="US"', html)
         self.assertNotIn('data-dashboard-endpoint', html)
         self.assertNotIn("TAIEX", html)
-        self.assertIn("目前沒有通過條件的異常事件。", html)
+        self.assertIn("目前沒有異常上漲事件。", html)
+        self.assertIn("目前沒有異常下跌事件。", html)
+        for label in ("量能異常", "法人動向", "技術面", "官方", "資料警示"):
+            self.assertIn(f"目前沒有{label}事件。", html)
         self.assertIn('action="/search"', html)
         self.assertIn('name="market" value="US"', html)
 
@@ -809,8 +1080,8 @@ class WebProductTests(unittest.TestCase):
             "產業觀察",
             "市場實況",
             "個股與 ETF",
-            "Ask ABSORB",
-            "AI 預測研究中",
+            "ASK ABSORB",
+            "AI 五日情境",
         ):
             self.assertIn(label, html)
         for forbidden in (
@@ -916,6 +1187,97 @@ class WebProductTests(unittest.TestCase):
             with self.subTest(marker=marker):
                 self.assertIn(marker, html)
 
+    @patch.object(stock_app, "_published_prediction_snapshot")
+    @patch.object(stock_app, "fetch_published_quant_snapshot")
+    def test_stock_chart_renders_only_verified_prediction_product(
+        self, fetch, load_prediction
+    ):
+        fetch.return_value = quant_snapshot()
+        load_prediction.return_value = prediction_product()
+
+        response = stock_app.app.test_client().get("/stock/2330")
+        html = response.get_data(as_text=True)
+
+        self.assertEqual(response.status_code, 200)
+        for marker in (
+            "五日上漲機率", "68.0%", "171.00", "+4.27%", "2026-07-22",
+            '"time": "2026-07-22"', '"value": 171.0028',
+        ):
+            self.assertIn(marker, html)
+        self.assertNotIn("買進", html)
+        self.assertNotIn("賣出", html)
+
+    def test_dashboard_destinations_live_in_sidebar_navigation(self):
+        html = stock_app.app.test_client().get("/dashboard").get_data(as_text=True)
+        primary_nav = html.split('<nav class="sidebar-nav"', 1)[1].split("</nav>", 1)[0]
+
+        self.assertIn('href="/ask"', primary_nav)
+        self.assertIn('<span class="nav-label">ASK ABSORB</span>', primary_nav)
+        self.assertIn('href="/learn"', primary_nav)
+        self.assertIn('<span class="nav-label">學習</span>', primary_nav)
+        self.assertNotIn('class="dashboard-destinations"', html)
+
+    @patch.object(stock_app, "_published_dashboard_snapshot")
+    def test_industries_merge_strength_and_attention_companies(self, load_snapshot):
+        snapshot = observation_dashboard()
+        snapshot["industry_observations"][0].update(
+            {
+                "relative_return_5d_pct": 2.85,
+                "ranking_basis": "actual_momentum",
+                "attention_companies": [
+                    {
+                        "symbol": "2330",
+                        "name": "台積電",
+                        "price": 1245.0,
+                        "return_5d_pct": 8.2,
+                        "above_ma20": True,
+                        "volume_ratio": 1.8,
+                        "as_of": "2026-07-15",
+                    }
+                ],
+            }
+        )
+        load_snapshot.return_value = snapshot
+
+        html = stock_app.app.test_client().get("/industries").get_data(as_text=True)
+
+        self.assertNotIn("產業實際強弱", html)
+        self.assertEqual(html.count('data-industry-disclosure'), 1)
+        self.assertIn('class="industry-disclosure hot"', html)
+        self.assertIn("實際動能排序", html)
+        self.assertIn('href="/stock/2330"', html)
+        self.assertIn("台積電 · 2330", html)
+        self.assertIn("5 日 +8.20%", html)
+
+    @patch.object(stock_app, "_published_dashboard_snapshot")
+    def test_industries_render_verified_ai_fields_when_published(self, load_snapshot):
+        snapshot = observation_dashboard()
+        snapshot["industry_observations"][0].update(
+            {
+                "ranking_basis": "verified_ai_forecast",
+                "attention_companies": [
+                    {
+                        "symbol": "2330",
+                        "name": "台積電",
+                        "price": 1245.0,
+                        "return_5d_pct": 8.2,
+                        "above_ma20": True,
+                        "volume_ratio": 1.8,
+                        "as_of": "2026-07-15",
+                        "probability_up_pct": 68.4,
+                        "target_price": 1272.5,
+                    }
+                ],
+            }
+        )
+        load_snapshot.return_value = snapshot
+
+        html = stock_app.app.test_client().get("/industries").get_data(as_text=True)
+
+        self.assertIn("AI 五日模型排序", html)
+        self.assertIn("68.4%", html)
+        self.assertIn("第 5 日 1,272.50", html)
+
     @patch.object(
         stock_app, "_published_dashboard_snapshot", return_value=observation_dashboard()
     )
@@ -931,15 +1293,14 @@ class WebProductTests(unittest.TestCase):
             with self.subTest(path=path):
                 html = client.get(path).get_data(as_text=True)
                 self.assertIn(
-                    f'class="nav-link active" href="{path if path != "/dashboard" else "/"}" aria-current="page">{label}',
+                    f'class="nav-link active" href="{path if path != "/dashboard" else "/"}" aria-label="{label}" aria-current="page"',
                     html,
                 )
         home = client.get("/dashboard").get_data(as_text=True)
-        primary_nav = home.split('<nav class="nav-list">', 1)[1].split("</nav>", 1)[0]
-        mobile_nav = home.split('<nav class="mobile-nav"', 1)[1].split("</nav>", 1)[0]
+        primary_nav = home.split('<nav class="sidebar-nav"', 1)[1].split("</nav>", 1)[0]
         self.assertNotIn('href="#', primary_nav)
-        self.assertNotIn('href="#', mobile_nav)
-        self.assertIn('aria-current="page">今天</a>', mobile_nav)
+        self.assertNotIn('class="mobile-nav"', home)
+        self.assertIn('aria-current="page"><span class="nav-short"', primary_nav)
         ask = client.get("/ask").get_data(as_text=True)
         self.assertIn('<h1>ASK ABSORB</h1>', ask)
 
@@ -1247,8 +1608,59 @@ class WebProductTests(unittest.TestCase):
             "min-height:44px",
         ):
             self.assertIn(rule, css)
-        self.assertIn("grid-template-columns:repeat(5,1fr)", css)
-        self.assertIn('href="/reports">每日報告</a>', html)
+        self.assertIn(".dashboard-sidebar", css)
+        self.assertIn('aria-controls="dashboard-sidebar"', html)
+        self.assertIn('<span class="nav-label">每日報告</span>', html)
+
+    def test_web_shell_serves_one_wordmark_font_across_devices(self):
+        client = stock_app.app.test_client()
+        response = client.get("/static/fonts/absorb-wordmark.woff2")
+        font_payload = response.get_data()
+        response.close()
+        css = Path(stock_app.app.static_folder, "app.css").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertGreater(len(font_payload), 1_000)
+        self.assertIn('font-family:"ABSORB Wordmark"', css)
+        self.assertIn('url("fonts/absorb-wordmark.woff2") format("woff2")', css)
+        self.assertIn(
+            'font-family:"ABSORB Wordmark","Segoe Script","Brush Script MT",cursive',
+            css,
+        )
+
+    def test_web_shell_uses_softened_neutral_paper_surfaces(self):
+        css = Path(stock_app.app.static_folder, "app.css").read_text(
+            encoding="utf-8"
+        )
+        manifest = json.loads(
+            Path(stock_app.app.static_folder, "manifest.webmanifest").read_text(
+                encoding="utf-8"
+            )
+        )
+
+        self.assertIn("--absorb-surface:#f5f5f2", css)
+        self.assertIn("--command-paper:#f7f6f2", css)
+        self.assertIn("background:var(--command-paper)", css)
+        self.assertNotIn("gradient", css)
+        self.assertNotIn("backdrop-filter", css)
+        self.assertEqual(manifest["background_color"], "#f7f6f2")
+
+    def test_research_layout_supports_4k_and_tall_ask_workspace(self):
+        css = Path(stock_app.app.static_folder, "app.css").read_text(
+            encoding="utf-8"
+        ).replace(" ", "").replace("\n", "")
+
+        self.assertIn("--command-content-max:3200px", css)
+        self.assertIn("@media(min-width:1800px)", css)
+        self.assertIn("body{font-size:18px}", css)
+        self.assertIn(".nav-link{font-size:17px}", css)
+        self.assertIn("height:60vh", css)
+        self.assertIn(".quick-ask-log{flex:1", css)
+        self.assertIn(".industry-disclosure-list{", css)
+        self.assertIn(".industry-disclosure.hot{", css)
+        self.assertIn(".industry-disclosure.cold{", css)
 
     def test_browser_bundle_has_no_local_watchlist_storage(self):
         source = Path(stock_app.app.static_folder, "app.js").read_text(

@@ -60,7 +60,7 @@ class ReleaseOperationsTests(unittest.TestCase):
         self.assertIn("$LifecycleRules = @(", source)
         self.assertNotIn("$LifecycleRules = if (", source)
 
-    def test_cutover_quant_pointer_supports_tw_manifest_v3_and_us_manifest_v2(self) -> None:
+    def test_cutover_quant_pointer_supports_tw_v3_and_tw_us_v4(self) -> None:
         source = CUTOVER.read_text(encoding="utf-8")
         pointer = source[
             source.index("function Test-MarketPointer"):
@@ -69,7 +69,7 @@ class ReleaseOperationsTests(unittest.TestCase):
 
         for required in (
             "$Latest.schema_version -notin @(2, 3, 4)",
-            "Manifest v3/v4 is TW-only",
+            "Manifest v3 is TW-only",
             "Get-ObservationManifestCoverage",
             "ExpectedSha256",
             "generated_at",

@@ -4,6 +4,7 @@ from flask import abort, jsonify, redirect, render_template, url_for
 
 from stock_papi.shared.formatting import safe_float as _safe_float
 from stock_papi.services.model_evidence import sanitize_recommendation
+from stock_papi.services.prediction_view import prediction_for
 
 
 def register_market_routes(
@@ -12,6 +13,7 @@ def register_market_routes(
     market_insights_payload, twstock_codes, is_us_ticker,
     find_industry_peers, get_stock_name, dashboard_snapshot,
     us_securities_observation,
+    prediction_snapshot,
 ):
     def dashboard_api():
         snapshot = dashboard_snapshot()
@@ -128,8 +130,16 @@ def register_market_routes(
         market = "US" if is_us_ticker(code) else "TW"
         peer_group = find_industry_peers(code)
         peers = [{"code": peer, "name": get_stock_name(peer)} for peer in peer_group["codes"]]
+        prediction = None
+        if data and data.get("observation_kind") == "regular_price":
+            try:
+                prediction = prediction_for(
+                    prediction_snapshot(market), market, code, data.get("observation_as_of")
+                )
+            except Exception:
+                prediction = None
         return render_template(
-            "stock_detail.html", d={**data, "market": market}, peers=peers,
+            "stock_detail.html", d={**data, "market": market, "prediction": prediction}, peers=peers,
             peer_category=peer_group["category"],
         ) if data else "查無資料"
 

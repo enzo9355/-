@@ -28,6 +28,21 @@ class FakeClassifier:
         return np.tile([1 - probability, probability], (len(features), 1))
 
 
+class FakeRegressor:
+    fit_sizes = []
+
+    def __init__(self, **_settings):
+        self.training_size = 0
+
+    def fit(self, features, _target):
+        self.training_size = len(features)
+        self.fit_sizes.append(self.training_size)
+        return self
+
+    def predict(self, features):
+        return np.full(len(features), 0.03)
+
+
 def frame_and_target():
     rows = 140
     frame = pd.DataFrame(
@@ -37,6 +52,7 @@ def frame_and_target():
         },
         index=pd.date_range("2026-01-01", periods=rows, freq="B"),
     )
+    frame["Close"] = np.linspace(100.0, 120.0, rows)
 
     def add_target(value):
         result = value.copy()
@@ -50,7 +66,11 @@ def frame_and_target():
 class DailyInferenceTests(unittest.TestCase):
     def setUp(self):
         FakeClassifier.fit_sizes = []
-        self.lightgbm = SimpleNamespace(LGBMClassifier=FakeClassifier)
+        FakeRegressor.fit_sizes = []
+        self.lightgbm = SimpleNamespace(
+            LGBMClassifier=FakeClassifier,
+            LGBMRegressor=FakeRegressor,
+        )
         self.logger = logging.getLogger("test-daily-inference")
 
     def test_fast_lane_fits_once_and_never_builds_walk_forward_folds(self):
@@ -68,6 +88,11 @@ class DailyInferenceTests(unittest.TestCase):
         self.assertEqual(result["model_version"], "lgbm-5d-v1")
         self.assertAlmostEqual(frame["AI_P"].iloc[-1], result["probability"])
         self.assertEqual(frame["AI_P"].notna().sum(), 1)
+        self.assertAlmostEqual(result["predicted_return_5d"], 0.03)
+        self.assertAlmostEqual(result["predicted_price_5d"], 123.6)
+        self.assertAlmostEqual(frame["AI_PRED_RET_5"].iloc[-1], 0.03)
+        self.assertAlmostEqual(frame["AI_PRED_PRICE_5"].iloc[-1], 123.6)
+        self.assertEqual(FakeRegressor.fit_sizes, [140])
 
     def test_fast_lane_and_full_engine_have_identical_latest_probability(self):
         fast_frame, add_target = frame_and_target()
@@ -99,7 +124,11 @@ class DailyInferenceTests(unittest.TestCase):
 
         self.assertIsNotNone(metrics)
         self.assertAlmostEqual(fast["probability"], full_frame["AI_P"].iloc[-1])
+        self.assertAlmostEqual(
+            fast["predicted_price_5d"], full_frame["AI_PRED_PRICE_5"].iloc[-1]
+        )
         self.assertEqual(FakeClassifier.fit_sizes, [140, 80, 140])
+        self.assertEqual(FakeRegressor.fit_sizes, [140, 80, 140])
 
     def test_full_engine_can_return_immutable_oos_evidence_without_changing_default(self):
         frame, add_target = frame_and_target()
@@ -125,6 +154,16 @@ class DailyInferenceTests(unittest.TestCase):
         self.assertEqual(metrics["fold_count"], 1)
         self.assertTrue(metrics["five_session_gap"])
         self.assertEqual(metrics["oos_predictions"][0]["fold_index"], 0)
+        self.assertAlmostEqual(
+            metrics["oos_predictions"][0]["predicted_return"], 0.03
+        )
+        self.assertEqual(metrics["price_metrics"]["sample_count"], 30)
+        self.assertAlmostEqual(metrics["price_metrics"]["mae"], 0.03)
+        self.assertAlmostEqual(
+            metrics["price_metrics"]["rmse"], 0.03605551275463989
+        )
+        self.assertAlmostEqual(metrics["price_metrics"]["naive_mae"], 0.02)
+        self.assertAlmostEqual(metrics["price_metrics"]["mae_ratio"], 1.5)
 
 
 if __name__ == "__main__":

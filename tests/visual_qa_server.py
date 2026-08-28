@@ -6,6 +6,7 @@ LINE, Firestore, market providers, or the formal report publishing pipeline.
 
 import datetime
 import json
+import math
 import os
 import tempfile
 from pathlib import Path
@@ -25,6 +26,7 @@ import app as stock_app
 from flask import redirect
 
 from reporting.observation_v2 import build_post_close_observation_metadata
+from reporting.professional_builder import build_professional_post_close_artifact
 from reporting.publisher import publish_report_v2
 from stock_papi.services.auth import sign_opaque_token
 from tests.test_observation_public_surfaces import (
@@ -151,6 +153,144 @@ def analysis_data():
     }
 
 
+def visual_dashboard():
+    snapshot = observation_dashboard()
+    snapshot["industry_observations"][0].update(
+        {
+            "relative_return_5d_pct": 2.85,
+            "ranking_basis": "verified_ai_forecast",
+            "attention_companies": [
+                {
+                    "symbol": "2330", "name": "台積電", "price": 1245.0,
+                    "return_5d_pct": 4.8, "above_ma20": True, "volume_ratio": 1.42,
+                    "as_of": "2026-07-15", "probability_up_pct": 68.4, "target_price": 1272.5,
+                },
+                {
+                    "symbol": "2454", "name": "聯發科", "price": 1380.0,
+                    "return_5d_pct": 3.9, "above_ma20": True, "volume_ratio": 1.18,
+                    "as_of": "2026-07-15", "probability_up_pct": 63.1, "target_price": 1416.0,
+                },
+                {
+                    "symbol": "2303", "name": "聯電", "price": 49.2,
+                    "return_5d_pct": 2.7, "above_ma20": True, "volume_ratio": 1.11,
+                    "as_of": "2026-07-15", "probability_up_pct": 59.8, "target_price": 50.35,
+                },
+            ],
+        }
+    )
+    dates = []
+    current = datetime.date(2026, 7, 15)
+    while len(dates) < 65:
+        if current.weekday() < 5:
+            dates.append(current)
+        current -= datetime.timedelta(days=1)
+    dates.reverse()
+    candles = []
+    ma20 = []
+    closes = []
+    previous_close = 21840.0
+    for index, day in enumerate(dates):
+        close = 21840 + index * 18.5 + math.sin(index / 4.2) * 155
+        open_value = previous_close + math.sin(index * 1.7) * 34
+        high = max(open_value, close) + 46 + (index % 4) * 7
+        low = min(open_value, close) - 42 - (index % 3) * 8
+        candles.append({
+            "time": day.isoformat(),
+            "open": round(open_value, 2),
+            "high": round(high, 2),
+            "low": round(low, 2),
+            "close": round(close, 2),
+        })
+        closes.append(close)
+        if len(closes) >= 20:
+            ma20.append({
+                "time": day.isoformat(),
+                "value": round(sum(closes[-20:]) / 20, 2),
+            })
+        previous_close = close
+    latest = candles[-1]
+    prior_close = candles[-2]["close"]
+    change = latest["close"] - prior_close
+    snapshot["market_index"] = {
+        "symbol": "TAIEX",
+        "name": "加權指數",
+        "as_of": latest["time"],
+        "price": latest["close"],
+        "change": round(change, 2),
+        "change_pct": round(change / prior_close * 100, 2),
+        "open": latest["open"],
+        "high": latest["high"],
+        "low": latest["low"],
+        "candles": candles,
+        "ma20": ma20,
+        "returns": {},
+        "source": {"provider": "TWSE", "kind": "official_index_daily"},
+    }
+    return snapshot
+
+
+def visual_quant_snapshot(code="2330", market="TW"):
+    return quant_snapshot(symbol=code, market=market)
+
+
+def visual_prediction_snapshot(market):
+    if market == "US":
+        entities = {}
+        for symbol, current, predicted_return, probability in (
+            ("^GSPC", 6500.0, 0.018, 0.61),
+            ("^IXIC", 22000.0, 0.024, 0.64),
+            ("^DJI", 46000.0, 0.012, 0.58),
+        ):
+            entities[symbol] = {
+                "symbol": symbol,
+                "entity_type": "market_index",
+                "as_of": "2026-07-15",
+                "target_session": "2026-07-22",
+                "current_price": current,
+                "up_probability": probability,
+                "predicted_return_5d": predicted_return,
+                "predicted_price": current * (1 + predicted_return),
+                "predicted_change_pct": predicted_return * 100,
+                "candles": [
+                    {"time": "2026-07-14", "open": current - 30, "high": current + 10, "low": current - 40, "close": current - 15},
+                    {"time": "2026-07-15", "open": current - 15, "high": current + 25, "low": current - 20, "close": current},
+                ],
+            }
+        return {
+            "schema_version": 1,
+            "kind": "absorb-five-session-predictions",
+            "market": "US",
+            "as_of": "2026-07-15",
+            "model_version": "lgbm-5d-v1",
+            "backtest_sha256": "c" * 64,
+            "entities": entities,
+        }
+    index = visual_dashboard()["market_index"]
+    current, predicted_return = index["price"], 0.028
+    return {
+        "schema_version": 1,
+        "kind": "absorb-five-session-predictions",
+        "market": "TW",
+        "as_of": index["as_of"],
+        "model_version": "lgbm-5d-v1",
+        "backtest_sha256": "b" * 64,
+        "entities": {
+            "TAIEX": {
+                "symbol": "TAIEX",
+                "entity_type": "market_index",
+                "as_of": index["as_of"],
+                "target_session": "2026-07-22",
+                "current_price": current,
+                "up_probability": 0.64,
+                "predicted_return_5d": predicted_return,
+                "predicted_price": current * (1 + predicted_return),
+                "predicted_change_pct": predicted_return * 100,
+                "candles": index["candles"],
+            }
+        },
+    }
+
+
 REPORT_ITEM = {
     "report_date": "2026-07-11", "data_as_of": "2026-07-11", "coverage": 0.94,
     "market_action": "控制追價", "headline": "市場偏多，但高檔波動仍需控制部位",
@@ -194,8 +334,9 @@ REPORT_METADATA = {
 }
 
 
-stock_app._published_dashboard_snapshot = observation_dashboard
-stock_app.fetch_published_quant_snapshot = quant_snapshot
+stock_app._published_dashboard_snapshot = visual_dashboard
+stock_app._published_prediction_snapshot = visual_prediction_snapshot
+stock_app.fetch_published_quant_snapshot = visual_quant_snapshot
 stock_app.find_industry_peers = lambda _code: {"category": "半導體", "codes": ["2454"]}
 stock_app.get_stock_name = lambda code: "聯發科" if code == "2454" else "台積電"
 
@@ -212,6 +353,17 @@ publish_report_v2(
     build_post_close_observation_metadata(
         observation_dashboard(),
         VisualCalendar(),
+    ),
+)
+_US_METADATA = build_post_close_observation_metadata(
+    observation_dashboard(), VisualCalendar()
+)
+_US_METADATA.update(market="US", title="2026-07-15 美股盤後市場觀察")
+publish_report_v2(
+    _REPORT_PUBLISH,
+    _US_METADATA,
+    professional_report=build_professional_post_close_artifact(
+        _US_METADATA, code_commit_sha="b" * 40
     ),
 )
 _REPORT_V2_ROOT = _REPORT_PUBLISH / "publish" / "reports" / "v2"

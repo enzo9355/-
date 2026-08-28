@@ -15,6 +15,7 @@ JOB_TYPES = (
     "post_close_report",
     "pre_market_update",
     "full_backtest",
+    "full_backtest_us",
     "weekly_model_report",
     "upload",
 )

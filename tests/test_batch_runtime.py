@@ -20,6 +20,7 @@ UTC = datetime.timezone.utc
 class BatchRuntimeTests(unittest.TestCase):
     def test_daily_observation_has_an_isolated_priority_lock(self):
         self.assertIn("daily_observation", JOB_TYPES)
+        self.assertIn("full_backtest_us", JOB_TYPES)
         self.assertIn("daily_observation", DAILY_JOB_TYPES)
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

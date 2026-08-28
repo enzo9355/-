@@ -7,6 +7,7 @@ _ALLOWED_PREFIXES = {
     "reports/v1/",
     "reports/v2/",
     "dashboard/v1/",
+    "predictions/v1/",
     "previews/",
 }
 

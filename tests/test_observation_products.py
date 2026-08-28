@@ -9,7 +9,10 @@ from reporting.schemas import (
     StockSnapshot,
 )
 from stock_papi.config.capabilities import PredictionCapabilityState
-from stock_papi.batch.observation_products import build_observation_dashboard
+from stock_papi.batch.observation_products import (
+    build_observation_dashboard,
+    validate_observation_dashboard,
+)
 from tests.report_fixtures import warmup_stock_document
 from stock_papi.integrations.market_data.tw_trading_status import (
     evidence_sha256,
@@ -327,6 +330,54 @@ class ObservationProductsTests(unittest.TestCase):
             set(_walk_keys(document)).intersection(FORBIDDEN_KEYS), set()
         )
 
+    def test_verified_taiex_actuals_can_be_published_without_prediction_fields(self):
+        market_index = {
+            "symbol": "TAIEX",
+            "name": "加權指數",
+            "source": "臺灣證券交易所",
+            "as_of": "2026-07-16",
+            "price": 23150.25,
+            "change": 188.4,
+            "change_pct": 0.82,
+            "open": 22982.1,
+            "high": 23210.8,
+            "low": 22940.6,
+            "candles": [
+                {"time": "2026-07-15", "open": 22800.0, "high": 23010.0, "low": 22760.0, "close": 22961.85},
+                {"time": "2026-07-16", "open": 22982.1, "high": 23210.8, "low": 22940.6, "close": 23150.25},
+            ],
+            "ma20": [],
+            "returns": {"1d": 0.82, "5d": 1.4, "20d": 2.1, "60d": None},
+        }
+
+        document = build_observation_dashboard(
+            _source(copy.deepcopy(self.stocks)),
+            self.industry_map,
+            _capability(),
+            market_index=market_index,
+            generated_at=self.generated_at,
+            today=datetime.date(2026, 7, 17),
+        )
+
+        self.assertEqual(document["market_index"], market_index)
+        self.assertNotIn("prediction_display", document["market_index"])
+
+        malformed = copy.deepcopy(document)
+        malformed["market_index"] = "not-an-index"
+        with self.assertRaisesRegex(ValueError, "market index"):
+            validate_observation_dashboard(malformed)
+
+        market_index["prediction_display"] = {"probability": 60}
+        with self.assertRaisesRegex(ValueError, "market index"):
+            build_observation_dashboard(
+                _source(copy.deepcopy(self.stocks)),
+                self.industry_map,
+                _capability(),
+                market_index=market_index,
+                generated_at=self.generated_at,
+                today=datetime.date(2026, 7, 17),
+            )
+
     def test_industry_display_order_uses_actual_relative_return(self):
         document = self.build()
 
@@ -341,6 +392,55 @@ class ObservationProductsTests(unittest.TestCase):
         self.assertEqual(
             document["heatmap"][0]["metric_name"], "relative_return_5d_pct"
         )
+
+    def test_industry_attention_companies_are_deterministic_actual_observations(self):
+        stocks = [
+            _stock("1001", [100.0] * 60 + [100, 102, 104, 106, 108, 110], name="甲", volume_ratio=1.0),
+            _stock("1002", [100.0] * 60 + [100, 102, 104, 106, 108, 110], name="乙", volume_ratio=5.0),
+            _stock("1003", [100.0] * 60 + [100, 101, 103, 105, 107, 108], name="丙", volume_ratio=2.0),
+            _stock("1004", [100.0] * 60 + [100, 101, 103, 105, 107, 108], name="丁", volume_ratio=1.0),
+            _stock("1005", [100.0] * 60 + [100, 101, 102, 103, 104, 105], name="戊", volume_ratio=3.0),
+            _stock("1006", [100.0] * 60 + [100, 100, 100, 101, 101, 102], name="己", volume_ratio=4.0),
+        ]
+        stocks[1].daily[-1]["MA20"] = stocks[1].daily[-1]["Close"] + 1
+        industry_map = {
+            "全市場": [stock.symbol for stock in stocks],
+            "測試產業": [stock.symbol for stock in reversed(stocks)],
+            "ETF專區": [],
+        }
+
+        document = build_observation_dashboard(
+            _source(stocks),
+            industry_map,
+            _capability(),
+            generated_at=self.generated_at,
+            today=datetime.date(2026, 7, 17),
+        )
+        industry = document["industry_observations"][0]
+
+        self.assertEqual(industry["ranking_basis"], "actual_momentum")
+        self.assertEqual(
+            [item["symbol"] for item in industry["attention_companies"]],
+            ["1001", "1002", "1003", "1004", "1005"],
+        )
+        self.assertEqual(industry["attention_companies"][0]["name"], "甲")
+        self.assertEqual(industry["attention_companies"][0]["return_5d_pct"], 10.0)
+        self.assertTrue(industry["attention_companies"][0]["above_ma20"])
+        self.assertFalse(industry["attention_companies"][1]["above_ma20"])
+        for item in industry["attention_companies"]:
+            self.assertEqual(
+                set(item),
+                {
+                    "symbol",
+                    "name",
+                    "price",
+                    "return_5d_pct",
+                    "above_ma20",
+                    "volume_ratio",
+                    "as_of",
+                },
+            )
+            self.assertFalse(set(item).intersection(FORBIDDEN_KEYS))
 
     def test_rejects_sample_low_coverage_stale_and_non_finite_sources(self):
         sample = _source(copy.deepcopy(self.stocks))

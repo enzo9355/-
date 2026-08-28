@@ -28,6 +28,7 @@ def _write_atomic(path, document):
 def main(argv=None):
     parser = argparse.ArgumentParser(description="ABSORB resumable full backtest")
     parser.add_argument("--root", type=Path, default=Path(r"D:\AbsorbData"))
+    parser.add_argument("--market", choices=("TW", "US"), default="TW")
     parser.add_argument("--max-items", type=int, default=25)
     parser.add_argument("--verify-completion", action="store_true")
     args = parser.parse_args(argv)
@@ -37,17 +38,23 @@ def main(argv=None):
     from stock_papi.batch.runtime import job_namespace
     from stock_papi.batch.status import PipelineStatusWriter
 
-    source = load_report_source(args.root, market="TW")
+    source = load_report_source(args.root, market=args.market)
     manifest = source.manifest
     versions = {stock.model_version for stock in source.stocks}
     if len(versions) != 1:
         raise ValueError("full backtest requires one source model version")
-    model_version = next(iter(versions))
     items = tuple(stock.symbol for stock in source.stocks)
-    from stock_papi.quant.model import FEATURE_SCHEMA_VERSION
+    from stock_papi.quant.model import FEATURE_SCHEMA_VERSION, MODEL_VERSION
+
+    model_version = (
+        MODEL_VERSION
+        if getattr(manifest, "schema_version", 2) in (3, 4)
+        else next(iter(versions))
+    )
 
     worker = FullBacktestWorker(
         args.root,
+        market=args.market,
         dataset_manifest=f"quant/v1/{manifest.manifest_path}",
         dataset_sha256=manifest.manifest_sha256,
         model_version=model_version,
@@ -64,11 +71,12 @@ def main(argv=None):
 
     from local_quant import load_stock_pipeline
     pipeline = load_stock_pipeline(args.root)
-    namespace = job_namespace(args.root, "full_backtest")
+    job_type = "full_backtest" if args.market == "TW" else "full_backtest_us"
+    namespace = job_namespace(args.root, job_type)
     result_root = namespace.output / manifest.manifest_sha256 / "symbols"
     writer = PipelineStatusWriter(
         args.root,
-        job_type="full_backtest",
+        job_type=job_type,
         run_id=f"{manifest.market_as_of.strftime('%Y%m%d')}T000000Z-{manifest.manifest_sha256[:8]}",
         target_date=manifest.market_as_of,
     )
@@ -84,7 +92,7 @@ def main(argv=None):
             ):
                 return
             raise ValueError("full backtest result identity mismatch")
-        frame = pipeline.get_data(symbol, 730)
+        frame = pipeline.get_data(symbol, 730, as_of=manifest.market_as_of)
         if frame is None or frame.empty:
             raise ValueError("price history is unavailable")
         frame = pipeline.calc_all(frame)
@@ -106,7 +114,7 @@ def main(argv=None):
             result_path,
             {
                 "schema_version": 1,
-                "market": "TW",
+                "market": args.market,
                 "symbol": symbol,
                 "cutoff": manifest.market_as_of.isoformat(),
                 "dataset_manifest": f"quant/v1/{manifest.manifest_path}",

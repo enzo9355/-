@@ -67,7 +67,7 @@ function Invoke-WebRequest {{
     $key = $request.PathAndQuery
     $content = switch -Regex ($key) {{
         '^/health/data$' {{ '{{"service":{{"status":"ok"}},"markets":{{"TW":{{"status":"current"}},"US":{{"status":"current"}}}}}}'; break }}
-        '^/api/dashboard$' {{ '{{"product_mode":"observation","market_observation":{{}},"industry_observations":[],"data_quality":{{}}}}'; break }}
+        '^/api/dashboard$' {{ '{{"product_mode":"observation","market_observation":{{}},"market_index":{{}},"industry_observations":[],"data_quality":{{}}}}'; break }}
         '^/$' {{ '<html><body data-market="TW"><link href="/static/app.css?v=abcdef123456"><script src="/static/app.js?v=abcdef123456"></script></body></html>'; break }}
         '^/reports$' {{ '<body data-market="TW"><a href="/reports/2026-08-21/post-close">post</a><a href="/reports/2026-08-21/pre-market">pre</a></body>'; break }}
         '^/reports/2026-08-21/post-close$' {{ '<body data-market="TW"><div class="professional-report">market-actuals-title</div></body>'; break }}
@@ -243,7 +243,7 @@ $results = @(Invoke-ObservationSmoke -BaseUrl 'https://candidate.example')
         self.assertGreaterEqual(source.count("rev-parse HEAD"), 2)
         self.assertGreaterEqual(source.count("rev-parse 'HEAD^{tree}'"), 2)
 
-    def test_smoke_and_cutover_verification_forbid_prediction_payloads(self) -> None:
+    def test_smoke_forbids_prediction_and_model_metadata(self) -> None:
         deploy = DEPLOY.read_text(encoding="utf-8")
         verify = VERIFY.read_text(encoding="utf-8")
 
@@ -259,6 +259,11 @@ $results = @(Invoke-ObservationSmoke -BaseUrl 'https://candidate.example')
             self.assertIn(key, deploy)
             self.assertIn(key, verify)
 
+        deploy_forbidden = deploy[deploy.index("$ForbiddenPredictionKeys"):deploy.index("function Invoke-Gcloud")]
+        verify_forbidden = verify[verify.index("$ObservationForbiddenKeys"):verify.index("function Assert-ObservationNoPredictionKeys")]
+        self.assertIn("'model_version'", deploy_forbidden)
+        self.assertIn("'model_version'", verify_forbidden)
+
         for required in (
             "ObservationOnly",
             "product_mode",
@@ -266,10 +271,15 @@ $results = @(Invoke-ObservationSmoke -BaseUrl 'https://candidate.example')
             "ABSORB_PREDICTION_MODE",
             "ABSORB_PREVIEW_CANDIDATE_PREFIX",
             "dashboard/v1/latest-TW.json",
+            "predictions/v1/latest-TW.json",
+            "predictions/v1/latest-US.json",
             "reports/v2/index-TW.json",
             "/api/dashboard",
         ):
             self.assertIn(required, verify)
+
+        self.assertIn("$null -eq $Document.market_index", deploy)
+        self.assertIn("$null -eq $Dashboard.market_index", verify)
 
         self.assertNotIn("run', 'deploy'", verify)
         self.assertNotIn("storage', 'rm'", verify)

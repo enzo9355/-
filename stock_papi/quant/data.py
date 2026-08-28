@@ -213,13 +213,25 @@ def summarize_foreign_flow(frame, *, pd):
 
 
 def get_data(
-    code, days=730, *, datetime, pd, is_us_ticker, twstock_codes,
+    code, days=730, *, as_of=None, datetime, pd, is_us_ticker, twstock_codes,
     fetch_yfinance, fetch_finmind, fetch_option_context,
     add_price_quality, add_market_context, add_option_context,
     merge_chip, clean, taiwan_security_master=None,
 ):
-    start_date = (datetime.datetime.now() - datetime.timedelta(days=days)).strftime("%Y-%m-%d")
-    end_date = datetime.datetime.now().strftime("%Y-%m-%d")
+    if as_of is None:
+        now = datetime.datetime.now()
+        start_date = (now - datetime.timedelta(days=days)).strftime("%Y-%m-%d")
+        end_date = now.strftime("%Y-%m-%d")
+    else:
+        if type(as_of) is not datetime.date:
+            raise TypeError("as_of must be a date")
+        start_date = (as_of - datetime.timedelta(days=days)).isoformat()
+        end_date = (as_of + datetime.timedelta(days=1)).isoformat()
+
+    def finish(frame):
+        result = clean(merge_chip(frame))
+        return result if as_of is None else result[result.index.date <= as_of]
+
     if is_us_ticker(code):
         price = fetch_yfinance(code, start_date, end_date)
         if price.empty:
@@ -229,7 +241,7 @@ def get_data(
         spy = fetch_yfinance("SPY", start_date, end_date)
         price = add_market_context(price, market, spy)
         price = add_option_context(price, *fetch_option_context(start_date, end_date))
-        return clean(merge_chip(price))
+        return finish(price)
     raw = fetch_finmind("TaiwanStockPrice", code, start_date, end_date)
     yf_price = pd.DataFrame()
     if code != "TAIEX":
@@ -275,4 +287,5 @@ def get_data(
         margin = fetch_finmind(
             "TaiwanStockMarginPurchaseShortSale", code, start_date, end_date
         )
-    return clean(merge_chip(price, institutional, margin))
+    result = clean(merge_chip(price, institutional, margin))
+    return result if as_of is None else result[result.index.date <= as_of]

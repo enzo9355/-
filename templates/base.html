@@ -44,14 +44,8 @@
   <a class="skip-link" href="#main-content">跳到主要內容</a>
   <header class="site-header">
     <div class="topbar">
+      <button class="sidebar-toggle" type="button" data-sidebar-toggle aria-controls="dashboard-sidebar" aria-expanded="true" aria-label="收合 Dashboard 導覽">‹</button>
       <a class="brand-wordmark" data-brand-wordmark href="{{ dashboard_url }}" aria-label="回到 ABSORB 主畫面">ABSORB</a>
-      <nav class="nav-list">
-        <a class="nav-link{{ ' active' if dashboard_active else '' }}" href="{{ dashboard_url }}"{% if dashboard_active %} aria-current="page"{% endif %}>今天市場</a>
-        <a class="nav-link{{ ' active' if market_active else '' }}" href="{{ market_url }}"{% if market_active %} aria-current="page"{% endif %}>市場實況</a>
-        <a class="nav-link{{ ' active' if industries_active else '' }}" href="{{ industries_url }}"{% if industries_active %} aria-current="page"{% endif %}>產業觀察</a>
-        <a class="nav-link{{ ' active' if stocks_active else '' }}" href="{{ stocks_url }}"{% if stocks_active %} aria-current="page"{% endif %}>個股與 ETF</a>
-        <a class="nav-link{{ ' active' if reports_active else '' }}" href="{{ reports_url }}"{% if reports_active %} aria-current="page"{% endif %}>每日報告</a>
-      </nav>
       <nav class="market-switch" data-market-switch aria-label="切換市場內容">
         <a class="{{ 'active' if not us_market_active else '' }}" href="/"{% if not us_market_active %} aria-current="true"{% endif %}>台股</a>
         <a class="{{ 'active' if us_market_active else '' }}" href="/us" title="前往美股已驗證研究摘要"{% if us_market_active %} aria-current="true"{% endif %}>美股</a>
@@ -60,9 +54,21 @@
     </div>
   </header>
   <div class="app-shell">
+    <aside class="dashboard-sidebar" id="dashboard-sidebar" aria-label="Dashboard">
+      <p class="sidebar-title">DASHBOARD</p>
+      <nav class="sidebar-nav" aria-label="主要功能">
+        <a class="nav-link{{ ' active' if dashboard_active else '' }}" href="{{ dashboard_url }}" aria-label="今天市場"{% if dashboard_active %} aria-current="page"{% endif %}><span class="nav-short" aria-hidden="true">今</span><span class="nav-label">今天市場</span></a>
+        <a class="nav-link{{ ' active' if market_active else '' }}" href="{{ market_url }}" aria-label="市場實況"{% if market_active %} aria-current="page"{% endif %}><span class="nav-short" aria-hidden="true">市</span><span class="nav-label">市場實況</span></a>
+        <a class="nav-link{{ ' active' if industries_active else '' }}" href="{{ industries_url }}" aria-label="產業觀察"{% if industries_active %} aria-current="page"{% endif %}><span class="nav-short" aria-hidden="true">產</span><span class="nav-label">產業觀察</span></a>
+        <a class="nav-link{{ ' active' if stocks_active else '' }}" href="{{ stocks_url }}" aria-label="個股與 ETF"{% if stocks_active %} aria-current="page"{% endif %}><span class="nav-short" aria-hidden="true">股</span><span class="nav-label">個股與 ETF</span></a>
+        <a class="nav-link{{ ' active' if reports_active else '' }}" href="{{ reports_url }}" aria-label="每日報告"{% if reports_active %} aria-current="page"{% endif %}><span class="nav-short" aria-hidden="true">報</span><span class="nav-label">每日報告</span></a>
+        <a class="nav-link{{ ' active' if ask_active else '' }}" href="/ask" aria-label="ASK ABSORB"{% if ask_active %} aria-current="page"{% endif %}><span class="nav-short" aria-hidden="true">問</span><span class="nav-label">ASK ABSORB</span></a>
+        <a class="nav-link{{ ' active' if learn_active else '' }}" href="/learn" aria-label="學習"{% if learn_active %} aria-current="page"{% endif %}><span class="nav-short" aria-hidden="true">學</span><span class="nav-label">學習</span></a>
+      </nav>
+    </aside>
     <div class="content-column">
       <main class="main-content" id="main-content" tabindex="-1">{% block content %}{% endblock %}</main>
-      <footer class="site-footer"><span>ABSORB｜已驗證市場觀察</span><span>AI 預測研究中，不構成投資建議。</span></footer>
+      <footer class="site-footer"><span>ABSORB｜市場觀察與五日模型</span><span>模型估計不構成投資建議。</span></footer>
     </div>
   </div>
   {% if not ask_active %}
@@ -75,17 +81,10 @@
         <label for="quick-ask-question">觀察問題</label>
         <div class="conversation-control"><input id="quick-ask-question" name="question" maxlength="1200" autocomplete="off" placeholder="詢問這個市場畫面" required><button type="submit" aria-label="送出問題">↑</button></div>
       </form>
-      <p class="quick-ask-limit">只依已發布資料回答，不提供預測性數值或買賣指令。</p>
+      <p class="quick-ask-limit">依已發布資料與模型結果回答，不提供買賣指令。</p>
     </section>
   </div>
   {% endif %}
-  <nav class="mobile-nav" aria-label="行動版導覽">
-    <a class="{{ 'active' if dashboard_active else '' }}" href="{{ dashboard_url }}"{% if dashboard_active %} aria-current="page"{% endif %}>今天</a>
-    <a class="{{ 'active' if market_active else '' }}" href="{{ market_url }}"{% if market_active %} aria-current="page"{% endif %}>市場</a>
-    <a class="{{ 'active' if industries_active else '' }}" href="{{ industries_url }}"{% if industries_active %} aria-current="page"{% endif %}>產業</a>
-    <a class="{{ 'active' if stocks_active else '' }}" href="{{ stocks_url }}"{% if stocks_active %} aria-current="page"{% endif %}>個股</a>
-    <a class="{{ 'active' if reports_active else '' }}" href="{{ reports_url }}"{% if reports_active %} aria-current="page"{% endif %}>報告</a>
-  </nav>
   <script src="{{ url_for('static', filename='app.js', v=STATIC_ASSET_VERSION) }}" defer></script>
   {% block scripts %}{% endblock %}
 </body>

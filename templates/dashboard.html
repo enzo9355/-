@@ -5,6 +5,7 @@
 {% set quality = observation.data_quality or {} %}
 {% set industries = observation.industry_observations or [] %}
 {% set focus = observation.daily_focus or [] %}
+{% set market_index = observation.market_index or {} %}
 {% set advancing = market.get('advancing_count') %}
 {% set declining = market.get('declining_count') %}
 {% set unchanged = market.get('unchanged_count') %}
@@ -15,7 +16,6 @@
 {% set freshness = (data_freshness|default({}, true)).get('TW', {}) %}
 {% set freshness_label = {'current':'資料最新','updating':'更新中','stale':'資料過期','unavailable':'暫時無法取得'}.get(freshness.get('status'), '暫時無法取得') %}
 <div class="page dashboard-page research-dashboard" data-dashboard-endpoint="/api/dashboard">
-  <div class="error-banner bootstrap-banner" role="status">AI 預測研究中。目前正式頁面只呈現已驗證的市場觀察，不提供機率預測或買賣指令。</div>
   {% if search_error %}<div class="error-banner" role="alert">找不到「{{ search_query }}」，請輸入台股代碼、名稱或美股代碼。</div>{% endif %}
 
   <header class="research-summary" data-research-summary>
@@ -33,11 +33,6 @@
     </dl>
   </header>
 
-  <section class="freshness-status" data-freshness-status="{{ freshness.get('status', 'unavailable') }}" aria-labelledby="tw-freshness-title">
-    <div><h2 id="tw-freshness-title">已驗證資料狀態</h2><p aria-live="polite">資料狀態：{{ freshness_label }}</p></div>
-    <dl><div><dt>來源交易日</dt><dd>{{ freshness.get('source_market_date') or '尚無已驗證日期' }}</dd></div><div><dt>適用交易日</dt><dd>{{ freshness.get('applicable_trading_date') or '尚無已驗證日期' }}</dd></div></dl>
-  </section>
-
   <section class="research-command" data-market-command aria-labelledby="market-command-title">
     <div class="command-heading"><div><h2 id="market-command-title">市場指揮台</h2><p>價格、廣度、資金與風險同步觀察</p></div><span>資料基準日 {{ observation.observation_as_of or '待更新' }}</span></div>
     <div class="command-grid">
@@ -48,18 +43,35 @@
         <article><span>風險狀態</span><strong>{{ {'normal':'一般','cautious':'謹慎','elevated':'升高'}.get(market.get('risk_state'), '資料不足') }}</strong><small>已驗證狀態</small></article>
       </div>
 
-      <section class="evidence-canvas" aria-labelledby="return-title">
-        <div class="evidence-canvas-head"><div><span>VERIFIED MARKET ACTUALS</span><h3 id="return-title">期間報酬</h3></div><span>非即時報價</span></div>
+      <section class="evidence-canvas market-index-canvas" aria-labelledby="return-title">
+        <div class="evidence-canvas-head"><div><span>TAIWAN CAPITALIZATION WEIGHTED INDEX</span><h3 id="return-title">{{ market_index.get('name', '加權指數') }}</h3></div><span>資料日 {{ market_index.get('as_of', observation.observation_as_of or '待更新') }}</span></div>
+        {% if market_index.get('price') is not none %}
+        <div class="market-index-quote">
+          <div><strong>{{ '{:,.2f}'.format(market_index.get('price')) }}</strong><span class="{{ 'positive' if market_index.get('change_pct', 0) > 0 else 'negative' if market_index.get('change_pct', 0) < 0 else '' }}">{{ '{:+,.2f}'.format(market_index.get('change')) if market_index.get('change') is not none else '—' }}（{{ '{:+.2f}%'.format(market_index.get('change_pct')) if market_index.get('change_pct') is not none else '—' }}）</span></div>
+          <dl><div><dt>開盤</dt><dd>{{ '{:,.2f}'.format(market_index.get('open')) if market_index.get('open') is not none else '—' }}</dd></div><div><dt>最高</dt><dd>{{ '{:,.2f}'.format(market_index.get('high')) if market_index.get('high') is not none else '—' }}</dd></div><div><dt>最低</dt><dd>{{ '{:,.2f}'.format(market_index.get('low')) if market_index.get('low') is not none else '—' }}</dd></div></dl>
+        </div>
+        <div id="market-index-chart" class="market-index-chart" role="img" aria-label="加權指數 K 線圖" aria-describedby="market-index-chart-table"></div>
+        <div id="market-index-chart-table" class="sr-only">
+          <table><caption>加權指數最近五個交易日 OHLC</caption><thead><tr><th>日期</th><th>開盤</th><th>最高</th><th>最低</th><th>收盤</th></tr></thead><tbody>{% for row in market_index.get('candles', [])[-5:] %}<tr><td>{{ row.time }}</td><td>{{ row.open }}</td><td>{{ row.high }}</td><td>{{ row.low }}</td><td>{{ row.close }}</td></tr>{% endfor %}</tbody></table>
+        </div>
+        {% else %}<p class="empty-state market-index-empty">已驗證的大盤指數 K 線尚待發布。</p>{% endif %}
         <dl class="return-grid">
           {% for key, label in [('return_1d_pct','1 日'),('return_5d_pct','5 日'),('return_20d_pct','20 日'),('return_60d_pct','60 日')] %}
           {% set value = market.get(key) %}<div><dt>{{ label }}</dt><dd class="{{ 'positive' if value is not none and value > 0 else 'negative' if value is not none and value < 0 else '' }}">{{ '%+.2f%%'|format(value) if value is not none else '資料不足' }}</dd></div>
           {% endfor %}
         </dl>
-        <div class="breadth-band"><div><span>MA20 廣度</span><strong>{{ '%.1f%%'|format(market.get('ma20_breadth_pct')) if market.get('ma20_breadth_pct') is not none else '資料不足' }}</strong></div>{% if market.get('ma20_breadth_pct') is not none %}<progress value="{{ market.get('ma20_breadth_pct') }}" max="100">{{ market.get('ma20_breadth_pct') }}%</progress>{% endif %}<div><span>MA60 廣度</span><strong>{{ '%.1f%%'|format(market.get('ma60_breadth_pct')) if market.get('ma60_breadth_pct') is not none else '資料不足' }}</strong></div>{% if market.get('ma60_breadth_pct') is not none %}<progress value="{{ market.get('ma60_breadth_pct') }}" max="100">{{ market.get('ma60_breadth_pct') }}%</progress>{% endif %}</div>
-        <p class="canvas-note">以不同期間的已發生報酬與均線廣度交叉檢查，不代表未來方向。</p>
+        <p class="canvas-note">K 線呈現加權指數實際走勢；期間報酬為全市場觀察，兩者分開標示。</p>
       </section>
 
       <div class="command-insights">
+        <section class="forecast-panel" aria-labelledby="market-forecast-title">
+          <div class="insight-heading"><h3 id="market-forecast-title">AI 五日情境</h3><span>{{ market_prediction.as_of if market_prediction else '尚未發布' }}</span></div>
+          {% if market_prediction %}
+          <div class="forecast-primary"><div><span>{{ market_prediction.probability_label }}</span><strong>{{ '%.1f%%'|format(market_prediction.probability_pct) }}</strong></div><div><span>第 5 個交易日預測價</span><strong>{{ '{:,.2f}'.format(market_prediction.predicted_price) }}</strong></div></div>
+          <dl class="forecast-evidence"><div><dt>預估漲跌幅</dt><dd class="{{ 'positive' if market_prediction.predicted_change_pct > 0 else 'negative' if market_prediction.predicted_change_pct < 0 else '' }}">{{ '%+.2f%%'|format(market_prediction.predicted_change_pct) }}</dd></div><div><dt>目標交易日</dt><dd>{{ market_prediction.target_session }}</dd></div></dl>
+          <p>{% if market_prediction.validation_mode == 'research' %}AI 五日研究推估，未經回測校準{% else %}{{ '目前正式預測' if market_prediction.status == 'current' else '前次預測，資料日已標示' }}{% endif %}；提供機率與價格估計，不產生買賣指令。</p>
+          {% else %}<p class="empty-state">本交易日推估尚未發布；沒有可用產物時不顯示機率或預測價。</p>{% endif %}
+        </section>
         <section class="breadth-panel" data-breadth-visual aria-labelledby="breadth-title">
           <div class="insight-heading"><h3 id="breadth-title">市場廣度</h3><span>{{ total_count if total_count is not none else '資料不足' }} 檔</span></div>
           {% if advancing_pct is not none and declining_pct is not none %}
@@ -76,11 +88,18 @@
     </div>
   </section>
 
+  <section class="freshness-status" data-freshness-status="{{ freshness.get('status', 'unavailable') }}" aria-labelledby="tw-freshness-title">
+    <div><h2 id="tw-freshness-title">資料狀態</h2><p aria-live="polite">資料狀態：{{ freshness_label }}</p></div>
+    <dl><div><dt>來源交易日</dt><dd>{{ freshness.get('source_market_date') or '尚無已驗證日期' }}</dd></div><div><dt>適用交易日</dt><dd>{{ freshness.get('applicable_trading_date') or '尚無已驗證日期' }}</dd></div></dl>
+  </section>
+
   <section class="verified-focus" aria-labelledby="home-focus-title"><div class="section-heading"><div><h2 id="home-focus-title">今日焦點</h2><p>已發布觀察摘要</p></div><span class="muted small">資料日 {{ observation.observation_as_of or '待更新' }}</span></div><ol>{% for text in focus[:5] %}<li><span>{{ '%02d'|format(loop.index) }}</span><strong>{{ text }}</strong></li>{% else %}<li class="empty-state">今日焦點資料暫時無法取得。</li>{% endfor %}</ol></section>
 
   <section class="market-prep" aria-labelledby="trading-prep-title"><div class="section-heading"><div><h2 id="trading-prep-title">今日市場準備</h2><p>通過資料與發布驗證的報告</p></div><a href="{{ url_for('reports_page') }}">查看所有報告</a></div><div class="report-card-grid">{% for report_type, label in [('post_close', '盤後觀察'), ('pre_market', '盤前風險更新')] %}{% set item = daily_cards.get(report_type) %}<article class="report-insight-card"><p class="eyebrow">{{ label }}</p>{% if item %}<h3>{{ item.title }}</h3><p>{{ item.summary|join('；') }}</p><p class="muted small">資料基準日 {{ item.source_market_date }}｜適用交易日 {{ item.applicable_trading_date }}</p>{% if report_type == 'post_close' %}<a class="button button-secondary" href="{{ url_for('post_close_report_page', trading_date=item.source_market_date) }}">查看盤後觀察</a>{% else %}<a class="button button-secondary" href="{{ url_for('pre_market_report_page', trading_date=item.applicable_trading_date) }}">查看盤前更新</a>{% endif %}{% else %}<h3>尚未發布</h3><p class="muted">通過資料與發布驗證後才會顯示，不以假資料補位。</p>{% endif %}</article>{% endfor %}</div></section>
 
-  <nav class="dashboard-destinations" aria-label="研究功能入口"><a href="{{ url_for('market_page') }}"><strong>市場實況</strong><span>廣度、報酬與波動</span></a><a href="{{ url_for('industries_page') }}"><strong>產業觀察</strong><span>相對強度與產業廣度</span></a><a href="{{ url_for('stocks_page') }}"><strong>個股與 ETF</strong><span>事件與標的觀察</span></a><a href="{{ url_for('ask_page') }}"><strong>Ask ABSORB</strong><span>以已發布資料回答</span></a><a href="{{ url_for('learn_page') }}"><strong>學習</strong><span>市場觀察小辭典</span></a></nav>
   <div class="error-banner" data-dashboard-error aria-live="polite" hidden>已驗證的市場觀察資料暫時無法取得，請稍後再試。</div>
+  {% if market_index.get('candles') %}<script id="market-index-chart-data" type="application/json">{{ ({"candles": market_index.get('candles'), "ma20": market_index.get('ma20', []), "prediction": market_prediction.line} if market_prediction else {"candles": market_index.get('candles'), "ma20": market_index.get('ma20', [])})|tojson }}</script>{% endif %}
 </div>
 {% endblock %}
+
+{% block head %}{% if (observation.market_index or {}).get('candles') %}<script src="https://unpkg.com/lightweight-charts@4.2.2/dist/lightweight-charts.standalone.production.js" integrity="sha384-qQnpH1Chlwm0r93GZ6NgZoEehIelWkhwbBtJMWh0P5wPqySGEt8UjETGKMF0GUdn" crossorigin="anonymous"></script>{% endif %}{% endblock %}

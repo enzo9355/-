@@ -22,6 +22,7 @@ def register_routes(app, dependencies):
         load_report_index_v2=dependencies["load_report_index_v2"],
         load_dashboard_snapshot=dependencies["dashboard_snapshot"],
         load_data_freshness=load_data_freshness,
+        load_prediction_snapshot=dependencies["prediction_snapshot"],
         preview_enabled=(
             dependencies["prediction_capability"].preview_candidate_prefix
             is not None
@@ -43,6 +44,7 @@ def register_routes(app, dependencies):
         load_regression_artifact=dependencies["load_regression_artifact"],
         prediction_capability=dependencies["prediction_capability"],
         load_data_freshness=load_data_freshness,
+        load_prediction_snapshot=dependencies["prediction_snapshot"],
     )
     register_market_routes(
         app,
@@ -60,6 +62,7 @@ def register_routes(app, dependencies):
         get_stock_name=dependencies["get_stock_name"],
         dashboard_snapshot=dependencies["dashboard_snapshot"],
         us_securities_observation=dependencies["us_securities_observation"],
+        prediction_snapshot=dependencies["prediction_snapshot"],
     )
     register_auth_routes(
         app,
