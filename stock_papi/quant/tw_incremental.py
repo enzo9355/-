@@ -405,13 +405,17 @@ class OfficialCompatFetcher:
 
     def _bootstrap_artifact(self, symbol: str, frame: Any) -> IncrementalArtifact:
         required = {"Date", "Open", "High", "Low", "Close", "Volume"}
-        if frame is None or frame.empty or not required.issubset(frame.columns):
+        if frame is not None and not frame.empty and not required.issubset(frame.columns):
             raise IncrementalHistoryError(
-                f"historical bootstrap is unavailable for TW:{symbol}"
+                f"historical bootstrap is invalid for TW:{symbol}"
             )
         cutoff = min(self.snapshots)
         rows = []
-        for item in frame.loc[:, sorted(required)].to_dict("records"):
+        for item in (
+            frame.loc[:, sorted(required)].to_dict("records")
+            if frame is not None and not frame.empty
+            else ()
+        ):
             try:
                 value = self.pd.to_datetime(item["Date"], errors="raise").date()
                 numbers = {
@@ -429,6 +433,38 @@ class OfficialCompatFetcher:
                     f"historical bootstrap is invalid for TW:{symbol}"
                 )
             rows.append({"Date": value.isoformat(), **numbers})
+        source_mode = "yahoo_finance_secondary_v1"
+        if not rows:
+            for snapshot in self.snapshots.values():
+                official = self._official_price(snapshot, symbol)
+                if official is not None:
+                    institutional = self._official_institutional(snapshot, symbol)
+                    margin = self._official_margin(snapshot, symbol) or {}
+                    rows.append({
+                        "Date": official["date"],
+                        "Open": official["open"],
+                        "High": official["max"],
+                        "Low": official["min"],
+                        "Close": official["close"],
+                        "Volume": official["Trading_Volume"],
+                        "InstitutionalNet": sum(
+                            float(item["buy"]) - float(item["sell"])
+                            for item in institutional
+                        ),
+                        "ForeignNet": sum(
+                            float(item["buy"]) - float(item["sell"])
+                            for item in institutional
+                            if item["name"] == "Foreign"
+                        ),
+                        "MarginBalance": float(
+                            margin.get("MarginPurchaseTodayBalance", 0.0)
+                        ),
+                        "ShortBalance": float(
+                            margin.get("ShortSaleTodayBalance", 0.0)
+                        ),
+                    })
+                    source_mode = "tw_official_snapshot_series_v1"
+                    break
         rows.sort(key=lambda row: row["Date"])
         if not rows or len({row["Date"] for row in rows}) != len(rows):
             raise IncrementalHistoryError(
@@ -447,7 +483,7 @@ class OfficialCompatFetcher:
         digest = hashlib.sha256(gzip.compress(encoded, mtime=0)).hexdigest()
         latest = _datetime.date.fromisoformat(rows[-1]["Date"])
         self._historical_bootstraps[symbol] = {
-            "source_mode": "yahoo_finance_secondary_v1",
+            "source_mode": source_mode,
             "artifact_sha256": digest,
             "latest_date": latest.isoformat(),
             "row_count": len(rows),

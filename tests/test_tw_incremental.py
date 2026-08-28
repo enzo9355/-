@@ -575,6 +575,28 @@ class TWOfficialIncrementalTests(unittest.TestCase):
                 )
         self.assertEqual(loader_calls, [])
 
+    def test_empty_secondary_history_bootstraps_from_verified_official_series(self):
+        empty = pd.DataFrame(
+            columns=["Date", "Open", "High", "Low", "Close", "Volume"]
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            fetcher = OfficialCompatFetcher(
+                Path(temporary),
+                series(),
+                pd=pd,
+                bootstrap_history_loader=lambda _symbol: empty,
+            )
+            price = fetcher(
+                "TaiwanStockPrice", "2330", "2026-06-01", TARGET.isoformat()
+            )
+            lineage = fetcher.lineage_for("2330")
+
+        self.assertEqual(list(price["date"]), ["2026-07-23", "2026-07-24"])
+        self.assertEqual(
+            lineage["historical_bootstrap"]["source_mode"],
+            "tw_official_snapshot_series_v1",
+        )
+
     def test_artifact_declared_as_of_must_match_latest_daily_row(self):
         with tempfile.TemporaryDirectory() as temporary:
             write_artifact(temporary, daily=history(), as_of="2026-07-23")
