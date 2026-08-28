@@ -303,11 +303,16 @@ class OfficialCompatFetcher:
         pd: Any,
         legacy_overlap_policy: str = "strict",
         recovery_resolver: HistoryRecoveryResolver | None = None,
+        bootstrap_history_loader: Callable[[str], Any] | None = None,
     ):
         if legacy_overlap_policy not in LEGACY_OVERLAP_POLICIES:
             raise ValueError("unknown legacy overlap policy")
         if recovery_resolver is not None and not callable(recovery_resolver):
             raise TypeError("history recovery resolver is invalid")
+        if bootstrap_history_loader is not None and not callable(
+            bootstrap_history_loader
+        ):
+            raise TypeError("history bootstrap loader is invalid")
         self.root = Path(root)
         is_daily_snapshot = isinstance(source, OfficialDailySnapshot)
         if is_daily_snapshot:
@@ -363,7 +368,9 @@ class OfficialCompatFetcher:
         self.pd = pd
         self.legacy_overlap_policy = legacy_overlap_policy
         self.recovery_resolver = recovery_resolver
+        self.bootstrap_history_loader = bootstrap_history_loader
         self._artifacts: dict[str, IncrementalArtifact] = {}
+        self._historical_bootstraps: dict[str, dict[str, Any]] = {}
         self._history_recovery: dict[str, HistoryRecoveryResult | None] = {}
         self._lineage_kinds: dict[str, str] = {}
         self._existing_reconciliations: dict[str, dict[str, Any]] = {}
@@ -377,13 +384,82 @@ class OfficialCompatFetcher:
 
     def _load_artifact(self, symbol: str) -> IncrementalArtifact:
         if symbol not in self._artifacts:
-            self._artifacts[symbol] = load_incremental_artifact(self.root, symbol)
+            try:
+                artifact = load_incremental_artifact(self.root, symbol)
+            except IncrementalHistoryError:
+                if (
+                    self.bootstrap_history_loader is None
+                    or _artifact_path(self.root, symbol).exists()
+                ):
+                    raise
+                artifact = self._bootstrap_artifact(
+                    symbol, self.bootstrap_history_loader(symbol)
+                )
+            self._artifacts[symbol] = artifact
         artifact = self._artifacts[symbol]
         if artifact.latest_date > self.target_date:
             raise IncrementalHistoryError(
                 f"historical artifact is newer than target for TW:{symbol}"
             )
         return artifact
+
+    def _bootstrap_artifact(self, symbol: str, frame: Any) -> IncrementalArtifact:
+        required = {"Date", "Open", "High", "Low", "Close", "Volume"}
+        if frame is None or frame.empty or not required.issubset(frame.columns):
+            raise IncrementalHistoryError(
+                f"historical bootstrap is unavailable for TW:{symbol}"
+            )
+        cutoff = min(self.snapshots)
+        rows = []
+        for item in frame.loc[:, sorted(required)].to_dict("records"):
+            try:
+                value = self.pd.to_datetime(item["Date"], errors="raise").date()
+                numbers = {
+                    name: float(item[name])
+                    for name in ("Open", "High", "Low", "Close", "Volume")
+                }
+            except (AttributeError, TypeError, ValueError) as exc:
+                raise IncrementalHistoryError(
+                    f"historical bootstrap is invalid for TW:{symbol}"
+                ) from exc
+            if value >= cutoff:
+                continue
+            if any(not math.isfinite(number) for number in numbers.values()):
+                raise IncrementalHistoryError(
+                    f"historical bootstrap is invalid for TW:{symbol}"
+                )
+            rows.append({"Date": value.isoformat(), **numbers})
+        rows.sort(key=lambda row: row["Date"])
+        if len(rows) < 20 or len({row["Date"] for row in rows}) != len(rows):
+            raise IncrementalHistoryError(
+                f"historical bootstrap is insufficient for TW:{symbol}"
+            )
+        document = {
+            "schema_version": 1,
+            "market": "TW",
+            "symbol": symbol,
+            "as_of": rows[-1]["Date"],
+            "daily": rows,
+        }
+        encoded = json.dumps(
+            document, ensure_ascii=True, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+        digest = hashlib.sha256(gzip.compress(encoded, mtime=0)).hexdigest()
+        latest = _datetime.date.fromisoformat(rows[-1]["Date"])
+        self._historical_bootstraps[symbol] = {
+            "source_mode": "yahoo_finance_secondary_v1",
+            "artifact_sha256": digest,
+            "latest_date": latest.isoformat(),
+            "row_count": len(rows),
+        }
+        return IncrementalArtifact(
+            symbol=symbol,
+            document=document,
+            compressed_sha256=digest,
+            latest_date=latest,
+            observation_date=latest,
+            trading_status_evidence=None,
+        )
 
     def _ensure_history_recovery(
         self,
@@ -1638,6 +1714,10 @@ class OfficialCompatFetcher:
                 status["status"] if status is not None else "regular_price"
             ),
         }
+        if symbol in self._historical_bootstraps:
+            lineage["historical_bootstrap"] = dict(
+                self._historical_bootstraps[symbol]
+            )
         if status is not None:
             lineage["trading_status_evidence_sha256"] = status[
                 "evidence_sha256"

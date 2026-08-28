@@ -201,8 +201,11 @@ def _assert_audit_publishable(
     target_market_date: datetime.date,
     calendars: TradingCalendarSet,
     active_universe_count: int | None = None,
+    allow_missing_artifacts: bool = False,
+    root: Path | None = None,
 ) -> None:
     available = set(audit.latest_by_symbol)
+    unavailable = set(audit.unavailable_symbols)
     denominator = (
         active_universe_count
         if active_universe_count is not None and active_universe_count > 0
@@ -211,7 +214,28 @@ def _assert_audit_publishable(
     if (
         not available
         or available != set(audit.observation_by_symbol)
-        or len(audit.unavailable_symbols) / denominator >= 0.05
+        or not unavailable.issubset(set(symbols))
+        or available & unavailable
+        or (
+            len(unavailable) / denominator >= 0.05
+            and not allow_missing_artifacts
+        )
+        or (
+            allow_missing_artifacts
+            and (
+                root is None
+                or any(
+                    (
+                        Path(root)
+                        / "artifacts"
+                        / "stocks"
+                        / "TW"
+                        / f"{symbol}.json.gz"
+                    ).exists()
+                    for symbol in unavailable
+                )
+            )
+        )
     ):
         raise RuntimeError("historical artifact coverage is not publishable")
     for symbol in available:
@@ -772,12 +796,18 @@ def _run_stage(
         symbols,
         target_date=target_market_date,
     )
+    can_bootstrap = (
+        not reconcile_legacy_overlaps
+        and callable(getattr(pipeline, "fetch_yfinance_price_history", None))
+    )
     _assert_audit_publishable(
         audit,
         symbols=symbols,
         target_market_date=target_market_date,
         calendars=calendars,
         active_universe_count=len(full_market_symbols) if full_market_symbols else len(symbols),
+        allow_missing_artifacts=can_bootstrap,
+        root=root,
     )
 
     resume = None
@@ -841,6 +871,21 @@ def _run_stage(
     if resume is not None and series.manifest_sha256 != resume[0]:
         raise RuntimeError("official snapshot series does not match resume state")
 
+    bootstrap_loader = None
+    if can_bootstrap and audit.unavailable_symbols:
+        exchange_by_symbol = {
+            symbol: exchange
+            for exchange, exchange_symbols in required_symbols.items()
+            for symbol in exchange_symbols
+        }
+        fetch_history = pipeline.fetch_yfinance_price_history
+        start = (target_market_date - datetime.timedelta(days=730)).isoformat()
+        end = (target_market_date + datetime.timedelta(days=1)).isoformat()
+
+        def bootstrap_loader(symbol: str):
+            suffix = ".TWO" if exchange_by_symbol[symbol] == "TPEx" else ".TW"
+            return fetch_history([f"{symbol}{suffix}"], start, end)
+
     market_symbols = full_market_symbols if full_market_symbols is not None else symbols
     market_universe = {str(value) for value in market_symbols}
     pending, excluded = _load_exclusion_state(root)
@@ -895,6 +940,7 @@ def _run_stage(
         pd=pipeline.pd,
         legacy_overlap_policy=policy,
         recovery_resolver=recovery_resolver,
+        bootstrap_history_loader=bootstrap_loader,
     )
     backup_store = (
         LegacyArtifactBackupStore(
@@ -1036,12 +1082,20 @@ def run(
     ignored_symbols: set[str] = set(excluded_symbols)
     audit = audit_artifact_dates(root, symbols, target_date=target_market_date)
     while True:
+        can_bootstrap = (
+            not reconcile_legacy_overlaps
+            and callable(
+                getattr(pipeline, "fetch_yfinance_price_history", None)
+            )
+        )
         _assert_audit_publishable(
             audit,
             symbols=symbols,
             target_market_date=target_market_date,
             calendars=calendars,
             active_universe_count=len(set(symbols) - set(excluded_symbols)),
+            allow_missing_artifacts=can_bootstrap,
+            root=root,
         )
         stage_target, stage_symbols, baseline = _plan_recovery_stage(
             calendars,

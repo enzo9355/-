@@ -525,6 +525,56 @@ class TWOfficialIncrementalTests(unittest.TestCase):
             with self.assertRaises(IncrementalHistoryError):
                 audit_artifact_dates(Path(temporary), ["2330"], target_date=TARGET)
 
+    def test_missing_artifact_can_bootstrap_verified_secondary_history(self):
+        dates = pd.bdate_range(end="2026-07-22", periods=25)
+        history_frame = pd.DataFrame({
+            "Date": dates,
+            "Open": range(100, 125),
+            "High": range(101, 126),
+            "Low": range(99, 124),
+            "Close": range(100, 125),
+            "Volume": [1000] * 25,
+        })
+        with tempfile.TemporaryDirectory() as temporary:
+            fetcher = OfficialCompatFetcher(
+                Path(temporary),
+                series(),
+                pd=pd,
+                bootstrap_history_loader=lambda _symbol: history_frame,
+            )
+            price = fetcher(
+                "TaiwanStockPrice", "2330", "2026-06-01", TARGET.isoformat()
+            )
+            lineage = fetcher.lineage_for("2330")
+
+        self.assertEqual(price.iloc[-1]["date"], TARGET.isoformat())
+        self.assertEqual(len(price), 27)
+        self.assertEqual(
+            lineage["historical_bootstrap"]["source_mode"],
+            "yahoo_finance_secondary_v1",
+        )
+        self.assertEqual(
+            lineage["historical_bootstrap"]["latest_date"], "2026-07-22"
+        )
+
+    def test_bootstrap_never_replaces_a_malformed_existing_artifact(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "artifacts" / "stocks" / "TW" / "2330.json.gz"
+            path.parent.mkdir(parents=True)
+            path.write_bytes(b"corrupt")
+            loader_calls = []
+            fetcher = OfficialCompatFetcher(
+                Path(temporary),
+                series(),
+                pd=pd,
+                bootstrap_history_loader=lambda symbol: loader_calls.append(symbol),
+            )
+            with self.assertRaises(IncrementalHistoryError):
+                fetcher(
+                    "TaiwanStockPrice", "2330", "2026-06-01", TARGET.isoformat()
+                )
+        self.assertEqual(loader_calls, [])
+
     def test_artifact_declared_as_of_must_match_latest_daily_row(self):
         with tempfile.TemporaryDirectory() as temporary:
             write_artifact(temporary, daily=history(), as_of="2026-07-23")
