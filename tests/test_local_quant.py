@@ -19,6 +19,7 @@ from local_quant import (
     cleanup_expired_data,
     ensure_layout,
     _read_insights_metric,
+    get_taiwan_symbols,
     load_checkpoint,
     main,
     prepare_daily_checkpoint,
@@ -33,6 +34,28 @@ def at(hour, minute):
 
 
 class LocalQuantTests(unittest.TestCase):
+    def test_taiwan_universe_prefers_authoritative_security_master(self):
+        calls = []
+        master = type(
+            "Master", (), {"entries": {"2330": object(), "00679B": object()}}
+        )()
+        resolver = type(
+            "Resolver",
+            (),
+            {"get_master": lambda self, *, required=False: calls.append(required) or master},
+        )()
+        pipeline = type(
+            "Pipeline",
+            (),
+            {
+                "industry_map": {"全市場": ["2330", "00838B"]},
+                "taiwan_security_master": resolver,
+            },
+        )()
+
+        self.assertEqual(get_taiwan_symbols(pipeline), ["00679B", "2330"])
+        self.assertEqual(calls, [True])
+
     def test_daily_checkpoint_archives_incompatible_target_before_replacement(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

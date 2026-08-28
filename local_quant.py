@@ -1457,6 +1457,14 @@ def load_stock_pipeline(root):
 
 
 def get_taiwan_symbols(pipeline):
+    resolver = getattr(pipeline, "taiwan_security_master", None)
+    if callable(getattr(resolver, "get_master", None)):
+        master = resolver.get_master(required=True)
+        return sorted(
+            symbol
+            for symbol in master.entries
+            if re.fullmatch(r"[0-9]{4,5}[0-9A-Z]?", symbol)
+        )
     return sorted(
         {
             str(symbol)
