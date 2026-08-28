@@ -37,7 +37,12 @@ class LocalQuantTests(unittest.TestCase):
     def test_taiwan_universe_prefers_authoritative_security_master(self):
         calls = []
         master = type(
-            "Master", (), {"entries": {"2330": object(), "00679B": object()}}
+            "Master",
+            (),
+            {
+                "entries": {"2330": object(), "0054": object(), "00679B": object()},
+                "active_symbols": frozenset({"2330", "00679B"}),
+            },
         )()
         resolver = type(
             "Resolver",
