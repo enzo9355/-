@@ -146,6 +146,7 @@ class TaiwanSecurityMaster:
     as_of: _datetime.date
     entries: Mapping[str, TaiwanSecurity]
     source_hashes: Mapping[str, str]
+    active_symbols: frozenset[str] = frozenset()
     name_changes: tuple[NameChange, ...] = ()
     schema_version: str = MASTER_SCHEMA_VERSION
 
@@ -160,6 +161,11 @@ class TaiwanSecurityMaster:
         }
         if any(entry.symbol != symbol for symbol, entry in entries.items()):
             raise TaiwanSecurityMasterConflict("security master symbol identity conflicts")
+        active_symbols = frozenset(
+            normalize_taiwan_symbol(symbol) for symbol in self.active_symbols
+        )
+        if not active_symbols.issubset(entries):
+            raise TaiwanSecurityMasterConflict("active security is missing from master")
         hashes = dict(self.source_hashes)
         if any(not _SHA256_RE.fullmatch(str(value)) for value in hashes.values()):
             raise TaiwanSecurityMasterConflict("security master source hash is invalid")
@@ -167,6 +173,7 @@ class TaiwanSecurityMaster:
         if any(change.symbol not in entries for change in changes):
             raise TaiwanSecurityMasterConflict("name change references an unknown symbol")
         object.__setattr__(self, "entries", MappingProxyType(entries))
+        object.__setattr__(self, "active_symbols", active_symbols)
         object.__setattr__(self, "source_hashes", MappingProxyType(hashes))
         object.__setattr__(self, "name_changes", changes)
 
@@ -277,6 +284,16 @@ def _add_entry(
         raise TaiwanSecurityMasterConflict(f"conflicting official identity for {symbol}")
 
 
+def _row_symbol(row: Mapping[str, Any], *keys: str) -> str | None:
+    raw_symbol = _first_text(row, *keys)
+    if not raw_symbol:
+        return None
+    try:
+        return normalize_taiwan_symbol(raw_symbol)
+    except ValueError:
+        return None
+
+
 def build_taiwan_security_master(
     *,
     as_of: _datetime.date,
@@ -288,6 +305,8 @@ def build_taiwan_security_master(
     source_hashes: Mapping[str, str] | None = None,
     name_changes: Iterable[NameChange] = (),
 ) -> TaiwanSecurityMaster:
+    twse_quote_rows = tuple(twse_quote_rows or ())
+    tpex_quote_rows = tuple(tpex_quote_rows or ())
     entries: dict[str, TaiwanSecurity] = {}
     for row in twse_company_rows or ():
         _add_entry(
@@ -346,10 +365,24 @@ def build_taiwan_security_master(
         )
     if not entries:
         raise TaiwanSecurityMasterUnavailable("official security master is empty")
+    active_symbols = frozenset(
+        {
+            symbol
+            for row in twse_quote_rows
+            if (symbol := _row_symbol(row, "Code", "基金代號")) is not None
+        }
+        | {
+            symbol
+            for row in tpex_quote_rows
+            if (symbol := _row_symbol(row, "SecuritiesCompanyCode", "Code"))
+            is not None
+        }
+    )
     return TaiwanSecurityMaster(
         as_of=as_of,
         entries=entries,
         source_hashes=source_hashes or {},
+        active_symbols=active_symbols,
         name_changes=tuple(name_changes),
     )
 

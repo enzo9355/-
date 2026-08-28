@@ -82,6 +82,21 @@ class TaiwanSecurityMasterTests(unittest.TestCase):
         self.assertEqual(normalize_display_name("華義*"), "華義")
         self.assertEqual(self.master.resolve_name("2330"), "台積電")
 
+    def test_active_universe_comes_from_official_quote_feeds(self):
+        master = build_taiwan_security_master(
+            as_of=datetime.date(2026, 8, 28),
+            twse_company_rows=[{"公司代號": "2330", "公司簡稱": "台積電"}],
+            twse_etf_rows=[{"基金代號": "0054", "基金簡稱": "舊ETF"}],
+            twse_quote_rows=[{"Code": "2330", "Name": "台積電"}],
+            tpex_company_rows=[],
+            tpex_quote_rows=[
+                {"SecuritiesCompanyCode": "00679B", "CompanyName": "元大美債20年"}
+            ],
+        )
+
+        self.assertIn("0054", master.entries)
+        self.assertEqual(master.active_symbols, frozenset({"2330", "00679B"}))
+
     def test_audit_distinguishes_name_market_listing_and_delisted_findings(self):
         runtime = {
             "6241": types.SimpleNamespace(name="易通展", data_source="tpex", group="半導體業", type="股票"),
