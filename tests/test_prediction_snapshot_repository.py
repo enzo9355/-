@@ -78,6 +78,40 @@ class PredictionSnapshotRepositoryTests(unittest.TestCase):
                     load_object=lambda _path, _size: next(values), cache={},
                 ))
 
+    def test_reader_accepts_research_pointer_without_backtest_claim(self):
+        product = self.product()
+        product["schema_version"] = 2
+        product["validation_mode"] = "research"
+        product.pop("backtest_sha256")
+        product.update({
+            "source_symbol_count": 1,
+            "prediction_count": 1,
+            "unavailable_count": 0,
+            "unavailable_symbols": [],
+        })
+        body = canonical(product)
+        digest = hashlib.sha256(body).hexdigest()
+        pointer = {
+            "schema_version": 2,
+            "kind": "absorb-five-session-predictions-pointer",
+            "market": "TW",
+            "as_of": "2026-08-26",
+            "path": f"objects/{digest}.json",
+            "sha256": digest,
+            "size": len(body),
+            "source_manifest": product["source_manifest"],
+            "source_manifest_sha256": product["source_manifest_sha256"],
+            "validation_mode": "research",
+        }
+        payloads = iter((canonical(pointer), body))
+
+        result = load_prediction_snapshot(
+            "TW", today=datetime.date(2026, 8, 27),
+            load_object=lambda _path, _size: next(payloads), cache={},
+        )
+
+        self.assertEqual(result["validation_mode"], "research")
+
 
 if __name__ == "__main__":
     unittest.main()

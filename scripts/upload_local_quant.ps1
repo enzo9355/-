@@ -797,16 +797,24 @@ function Publish-PredictionsV1 {
         $PointerHash = (Get-FileHash -LiteralPath $PredictionLatestPath -Algorithm SHA256).Hash.ToLowerInvariant()
         $Pointer = Get-Content -LiteralPath $PredictionLatestPath -Raw -Encoding utf8 | ConvertFrom-Json
         $Relative = [string]$Pointer.path
+        $PromotedPointer = (
+            [int]$Pointer.schema_version -eq 1 -and
+            [string]$Pointer.backtest_sha256 -match '^[0-9a-f]{64}$'
+        )
+        $ResearchPointer = (
+            [int]$Pointer.schema_version -eq 2 -and
+            [string]$Pointer.validation_mode -eq 'research' -and
+            $null -eq $Pointer.backtest_sha256
+        )
         if (
-            [int]$Pointer.schema_version -ne 1 -or
+            -not ($PromotedPointer -or $ResearchPointer) -or
             [string]$Pointer.kind -ne 'absorb-five-session-predictions-pointer' -or
             [string]$Pointer.market -ne $PredictionMarket -or
             $Relative -notmatch '^objects/[0-9a-f]{64}\.json$' -or
             [string]$Pointer.sha256 -notmatch '^[0-9a-f]{64}$' -or
             [long]$Pointer.size -le 0 -or [long]$Pointer.size -gt 5MB -or
             [string]$Pointer.source_manifest -notmatch "^quant/v1/manifests/$PredictionMarket-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}\.json$" -or
-            [string]$Pointer.source_manifest_sha256 -notmatch '^[0-9a-f]{64}$' -or
-            [string]$Pointer.backtest_sha256 -notmatch '^[0-9a-f]{64}$'
+            [string]$Pointer.source_manifest_sha256 -notmatch '^[0-9a-f]{64}$'
         ) { throw "Invalid prediction latest pointer for $PredictionMarket" }
         $ObjectPath = Assert-PathWithinRoot -Path (Join-Path $Resolved $Relative) -Root $Resolved
         $Object = Get-Item -LiteralPath $ObjectPath
@@ -817,15 +825,27 @@ function Publish-PredictionsV1 {
             $Relative -ne "objects/$Digest.json"
         ) { throw "Prediction object hash mismatch for $PredictionMarket" }
         $Document = Get-Content -LiteralPath $ObjectPath -Raw -Encoding utf8 | ConvertFrom-Json
+        $PromotedDocument = (
+            [int]$Document.schema_version -eq 1 -and
+            [string]$Document.backtest_sha256 -eq [string]$Pointer.backtest_sha256
+        )
+        $ResearchDocument = (
+            [int]$Document.schema_version -eq 2 -and
+            [string]$Document.validation_mode -eq 'research' -and
+            [string]$Pointer.validation_mode -eq 'research' -and
+            $null -eq $Document.backtest_sha256 -and
+            [int]$Document.prediction_count -eq @($Document.entities.PSObject.Properties).Count -and
+            [int]$Document.unavailable_count -eq @($Document.unavailable_symbols).Count -and
+            [int]$Document.source_symbol_count -eq ([int]$Document.prediction_count + [int]$Document.unavailable_count)
+        )
         if (
-            [int]$Document.schema_version -ne 1 -or
+            -not ($PromotedDocument -or $ResearchDocument) -or
             [string]$Document.kind -ne 'absorb-five-session-predictions' -or
             [string]$Document.market -ne $PredictionMarket -or
             [int]$Document.horizon_sessions -ne 5 -or
             [string]$Document.as_of -ne [string]$Pointer.as_of -or
             [string]$Document.source_manifest -ne [string]$Pointer.source_manifest -or
             [string]$Document.source_manifest_sha256 -ne [string]$Pointer.source_manifest_sha256 -or
-            [string]$Document.backtest_sha256 -ne [string]$Pointer.backtest_sha256 -or
             @($Document.entities.PSObject.Properties).Count -lt 1
         ) { throw "Prediction object schema mismatch for $PredictionMarket" }
         $SourceRelative = [string]$Document.source_manifest

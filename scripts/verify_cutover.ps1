@@ -1092,8 +1092,17 @@ function Test-PredictionPointer {
         -TemporaryRoot $TemporaryRoot `
         -Name "prediction-latest-$Market.json"
     $Latest = $LatestEvidence.document
+    $PromotedPointer = (
+        [int]$Latest.schema_version -eq 1 -and
+        [string]$Latest.backtest_sha256 -match '^[0-9a-f]{64}$'
+    )
+    $ResearchPointer = (
+        [int]$Latest.schema_version -eq 2 -and
+        [string]$Latest.validation_mode -eq 'research' -and
+        $null -eq $Latest.backtest_sha256
+    )
     if (
-        [int]$Latest.schema_version -ne 1 -or
+        -not ($PromotedPointer -or $ResearchPointer) -or
         [string]$Latest.kind -ne 'absorb-five-session-predictions-pointer' -or
         [string]$Latest.market -ne $Market -or
         [string]$Latest.path -notmatch '^objects/[0-9a-f]{64}\.json$' -or
@@ -1106,16 +1115,28 @@ function Test-PredictionPointer {
         -Name "prediction-object-$Market.json" `
         -ExpectedSha256 ([string]$Latest.sha256)
     $Document = $ObjectEvidence.document
+    $PromotedDocument = (
+        [int]$Document.schema_version -eq 1 -and
+        [string]$Document.backtest_sha256 -eq [string]$Latest.backtest_sha256
+    )
+    $ResearchDocument = (
+        [int]$Document.schema_version -eq 2 -and
+        [string]$Document.validation_mode -eq 'research' -and
+        [string]$Latest.validation_mode -eq 'research' -and
+        $null -eq $Document.backtest_sha256 -and
+        [int]$Document.prediction_count -eq @($Document.entities.PSObject.Properties).Count -and
+        [int]$Document.unavailable_count -eq @($Document.unavailable_symbols).Count -and
+        [int]$Document.source_symbol_count -eq ([int]$Document.prediction_count + [int]$Document.unavailable_count)
+    )
     if (
         $ObjectEvidence.file.Length -ne [long]$Latest.size -or
-        [int]$Document.schema_version -ne 1 -or
+        -not ($PromotedDocument -or $ResearchDocument) -or
         [string]$Document.kind -ne 'absorb-five-session-predictions' -or
         [string]$Document.market -ne $Market -or
         [int]$Document.horizon_sessions -ne 5 -or
         [string]$Document.as_of -ne [string]$Latest.as_of -or
         [string]$Document.source_manifest -ne [string]$Latest.source_manifest -or
         [string]$Document.source_manifest_sha256 -ne [string]$Latest.source_manifest_sha256 -or
-        [string]$Document.backtest_sha256 -ne [string]$Latest.backtest_sha256 -or
         @($Document.entities.PSObject.Properties).Count -lt 1
     ) { throw "Prediction object is invalid for $Market" }
     return "predictions/v1/latest-$Market.json generation $($LatestEvidence.metadata.generation) is verified"

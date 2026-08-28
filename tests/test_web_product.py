@@ -51,6 +51,32 @@ def prediction_product(market="TW", symbol="2330", as_of="2026-07-15"):
 class WebProductTests(unittest.TestCase):
     @patch.object(stock_app, "_published_prediction_snapshot")
     @patch.object(stock_app, "_published_dashboard_snapshot")
+    def test_dashboard_plainly_marks_uncalibrated_research_prediction(
+        self, load_snapshot, load_prediction
+    ):
+        snapshot = observation_dashboard()
+        snapshot["market_index"] = {
+            "symbol": "TAIEX", "name": "加權指數", "as_of": "2026-07-15",
+            "price": 23150.25, "change": 188.4, "change_pct": 0.82,
+            "open": 22982.1, "high": 23210.8, "low": 22940.6,
+            "candles": [], "ma20": [], "returns": {},
+            "source": {"provider": "TWSE", "kind": "official_index_daily"},
+        }
+        estimate = prediction_product(symbol="TAIEX")
+        estimate["schema_version"] = 2
+        estimate["validation_mode"] = "research"
+        estimate.pop("backtest_sha256")
+        load_snapshot.return_value = snapshot
+        load_prediction.return_value = estimate
+
+        html = stock_app.app.test_client().get("/dashboard").get_data(as_text=True)
+
+        self.assertIn("模型推估上漲機率（未校準）", html)
+        self.assertIn("未經回測校準", html)
+        self.assertNotIn("目前正式預測", html)
+
+    @patch.object(stock_app, "_published_prediction_snapshot")
+    @patch.object(stock_app, "_published_dashboard_snapshot")
     def test_dashboard_renders_verified_market_index_level_and_candles(
         self, load_snapshot, load_prediction
     ):
@@ -921,6 +947,7 @@ class WebProductTests(unittest.TestCase):
                 "symbol": symbol, "name": name, "status": "current",
                 "as_of": "2026-08-26", "target_session": "2026-09-02",
                 "current_price": price, "probability_pct": 61.0,
+                "probability_label": "五日上漲機率",
                 "predicted_price": price * 1.02, "predicted_change_pct": 2.0,
                 "line": [
                     {"time": "2026-08-26", "value": price},

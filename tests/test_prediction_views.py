@@ -28,6 +28,19 @@ def product(as_of="2026-08-26"):
 
 
 class PredictionViewTests(unittest.TestCase):
+    def test_research_prediction_is_plainly_labeled_and_not_promoted(self):
+        value = product()
+        value["schema_version"] = 2
+        value["validation_mode"] = "research"
+        value.pop("backtest_sha256")
+
+        result = prediction_for(value, "TW", "2330", "2026-08-26")
+
+        self.assertEqual(result["validation_mode"], "research")
+        self.assertEqual(result["label"], "AI 五日研究推估")
+        self.assertEqual(result["probability_label"], "模型推估上漲機率（未校準）")
+        self.assertIsNone(result["backtest_sha256"])
+
     def test_current_prediction_is_merged_with_plain_language_fields(self):
         result = prediction_for(product(), "TW", "2330", "2026-08-26")
 

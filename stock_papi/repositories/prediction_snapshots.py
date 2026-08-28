@@ -31,8 +31,11 @@ def load_prediction_snapshot(market, today=None, *, load_object, cache=PREDICTIO
         size = pointer["size"]
         as_of = datetime.date.fromisoformat(str(pointer["as_of"]))
         age = (today or datetime.date.today()) - as_of
+        schema_version = pointer.get("schema_version")
+        research = schema_version == 2 and pointer.get("validation_mode") == "research"
+        promoted = schema_version == 1 and isinstance(pointer.get("backtest_sha256"), str)
         if (
-            pointer.get("schema_version") != 1
+            not (research or promoted)
             or pointer.get("kind") != "absorb-five-session-predictions-pointer"
             or pointer.get("market") != market
             or re.fullmatch(r"[0-9a-f]{64}", digest) is None
@@ -47,11 +50,11 @@ def load_prediction_snapshot(market, today=None, *, load_object, cache=PREDICTIO
             return None
         document = json.loads(body.decode("utf-8"))
         validate_prediction_product(document)
+        fields = ["market", "as_of", "source_manifest", "source_manifest_sha256"]
+        fields.append("validation_mode" if research else "backtest_sha256")
         if any(
             document.get(field) != pointer.get(field)
-            for field in (
-                "market", "as_of", "source_manifest", "source_manifest_sha256", "backtest_sha256"
-            )
+            for field in fields
         ):
             return None
     except (KeyError, TypeError, UnicodeError, ValueError):

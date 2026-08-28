@@ -3,6 +3,7 @@ import unittest
 
 from stock_papi.batch.prediction_products import (
     build_prediction_product,
+    build_research_prediction_product,
     validate_prediction_product,
 )
 
@@ -69,6 +70,39 @@ def snapshot(symbol, market="TW"):
 
 
 class PredictionProductTests(unittest.TestCase):
+    def test_research_builder_emits_unvalidated_model_estimate_without_backtest(self):
+        product = build_research_prediction_product(
+            "TW",
+            quant_manifest(),
+            {"2330": snapshot("2330"), "TAIEX": snapshot("TAIEX")},
+            next_session=lambda _market, _as_of, _count: datetime.date(2026, 9, 2),
+            generated_at=datetime.datetime(
+                2026, 8, 26, 14, tzinfo=datetime.timezone.utc
+            ),
+        )
+
+        self.assertEqual(product["schema_version"], 2)
+        self.assertEqual(product["validation_mode"], "research")
+        self.assertNotIn("backtest_sha256", product)
+        self.assertEqual(product["entities"]["2330"]["predicted_price"], 104.0)
+        self.assertEqual(product["prediction_count"], 2)
+        self.assertEqual(product["unavailable_symbols"], [])
+        self.assertIs(validate_prediction_product(product), product)
+
+    def test_research_builder_records_unavailable_symbols_instead_of_hiding_them(self):
+        product = build_research_prediction_product(
+            "TW",
+            quant_manifest(symbols=("2330", "2317", "TAIEX")),
+            {"2330": snapshot("2330"), "TAIEX": snapshot("TAIEX")},
+            next_session=lambda *_args: datetime.date(2026, 9, 2),
+            generated_at=datetime.datetime(2026, 8, 26, 14, tzinfo=datetime.timezone.utc),
+        )
+
+        self.assertEqual(product["source_symbol_count"], 3)
+        self.assertEqual(product["prediction_count"], 2)
+        self.assertEqual(product["unavailable_count"], 1)
+        self.assertEqual(product["unavailable_symbols"], ["2317"])
+
     def test_builder_emits_stock_and_allowlisted_index_with_one_semantics(self):
         product = build_prediction_product(
             "TW",
