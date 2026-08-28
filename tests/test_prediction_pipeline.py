@@ -327,6 +327,34 @@ class PredictionPipelineTests(unittest.TestCase):
         self.assertTrue((result["ForeignNet"] == 0).all())
         self.assertIn("MARKET_RET_5", result)
 
+    @patch("app.fetch_option_context_history", return_value=(pd.DataFrame(),) * 3)
+    @patch("app.fetch_yfinance_price_history")
+    @patch("app.fetch_finmind_dataset")
+    def test_get_data_honors_explicit_as_of_date(
+        self, finmind, yf_history, _option_history
+    ):
+        dates = pd.to_datetime(["2026-08-24", "2026-08-25"])
+        frame = pd.DataFrame({
+            "Date": dates,
+            "Open": [100.0, 101.0],
+            "High": [102.0, 103.0],
+            "Low": [99.0, 100.0],
+            "Close": [101.0, 102.0],
+            "Volume": [1000, 1100],
+        })
+        yf_history.side_effect = [frame, frame, frame]
+
+        result = stock_app.get_data(
+            "AAPL", days=730, as_of=datetime.date(2026, 8, 24)
+        )
+
+        finmind.assert_not_called()
+        self.assertEqual(
+            yf_history.call_args_list[0].args,
+            ("AAPL", "2024-08-24", "2026-08-25"),
+        )
+        self.assertEqual(result.index.max().date(), datetime.date(2026, 8, 24))
+
     def test_broadcast_endpoint_is_disabled_without_token_configuration(self):
         previous = stock_app.BROADCAST_TOKEN
         self.addCleanup(setattr, stock_app, "BROADCAST_TOKEN", previous)

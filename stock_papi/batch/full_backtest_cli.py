@@ -92,7 +92,7 @@ def main(argv=None):
             ):
                 return
             raise ValueError("full backtest result identity mismatch")
-        frame = pipeline.get_data(symbol, 730)
+        frame = pipeline.get_data(symbol, 730, as_of=manifest.market_as_of)
         if frame is None or frame.empty:
             raise ValueError("price history is unavailable")
         frame = pipeline.calc_all(frame)

@@ -704,10 +704,11 @@ def _clean_df(df):
 def summarize_foreign_flow(df):
     return _summarize_foreign_flow(df, pd=pd)
 
-def get_data(code, days=730):
+def get_data(code, days=730, as_of=None):
     return _get_quant_data(
         code,
         days,
+        as_of=as_of,
         datetime=datetime,
         pd=pd,
         is_us_ticker=is_us_ticker,
