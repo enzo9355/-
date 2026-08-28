@@ -205,6 +205,13 @@
           <span class="kpi-sub">年化波動率監控</span>
         </div>
       </div>
+      {% set market_count = (market.advancing_count or 0) + (market.declining_count or 0) + (market.unchanged_count or 0) %}
+      {% set advancing_ratio = market.advancing_count * 100 / market_count if market_count else none %}
+      <div class="report-evidence-bars" aria-label="市場視覺摘要">
+        <div><span>上漲家數占比</span><progress value="{{ advancing_ratio or 0 }}" max="100">{{ advancing_ratio or 0 }}</progress><strong>{{ '%.1f%%'|format(advancing_ratio) if advancing_ratio is not none else '—' }}</strong></div>
+        <div><span>站上 MA20</span><progress value="{{ market.ma20_breadth_pct or 0 }}" max="100">{{ market.ma20_breadth_pct or 0 }}</progress><strong>{{ '%.1f%%'|format(market.ma20_breadth_pct) if market.ma20_breadth_pct is not none else '—' }}</strong></div>
+        <div><span>20 日波動</span><progress value="{{ market.realized_volatility_20d_pct or 0 }}" max="50">{{ market.realized_volatility_20d_pct or 0 }}</progress><strong>{{ '%.1f%%'|format(market.realized_volatility_20d_pct) if market.realized_volatility_20d_pct is not none else '—' }}</strong></div>
+      </div>
     {% else %}
       <div class="empty-state">{{ market_sec.reason or '市場資料尚未提供。' }}</div>
     {% endif %}
@@ -293,6 +300,12 @@
           </div>
         </div>
       {% endif %}
+
+      <div class="industry-detail-list" aria-label="產業相對強弱視覺">
+        {% for industry in ind_sec.data.ranking[:8] %}
+          <article class="industry-detail"><header><div><h3>{{ industry.name }}</h3><p>{{ industry.available_count }}／{{ industry.component_count }} 檔可用</p></div><strong class="return {{ 'up' if industry.relative_return_5d_pct is not none and industry.relative_return_5d_pct >= 0 else 'down' }}">{{ '%+.2f%%'|format(industry.relative_return_5d_pct) if industry.relative_return_5d_pct is not none else '資料不足' }}</strong></header>{% if industry.relative_return_5d_pct is not none %}<progress class="industry-strength-bar {{ 'negative' if industry.relative_return_5d_pct < 0 else '' }}" value="{{ industry.relative_return_5d_pct|abs }}" max="10">{{ industry.relative_return_5d_pct|abs }}</progress>{% endif %}</article>
+        {% else %}<div class="empty-state">產業觀察資料不足。</div>{% endfor %}
+      </div>
 
       <!-- Full Industry Table -->
       <div class="table-wrap">
@@ -393,20 +406,12 @@
       <!-- Subsection: Stock Events -->
       <div class="subsection">
         <h3 class="subsection-title">個股技術與量能異常事件</h3>
-        <div class="event-card-list">
-          {% for item in sec_sec.data.stock_events %}
-            <div class="event-item">
-              <div class="event-meta">
-                <span class="event-symbol"><strong>{{ item.name }}</strong>（{{ item.symbol }}）</span>
-                <span class="badge badge-neutral">{{ item.as_of }}</span>
-              </div>
-              <p class="event-desc">{{ item.observation }}</p>
-              {% if item.metric_value is defined and item.metric_value is not none %}
-                <span class="muted small">數值：{{ item.metric_value }} {{ item.unit }}</span>
-              {% endif %}
-            </div>
-          {% else %}
-            <p class="muted small">目前沒有通過條件的異常事件。</p>
+        <p class="muted small">漲跌、量能、法人、技術與資料警示分開呈現；事件條件不代表因果關係。</p>
+        {% set report_groups = namespace(up=[], down=[], volume=[], institution=[], technical=[], data=[]) %}
+        {% for item in sec_sec.data.stock_events %}{% if item.event_type == 'price_move' and item.metric_value > 0 %}{% set report_groups.up = report_groups.up + [item] %}{% elif item.event_type == 'price_move' %}{% set report_groups.down = report_groups.down + [item] %}{% elif item.event_type in ('volume_surge','volume_dry_up') %}{% set report_groups.volume = report_groups.volume + [item] %}{% elif item.event_type == 'institution_flow' %}{% set report_groups.institution = report_groups.institution + [item] %}{% elif item.event_type in ('rsi_overbought','rsi_oversold','new_high_20d','new_low_20d') %}{% set report_groups.technical = report_groups.technical + [item] %}{% elif item.event_type == 'data_warning' %}{% set report_groups.data = report_groups.data + [item] %}{% endif %}{% endfor %}
+        <div class="report-event-columns">
+          {% for key, title, items in [('up', '異常上漲', report_groups.up), ('down', '異常下跌', report_groups.down), ('volume', '量能異常', report_groups.volume), ('institution', '法人動向', report_groups.institution), ('technical', '技術面', report_groups.technical), ('data', '資料警示', report_groups.data)] %}
+            <section data-report-event-group="{{ key }}"><h4>{{ title }}</h4><div class="event-card-list">{% for item in items %}<div class="event-item"><div class="event-meta"><span class="event-symbol"><strong>{{ item.name }}</strong>（{{ item.symbol }}）</span><span class="badge badge-neutral">{{ item.as_of }}</span></div><p class="event-desc">{{ item.observation }}</p>{% if item.metric_value is defined and item.metric_value is not none %}<span class="muted small">數值：{{ item.metric_value }} {{ item.unit }}</span>{% endif %}</div>{% else %}<p class="muted small">目前沒有{{ title }}事件。</p>{% endfor %}</div></section>
           {% endfor %}
         </div>
       </div>
