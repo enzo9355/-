@@ -2183,6 +2183,36 @@ class TWOfficialPostCloseCLITests(unittest.TestCase):
         builder.assert_not_called()
         module.main.assert_not_called()
 
+    def test_missing_new_symbols_reach_the_bootstrap_stage(self):
+        pipeline = Pipeline()
+        pipeline.fetch_yfinance_price_history = Mock()
+        module = types.ModuleType("local_quant")
+        module.get_taiwan_symbols = lambda _pipeline: ["2330", "2303"]
+        module.load_stock_pipeline = lambda _root: pipeline
+        old = sys.modules.get("local_quant")
+        sys.modules["local_quant"] = module
+        try:
+            with tempfile.TemporaryDirectory() as temporary, patch.object(
+                cli, "_run_stage", return_value=(0, set())
+            ) as stage:
+                write_artifact(temporary, "2330")
+                result = run(
+                    root=Path(temporary),
+                    target_market_date=TARGET,
+                    calendar_artifacts=[write_calendar(temporary)],
+                    limit=1,
+                    delay=0,
+                )
+        finally:
+            if old is None:
+                sys.modules.pop("local_quant", None)
+            else:
+                sys.modules["local_quant"] = old
+
+        self.assertEqual(result, 0)
+        stage.assert_called_once()
+        self.assertEqual(stage.call_args.kwargs["symbols"], ["2330", "2303"])
+
     def test_coverage_boundary_thresholds(self):
         calendar_doc = {
             "schema_version": 1,
