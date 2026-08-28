@@ -430,7 +430,7 @@ class OfficialCompatFetcher:
                 )
             rows.append({"Date": value.isoformat(), **numbers})
         rows.sort(key=lambda row: row["Date"])
-        if len(rows) < 20 or len({row["Date"] for row in rows}) != len(rows):
+        if not rows or len({row["Date"] for row in rows}) != len(rows):
             raise IncrementalHistoryError(
                 f"historical bootstrap is insufficient for TW:{symbol}"
             )

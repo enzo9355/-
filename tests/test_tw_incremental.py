@@ -526,14 +526,14 @@ class TWOfficialIncrementalTests(unittest.TestCase):
                 audit_artifact_dates(Path(temporary), ["2330"], target_date=TARGET)
 
     def test_missing_artifact_can_bootstrap_verified_secondary_history(self):
-        dates = pd.bdate_range(end="2026-07-22", periods=25)
+        dates = pd.bdate_range(end="2026-07-22", periods=3)
         history_frame = pd.DataFrame({
             "Date": dates,
-            "Open": range(100, 125),
-            "High": range(101, 126),
-            "Low": range(99, 124),
-            "Close": range(100, 125),
-            "Volume": [1000] * 25,
+            "Open": range(100, 103),
+            "High": range(101, 104),
+            "Low": range(99, 102),
+            "Close": range(100, 103),
+            "Volume": [1000] * 3,
         })
         with tempfile.TemporaryDirectory() as temporary:
             fetcher = OfficialCompatFetcher(
@@ -548,7 +548,7 @@ class TWOfficialIncrementalTests(unittest.TestCase):
             lineage = fetcher.lineage_for("2330")
 
         self.assertEqual(price.iloc[-1]["date"], TARGET.isoformat())
-        self.assertEqual(len(price), 27)
+        self.assertEqual(len(price), 5)
         self.assertEqual(
             lineage["historical_bootstrap"]["source_mode"],
             "yahoo_finance_secondary_v1",
