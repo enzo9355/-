@@ -108,6 +108,55 @@ class ProfessionalReportHtmlTests(unittest.TestCase):
         self.assertIn("最後正常交易收盤 100.00（2026-07-16）", output)
         self.assertNotIn("quant/v1/manifests/", output)
 
+    def test_professional_report_visualizes_verified_market_industry_and_event_data(self):
+        template_text = pathlib.Path(
+            "templates/reports/post_close_professional.html"
+        ).read_text(encoding="utf-8")
+        env = Environment(
+            loader=DictLoader(
+                {
+                    "reports/post_close_professional.html": template_text,
+                    "base.html": "{% block title %}{% endblock %}{% block nav_reports %}{% endblock %}{% block content %}{% endblock %}",
+                }
+            )
+        )
+        metadata = self._metadata()
+        metadata["content"]["stock_events"] = [
+            {
+                "symbol": "3313",
+                "name": "斐成",
+                "event_type": "price_move",
+                "severity": "high",
+                "observation": "單日漲幅異常",
+                "metric_value": 10.0,
+                "unit": "pct",
+                "as_of": "2026-07-17",
+            },
+            {
+                "symbol": "6955",
+                "name": "邦睿生技-創",
+                "event_type": "price_move",
+                "severity": "high",
+                "observation": "單日跌幅異常",
+                "metric_value": -10.83,
+                "unit": "pct",
+                "as_of": "2026-07-17",
+            },
+        ]
+        report = build_professional_post_close_artifact(
+            metadata, code_commit_sha="b" * 40
+        )
+        output = env.get_template("reports/post_close_professional.html").render(
+            report=build_professional_report_view(report)
+        )
+
+        self.assertIn('aria-label="市場視覺摘要"', output)
+        self.assertIn('aria-label="產業相對強弱視覺"', output)
+        self.assertIn('class="industry-strength-bar', output)
+        self.assertIn('data-report-event-group="up"', output)
+        self.assertIn('data-report-event-group="down"', output)
+        self.assertLess(output.index("斐成"), output.index("邦睿生技-創"))
+
     def test_us_view_uses_us_title_and_market_disclosure(self):
         template_text = pathlib.Path(
             "templates/reports/post_close_professional.html"
