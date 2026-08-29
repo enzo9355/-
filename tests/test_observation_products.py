@@ -723,6 +723,8 @@ class ObservationProductsTests(unittest.TestCase):
         self.assertEqual(quality["failure_count"], 2)
         self.assertEqual(quality["regular_price_count"], 96)
         self.assertEqual(quality["verified_status_count"], 2)
+        self.assertEqual(quality["operational_failure_count"], 0)
+        self.assertEqual(quality["operational_failed_symbols"], [])
         self.assertEqual(quality["unavailable_symbols"], ["2001", "2002"])
         self.assertEqual(quality["unavailable_count"], 2)
 
