@@ -864,14 +864,31 @@ def validate_observation_dashboard(document):
         "verified_status_count",
         "operational_failure_count",
     }.intersection(quality):
+        unavailable_count = quality.get("unavailable_count", 0)
         if (
             not count_keys.issubset(quality)
             or any(type(quality[key]) is not int or quality[key] < 0 for key in count_keys)
             or quality["regular_price_count"] + quality["verified_status_count"]
             != quality["available_count"]
-            or quality["available_count"] + quality["operational_failure_count"]
-            != quality["universe_count"]
-            or quality["failure_count"] != quality["operational_failure_count"]
+            or type(unavailable_count) is not int
+            or unavailable_count < 0
+            or not (
+                (
+                    quality["available_count"]
+                    + quality["operational_failure_count"]
+                    == quality["universe_count"]
+                    and quality["failure_count"]
+                    == quality["operational_failure_count"]
+                )
+                or (
+                    quality["available_count"]
+                    + quality["operational_failure_count"]
+                    + unavailable_count
+                    == quality["universe_count"]
+                    and quality["failure_count"]
+                    == quality["operational_failure_count"] + unavailable_count
+                )
+            )
             or quality["verified_status_count"] != len(statuses)
         ):
             raise ValueError("observation dashboard quality counts are invalid")
@@ -984,7 +1001,11 @@ def build_observation_dashboard(
             "failed_symbols": list(manifest.failed_symbols),
             "regular_price_count": len(regular_stocks),
             "verified_status_count": len(status_stocks),
-            "operational_failure_count": manifest.failure_count,
+            "operational_failure_count": (
+                manifest.operational_failure_count
+                if manifest.operational_failure_count is not None
+                else manifest.failure_count
+            ),
             "regular_price_coverage": _rounded(
                 manifest.regular_price_coverage
                 if manifest.schema_version in (3, 4)
@@ -992,7 +1013,11 @@ def build_observation_dashboard(
                 6,
             ),
             "observation_coverage": _rounded(manifest.coverage, 6),
-            "operational_failed_symbols": list(manifest.failed_symbols),
+            "operational_failed_symbols": list(
+                manifest.operational_failed_symbols
+                if manifest.operational_failure_count is not None
+                else manifest.failed_symbols
+            ),
             "unavailable_symbols": list(
                 manifest.unavailable_symbols
                 if getattr(manifest, "unavailable_symbols", None) is not None
