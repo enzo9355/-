@@ -1160,14 +1160,14 @@ try {
                 [long]$Manifest.observation_count * 100 -le
                     ([long]$Manifest.active_universe_count * 95)
             ) { throw 'Invalid manifest v4 arithmetic' }
-            $SymbolPattern = if ($Market -eq 'US') { '^[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)?$' } else { '^\d{4,6}$' }
+            $SymbolPattern = if ($Market -eq 'US') { '^[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)?$' } else { '^[0-9]{4,5}[0-9A-Z]?$' }
             foreach ($Symbol in $UnavailableSymbols) {
                 if ([string]$Symbol -notmatch $SymbolPattern) {
                     throw 'Invalid unavailable_symbols entry'
                 }
             }
         }
-            $SymbolPattern = if ($Market -eq 'US') { '^[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)?$' } else { '^\d{4,6}$' }
+            $SymbolPattern = if ($Market -eq 'US') { '^[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)?$' } else { '^[0-9]{4,5}[0-9A-Z]?$' }
             $ExpectedBySymbol = @{}
             foreach ($Property in $ExpectedProperties) {
                 $Symbol = [string]$Property.Name

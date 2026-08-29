@@ -20,6 +20,16 @@ from stock_papi.integrations.market_data.tw_trading_status import (
 
 StockSnapshot = StockSnapshot
 
+_TW_SYMBOL_RE = re.compile(r"[0-9]{4,5}[0-9A-Z]?")
+_US_SYMBOL_RE = re.compile(r"[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)?")
+
+
+def _valid_market_symbol(market: str, value: Any) -> bool:
+    symbol = str(value)
+    if market == "TW":
+        return _TW_SYMBOL_RE.fullmatch(symbol) is not None
+    return len(symbol) <= 10 and _US_SYMBOL_RE.fullmatch(symbol) is not None
+
 
 def _read_limited(path: Path, limit: int, label: str) -> bytes:
     try:
@@ -165,7 +175,7 @@ def _validate_manifest_v3(document: dict[str, Any], market: str) -> None:
         or not isinstance(expected, dict)
         or not isinstance(failed, list)
         or len(set(failed)) != len(failed)
-        or any(re.fullmatch(r"[0-9]{4,6}", str(item)) is None for item in failed)
+        or any(not _valid_market_symbol(market, item) for item in failed)
         or len(symbols) != observation_count
         or len(expected) != status_count
         or len(failed) != failure_count
@@ -187,7 +197,7 @@ def _validate_manifest_v3(document: dict[str, Any], market: str) -> None:
         raise ReportSourceError("manifest v3 consistency check failed")
     for symbol, status in expected.items():
         if (
-            re.fullmatch(r"[0-9]{4,6}", str(symbol)) is None
+            not _valid_market_symbol(market, symbol)
             or not isinstance(status, dict)
             or status.get("status")
             not in {"official_no_regular_trade", "officially_suspended"}
@@ -217,7 +227,7 @@ def _validate_manifest_v3(document: dict[str, Any], market: str) -> None:
             not isinstance(unavailable, list)
             or len(set(unavailable)) != len(unavailable)
             or any(
-                re.fullmatch(r"[0-9]{4,6}", str(item)) is None
+                not _valid_market_symbol(market, item)
                 for item in unavailable
             )
             or type(unavailable_count) is not int
@@ -260,14 +270,8 @@ def _validate_manifest_v4(document: dict[str, Any], market: str) -> None:
         operational_count,
         denominator,
     )
-    symbol_pattern = (
-        re.compile(r"^[0-9]{4,6}$")
-        if market == "TW"
-        else re.compile(r"^[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)?$")
-    )
     def _valid_sym(item):
-        s = str(item)
-        return (len(s) <= 10 if market == "US" else True) and bool(symbol_pattern.fullmatch(s))
+        return _valid_market_symbol(market, item)
 
     if (
         document.get("schema_version") != 4
@@ -399,11 +403,7 @@ def _load_manifest_source(
     stocks = []
     for symbol in sorted(manifest["symbols"]):
         entry = manifest["symbols"][symbol]
-        valid_sym = (
-            bool(re.fullmatch(r"[0-9]{4,6}", str(symbol)))
-            if market == "TW"
-            else (len(str(symbol)) <= 10 and bool(re.fullmatch(r"^[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)?$", str(symbol))))
-        )
+        valid_sym = _valid_market_symbol(market, symbol)
         if not isinstance(entry, dict) or not valid_sym:
             raise ReportSourceError("manifest symbol entry is invalid")
         relative = str(entry.get("path") or "")

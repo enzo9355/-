@@ -262,7 +262,7 @@ def write_quant_publish_v3(root: Path) -> Path:
     return publish
 
 
-def write_quant_publish_v4(root):
+def write_quant_publish_v4(root, *, status_symbol="2303"):
     """Write a v4 status-aware quant publish with a 20/21 unavailable partition."""
     publish = Path(root) / "publish" / "quant" / "v1"
     publish.mkdir(parents=True, exist_ok=True)
@@ -270,7 +270,7 @@ def write_quant_publish_v4(root):
     regular_symbols = [f"{3000 + index:04d}" for index in range(19)]
     documents = [
         regular_v3_stock_document(symbol) for symbol in regular_symbols
-    ] + [status_stock_document("2303")]
+    ] + [status_stock_document(status_symbol)]
     entries = {}
     expected = {}
     for document in documents:

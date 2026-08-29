@@ -85,6 +85,8 @@ class LocalQuantTaskTests(unittest.TestCase):
             source.index("expected_non_price_symbols"),
             source.index("# Upload objects"),
         )
+        self.assertIn("^[0-9]{4,5}[0-9A-Z]?$", source)
+        self.assertNotIn(r"^\d{4,6}$", source)
 
     def _run_uploader_preflight(self, root: Path):
         fake_bin = root / "fake-bin"
