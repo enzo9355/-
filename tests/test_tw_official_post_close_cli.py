@@ -2511,6 +2511,31 @@ class TWOfficialPostCloseCLITests(unittest.TestCase):
                 operational.exception, cli._UnavailableObservationError
             )
 
+    def test_patched_builder_skips_fallback_when_official_snapshot_has_no_observation(self):
+        pipeline = types.SimpleNamespace(fetch_finmind_dataset=None)
+
+        def original_build(*_args, **_kwargs):
+            raise AssertionError("fallback must not run")
+
+        fake_module = types.SimpleNamespace(
+            build_stock_snapshot=original_build,
+            load_stock_pipeline=lambda _root: pipeline,
+            run_market_batch=lambda *_args, **_kwargs: None,
+            get_taiwan_symbols=lambda _pipeline: ["2303"],
+            load_exclusion_list=lambda _root, _market: (set(), set(), [], 0),
+        )
+        with _patched_pipeline(
+            fake_module,
+            pipeline,
+            Mock(),
+            snapshot_series(dates=(TARGET,), price_symbols=("2330",)),
+            Mock(),
+        ):
+            with self.assertRaises(cli._UnavailableObservationError):
+                fake_module.build_stock_snapshot(
+                    pipeline, "TW", "2303", target_market_date=TARGET
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

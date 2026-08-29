@@ -600,6 +600,11 @@ def _patched_pipeline(
     target_status_symbols = set(
         series.snapshots[series.target_date].trading_status_by_symbol
     )
+    target_observed_symbols = (
+        set(series.snapshots[series.target_date].price_by_symbol)
+        | target_status_symbols
+        | set(series.snapshots[series.target_date].terminated_by_symbol)
+    )
 
     def stock_name_for_date(symbol, target_date=None, require_authoritative=False):
         if target_date is not None:
@@ -648,6 +653,10 @@ def _patched_pipeline(
     def build_stock_snapshot_with_lineage(
         pipeline_arg, market, symbol, *args, **kwargs
     ):
+        if market == "TW" and str(symbol) not in target_observed_symbols:
+            raise _UnavailableObservationError(
+                "point-in-time price history is unavailable"
+            )
         if market == "TW":
             status = fetcher.status_for(str(symbol))
             if status is not None:

@@ -393,7 +393,7 @@ function Test-MarketSymbol {
     if ($Value -isnot [string]) { return $false }
     $Symbol = [string]$Value
     if ($Market -eq 'TW') {
-        return $Symbol -match '^\d{4,6}$'
+        return $Symbol -match '^[0-9]{4,5}[0-9A-Z]?$'
     }
     return $Symbol.Length -le 10 -and
         $Symbol -cmatch '^[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)?$'

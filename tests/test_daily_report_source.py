@@ -81,6 +81,20 @@ class DailyReportSourceTests(unittest.TestCase):
         self.assertEqual(source.manifest.verified_non_price_symbol_count, 1)
         self.assertEqual(len(source.stocks), 20)
 
+    def test_v4_loader_accepts_canonical_alphanumeric_tw_status_symbol(self):
+        from reporting.source_loader import load_report_source
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            write_quant_publish_v4(root, status_symbol="00625K")
+            source = load_report_source(root, market="TW")
+
+        by_symbol = {stock.symbol: stock for stock in source.stocks}
+        self.assertEqual(
+            by_symbol["00625K"].observation_kind,
+            "official_no_regular_trade",
+        )
+
     def test_v3_loader_rejects_v4_manifest_document(self):
         from reporting.exceptions import ReportSourceError
         from reporting.source_loader import _validate_manifest_v3
