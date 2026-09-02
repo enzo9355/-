@@ -95,7 +95,7 @@ Write-Output "US PostClose observation pipeline completed successfully for $Targ
 
 # Upload if requested
 if ($PublishObservation) {
-    & $PythonExe -m stock_papi.batch.prediction_products_cli --root $DataRoot --market US
+    & $PythonExe -m stock_papi.batch.prediction_products_cli --root $DataRoot --market US --mode research
     if ($LASTEXITCODE -ne 0) {
         Write-Warning 'US prediction product did not pass its gates; previous pointer remains.'
     }

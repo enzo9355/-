@@ -173,6 +173,7 @@ foreach ($definition in @($ast.FindAll({{ param($node) $node -is [Management.Aut
         self.assertIn("stock_papi.batch.observation_products_cli", post_close)
         self.assertIn("stock_papi.batch.tw_official_post_close_cli", post_close)
         self.assertIn("stock_papi.batch.prediction_products_cli", post_close)
+        self.assertIn("--mode research", post_close)
         self.assertIn("[switch]$PublishObservation", post_close)
         self.assertIn("[switch]$ReconcileLegacyOverlaps", post_close)
         self.assertIn(
@@ -188,6 +189,7 @@ foreach ($definition in @($ast.FindAll({{ param($node) $node -is [Management.Aut
             encoding="utf-8"
         )
         self.assertIn("stock_papi.batch.prediction_products_cli", us_post_close)
+        self.assertIn("--mode research", us_post_close)
         self.assertIn("'--include-market-index'", post_close)
         self.assertIn(
             "$HistoricalTargetDate = $ParsedTargetDate.Date -lt [DateTime]::Today",

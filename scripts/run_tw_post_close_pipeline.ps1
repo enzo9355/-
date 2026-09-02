@@ -229,7 +229,7 @@ Write-Output $CandidateJson
 if (-not $PublishObservation) { exit 0 }
 & $PythonExe -m stock_papi.batch.observation_products_cli promote --root $DataRoot --candidate $Candidate.candidate_path
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-& $PythonExe -m stock_papi.batch.prediction_products_cli --root $DataRoot --market TW
+& $PythonExe -m stock_papi.batch.prediction_products_cli --root $DataRoot --market TW --mode research
 if ($LASTEXITCODE -ne 0) {
     Write-Warning 'TW prediction product did not pass its gates; previous pointer remains.'
 }
