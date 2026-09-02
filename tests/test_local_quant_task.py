@@ -396,6 +396,10 @@ class LocalQuantTaskTests(unittest.TestCase):
             source.index("capture_observation_lkg.ps1"),
             source.index("# Upload objects"),
         )
+        self.assertLess(
+            source.index("try {\n    Enter-AbsorbPublicationMutex"),
+            source.index("capture_observation_lkg.ps1"),
+        )
 
     def test_lifecycle_deletes_cloud_objects_after_thirty_days(self):
         source = LIFECYCLE.read_text(encoding="utf-8")

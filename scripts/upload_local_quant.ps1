@@ -871,6 +871,8 @@ function Publish-PredictionsV1 {
     return $Uploaded.ToArray()
 }
 
+try {
+    Enter-AbsorbPublicationMutex
 if ($ObservationOnly -and -not $LkgReceiptPath) {
     $CaptureText = (& (Join-Path $PSScriptRoot 'capture_observation_lkg.ps1') `
         -DataRoot $DataRoot `
@@ -949,8 +951,6 @@ if ($LkgReceiptPath) {
     }
 }
 
-try {
-    Enter-AbsorbPublicationMutex
     $InsightsUploaded = $false
     $InsightsLatestPath = Join-Path $ResolvedRoot 'latest-insights.json'
     if (-not $ObservationOnly -and (Test-Path -LiteralPath $InsightsLatestPath -PathType Leaf)) {
