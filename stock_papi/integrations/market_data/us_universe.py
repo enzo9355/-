@@ -40,7 +40,7 @@ NASDAQ_CORPORATE_ACTION_ALERT_SOURCE_ID = "nasdaqtrader:corporate_action:ECA2026
 NASDAQ_CORPORATE_ACTION_ALERT_CLAIMS_SHA256 = "228096681f4d7b2f280f7fc7df4c063336227bc4ef6ee011fcb54d598ed822a2"
 NASDAQ_CORPORATE_ACTION_ALERT_EFFECTIVE_DATE = datetime.date(2026, 8, 17)
 NASDAQ_CORPORATE_ACTION_ALERT_MAX_BYTES = 2 * 1024 * 1024
-US_UNIVERSE_CACHE_CONTRACT_VERSION = 7
+US_UNIVERSE_CACHE_CONTRACT_VERSION = 8
 US_ACCEPTED_EXCHANGES = frozenset(
     {"NASDAQ", "NYSE", "CBOE", "BATS", "NYS", "ASE", "AMEX"}
 )
@@ -165,7 +165,10 @@ def _official_security_type_from_name(name: str, *, etf: str | None = None) -> s
         return "UNIT"
     if re.search(r"\bwarrant(?:s)?\b", name_lower):
         return "WARRANT"
-    if re.search(r"\bright(?:s)?(?:\s*,|\s*$|\s+each|\s+entitl)", name_lower):
+    if re.search(
+        r"\bright(?:s)?(?:\s*,|\s*$|\s+each|\s+entitl|\s+to\b|\s*\()",
+        name_lower,
+    ):
         return "RIGHT"
     if re.search(r"\betn(?:s)?\b", name_lower):
         return "ETN"
@@ -192,6 +195,10 @@ def _official_symbol_aliases(
     upper = raw.upper()
     aliases: set[str] = set()
     p_marker = re.fullmatch(r"^(.+)[p]([A-Z])$", raw) is not None
+    right_marker = (
+        security_type == "RIGHT"
+        and re.fullmatch(r"^(.+?)(?:r|rw)$", raw) is not None
+    )
 
     def add(candidate: str) -> None:
         candidate = re.sub(r"\s+", "-", str(candidate or "").strip().upper())
@@ -202,7 +209,7 @@ def _official_symbol_aliases(
         except ValueError:
             return
 
-    if not p_marker:
+    if not p_marker and not right_marker:
         add(upper)
 
     if "$" in upper:
@@ -216,6 +223,11 @@ def _official_symbol_aliases(
         match = re.fullmatch(r"^(.+)[p]([A-Z])$", raw)
         assert match is not None
         add(f"{match.group(1)}-P{match.group(2)}")
+
+    if right_marker:
+        match = re.fullmatch(r"^(.+?)(r|rw)$", raw)
+        assert match is not None
+        add(f"{match.group(1)}-{'RW' if match.group(2) == 'rw' else 'RI'}")
 
     if upper.endswith("="):
         add(upper[:-1] + "-UN")
@@ -615,11 +627,11 @@ def _heuristic_security_type(symbol: str, name: str, raw_ticker: str) -> str:
     name_lower = name.lower()
     sym_upper = symbol.upper()
     raw_upper = raw_ticker.upper()
-    if "warrant" in name_lower or sym_upper.endswith(("-WT", "-WTA", "-WTB", "-WTC", "WS")) or (len(sym_upper) == 5 and sym_upper.endswith("W")):
+    if re.search(r"\bwarrants?\b", name_lower) or sym_upper.endswith(("-WT", "-WTA", "-WTB", "-WTC", "WS")) or (len(sym_upper) == 5 and sym_upper.endswith("W")):
         return "WARRANT"
-    if "right" in name_lower or sym_upper.endswith("-RI") or (len(sym_upper) == 5 and sym_upper.endswith("R")):
+    if re.search(r"\brights?\b", name_lower) or sym_upper.endswith("-RI") or (len(sym_upper) == 5 and sym_upper.endswith("R")):
         return "RIGHT"
-    if "unit" in name_lower or sym_upper.endswith("-UN") or (len(sym_upper) == 5 and sym_upper.endswith("U")):
+    if re.search(r"\bunits?\b", name_lower) or sym_upper.endswith("-UN") or (len(sym_upper) == 5 and sym_upper.endswith("U")):
         return "UNIT"
     if "preferred" in name_lower or "pfd" in name_lower or "-P" in sym_upper or "/PR" in raw_upper or "-PR" in sym_upper:
         return "PREFERRED"
@@ -680,6 +692,26 @@ def classify_sec_security_type(symbol: str, name: str, raw_ticker: str) -> str:
     """Compatibility wrapper for the non-authoritative secondary signal."""
     result = _heuristic_security_type(symbol, name, raw_ticker)
     return "ETF_OR_FUND" if result == "ETF" else result
+
+
+def _sec_same_issuer_derivative_type(
+    symbol: str, issuer_symbols: set[str]
+) -> str | None:
+    suffixes = {
+        "W": ("WARRANT", ("U", "R")),
+        "U": ("UNIT", ("W", "R")),
+        "R": ("RIGHT", ("U", "W")),
+        "-WT": ("WARRANT", ("-UN", "-RI")),
+        "-UN": ("UNIT", ("-WT", "-RI")),
+        "-RI": ("RIGHT", ("-UN", "-WT")),
+    }
+    for suffix, (security_type, paired_suffixes) in suffixes.items():
+        if not symbol.endswith(suffix) or len(symbol) <= len(suffix):
+            continue
+        root = symbol[: -len(suffix)]
+        if any(f"{root}{paired}" in issuer_symbols for paired in paired_suffixes):
+            return security_type
+    return None
 
 
 def _parse_nasdaq_alert_date(value: str) -> datetime.date:
@@ -889,6 +921,7 @@ def parse_sec_us_universe_with_metadata(
     if not required.issubset(fields):
         raise ValueError("SEC universe fields are incomplete")
     positions = {name: fields.index(name) for name in required}
+    cik_position = fields.index("cik") if "cik" in fields else None
 
     symbols = set()
     exchange_counts: dict[str, int] = {}
@@ -905,6 +938,19 @@ def parse_sec_us_universe_with_metadata(
     excluded_derivative = 0
     eligible_listed_count = 0
     document_evidence_sha256 = _evidence_sha256({"fields": fields, "data": rows})
+    issuer_symbols: dict[str, set[str]] = {}
+    if cik_position is not None:
+        for row in rows:
+            if not isinstance(row, list) or len(row) < len(fields):
+                continue
+            issuer = str(row[cik_position] or "").strip()
+            ticker = str(row[positions["ticker"]] or "").strip().upper().replace(".", "-")
+            if not issuer:
+                continue
+            try:
+                issuer_symbols.setdefault(issuer, set()).add(validate_us_ticker(ticker))
+            except ValueError:
+                continue
     security_records = {
         str(symbol).upper().replace(".", "-"): dict(record)
         for symbol, record in (security_metadata or {}).items()
@@ -1061,6 +1107,30 @@ def parse_sec_us_universe_with_metadata(
         classification = _authoritative_security_classification(
             valid_sym, name_val, raw_ticker, metadata
         )
+        issuer = str(row[cik_position] or "").strip() if cik_position is not None else ""
+        paired_type = _sec_same_issuer_derivative_type(
+            valid_sym, issuer_symbols.get(issuer, set())
+        )
+        if paired_type and not classification.get("authoritative"):
+            source = str(document.get("source_id") or SEC_US_UNIVERSE_URL)
+            source_identity = str(
+                document.get("source_identity")
+                or f"{source}:{document.get('_payload_sha256') or document_evidence_sha256}"
+            )
+            classification = {
+                **classification,
+                "security_type": paired_type,
+                "classification_method": "sec_same_issuer_derivative_pair",
+                "authoritative": True,
+                "evidence": {
+                    "source_id": source,
+                    "source_identity": source_identity,
+                    "as_of": document.get("as_of"),
+                    "evidence_sha256": str(
+                        document.get("_payload_sha256") or document_evidence_sha256
+                    ),
+                },
+            }
         event_security_type = str((lifecycle_event or {}).get("security_type") or "UNKNOWN").upper()
         if event_security_type != "UNKNOWN":
             if classification.get("authoritative") and classification["security_type"] != event_security_type:

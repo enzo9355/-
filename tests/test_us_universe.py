@@ -417,3 +417,69 @@ class USUniverseTests(unittest.TestCase):
         self.assertEqual(directory["records"]["AAC-UN"]["security_type"], "UNIT")
         self.assertEqual(directory["records"]["ACHR-WT"]["security_type"], "WARRANT")
         self.assertEqual(directory["records"]["AAPL"]["security_type"], "COMMON_EQUITY")
+
+    def test_first_party_rights_names_and_when_issued_aliases_merge_without_conflict(self):
+        from stock_papi.integrations.market_data.us_universe import (
+            fetch_official_us_security_metadata,
+            parse_nasdaq_security_directory,
+            parse_nyse_security_mapping,
+        )
+
+        nasdaq = parse_nasdaq_security_directory(
+            "\n".join(
+                [
+                    "ACT Symbol|Security Name|Exchange|CQS Symbol|ETF|Round Lot Size|Test Issue|NASDAQ Symbol",
+                    "QRED.R|QuasarEdge Acquisition Corporation Rights to receive one-fourth of one Ordinary Share|N|QREDr|N|100|N|QRED^",
+                    "RIV.V|RiverNorth Opportunities Fund, Inc. Rights (expiring September 23, 2026) Rights when issued|N|RIVrw|N|100|N|RIV^#",
+                    "File Creation Time: 0902202616:00|||||||",
+                ]
+            ),
+            source_id="nasdaqtrader:otherlisted",
+            source_url="https://example.test/otherlisted.txt",
+        )
+        nyse = parse_nyse_security_mapping(
+            """<NYSESymbolMap>
+              <SymbolMap><Symbol>QRED RT</Symbol><CQS_Symbol>QREDr</CQS_Symbol><ListedMarket>N</ListedMarket><Security_Type>R</Security_Type></SymbolMap>
+              <SymbolMap><Symbol>RIV RTWI</Symbol><CQS_Symbol>RIVrw</CQS_Symbol><ListedMarket>N</ListedMarket><Security_Type>R</Security_Type></SymbolMap>
+            </NYSESymbolMap>""",
+            source_id="nyse:security_mapping",
+            source_url="https://example.test/NYSESymbolMapping_20260902.xml",
+        )
+        with patch(
+            "stock_papi.integrations.market_data.us_universe.fetch_nasdaq_security_directory",
+            return_value=nasdaq,
+        ), patch(
+            "stock_papi.integrations.market_data.us_universe.fetch_nyse_security_mapping",
+            return_value=nyse,
+        ):
+            metadata = fetch_official_us_security_metadata()
+
+        self.assertEqual(metadata["records"]["QRED-RI"]["security_type"], "RIGHT")
+        self.assertEqual(metadata["records"]["RIV-RW"]["security_type"], "RIGHT")
+        self.assertNotIn("QRED-RI", metadata["conflicted_symbols"])
+
+    def test_same_issuer_sec_unit_warrant_pairs_are_excluded_without_symbol_hardcoding(self):
+        from stock_papi.integrations.market_data.us_universe import parse_sec_us_universe_with_metadata
+
+        breakdown = parse_sec_us_universe_with_metadata(
+            {
+                "fields": ["cik", "name", "ticker", "exchange"],
+                "data": [
+                    [2088805, "Inflection Point Acquisition Corp. VII", "CMIIU", "Nasdaq"],
+                    [2088805, "Inflection Point Acquisition Corp. VII", "CMIIW", "Nasdaq"],
+                    [2088805, "Inflection Point Acquisition Corp. VII", "IPXGU", "Nasdaq"],
+                    [2088805, "Inflection Point Acquisition Corp. VII", "IPXGW", "Nasdaq"],
+                    [1, "Standalone Common Stock", "PSNYW", "Nasdaq"],
+                    [2, "Apple Inc.", "AAPL", "Nasdaq"],
+                ],
+            },
+            scope="EQUITY_OBSERVATION",
+        )
+
+        self.assertEqual(breakdown.symbols, ["AAPL", "PSNYW"])
+        self.assertEqual(breakdown.derivative_breakdown["UNIT"], 2)
+        self.assertEqual(breakdown.derivative_breakdown["WARRANT"], 2)
+        self.assertEqual(
+            breakdown.security_eligibility_by_symbol["CMIIW"]["classification_method"],
+            "sec_same_issuer_derivative_pair",
+        )
