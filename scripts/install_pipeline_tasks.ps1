@@ -17,7 +17,8 @@ function Get-AbsorbPipelineTaskDefinitions {
     @{ Name='ABSORB-TW-ObservationRecovery'; Job='TW-ObservationRecovery'; Time='06:15'; RepetitionInterval='PT10M'; RepetitionDuration='PT15M'; ExecutionTimeLimit=$DefaultExecutionTimeLimit },
     @{ Name='ABSORB-FullBacktest'; Job='FullBacktest'; Time='22:30'; ExecutionTimeLimit=(New-TimeSpan -Minutes 225); Enabled=$false },
     @{ Name='ABSORB-US-Daily'; Job='US-Daily'; Time='05:30'; ExecutionTimeLimit=$DefaultExecutionTimeLimit },
-    @{ Name='ABSORB-US-PostClose'; Job='US-PostClose'; Time='05:00'; RepetitionInterval='PT20M'; RepetitionDuration='PT4H00M'; ExecutionTimeLimit=$DefaultExecutionTimeLimit },
+    # Yahoo can finalize daily Close fields near New York midnight; cover both EDT and EST.
+    @{ Name='ABSORB-US-PostClose'; Job='US-PostClose'; Time='09:00'; RepetitionInterval='PT20M'; RepetitionDuration='PT5H00M'; ExecutionTimeLimit=$DefaultExecutionTimeLimit },
     @{ Name='ABSORB-US-PreMarket'; Job='US-PreMarket'; Time='20:30'; ExecutionTimeLimit=$DefaultExecutionTimeLimit },
     @{ Name='ABSORB-WeeklyModel'; Job='WeeklyModel'; Time='18:00'; Days=$WeeklyDay; ExecutionTimeLimit=$DefaultExecutionTimeLimit },
     @{ Name='ABSORB-ReportUploadRecovery'; Job='ReportUploadRecovery'; Time='09:35'; ExecutionTimeLimit=$DefaultExecutionTimeLimit }
