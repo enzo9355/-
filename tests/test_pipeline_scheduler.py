@@ -1253,6 +1253,16 @@ if ($fullBacktest.Count -ne 1) {{ throw 'full backtest definition was not unique
             post_close_source.index("python_runtime.ps1"),
         )
 
+    def test_us_post_close_retries_through_yahoo_eod_finalization(self):
+        install_source = (
+            Path(__file__).parents[1] / "scripts" / "install_pipeline_tasks.ps1"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            "Name='ABSORB-US-PostClose'; Job='US-PostClose'; Time='09:00'; "
+            "RepetitionInterval='PT20M'; RepetitionDuration='PT5H00M'",
+            install_source,
+        )
+
     @staticmethod
     def _invoke_completion_guard(guard, root, target_date):
         completed = subprocess.run(
