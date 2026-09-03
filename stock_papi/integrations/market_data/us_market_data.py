@@ -330,77 +330,85 @@ def fetch_nasdaq_historical_chart(
         raise USSchemaError("Nasdaq historical retry count is invalid")
 
     from_date = target_market_date - datetime.timedelta(days=days)
-    query = urllib.parse.urlencode(
-        {
-            "assetclass": "stocks",
-            "fromdate": from_date.isoformat(),
-            "todate": target_market_date.isoformat(),
-            "limit": "5000",
-        }
-    )
-    source_url = (
-        f"https://api.nasdaq.com/api/quote/{urllib.parse.quote(normalized_symbol)}/historical?{query}"
-    )
-
-    if fetch_json is not None:
-        try:
-            document = fetch_json()
-        except TypeError:
-            document = fetch_json(source_url)
-        try:
-            payload_sha256 = hashlib.sha256(
-                json.dumps(
-                    document,
-                    ensure_ascii=False,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                    allow_nan=False,
-                ).encode("utf-8")
-            ).hexdigest()
-        except (TypeError, ValueError) as exc:
-            raise USSchemaError("Nasdaq historical test payload is not canonical JSON") from exc
-    else:
-        request = urllib.request.Request(
-            source_url,
-            headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
-                "Accept": "application/json, text/plain, */*",
-                "Accept-Encoding": "identity",
-                "Origin": "https://www.nasdaq.com",
-                "Referer": "https://www.nasdaq.com/",
-            },
+    for provider_asset_class in ("stocks", "etf"):
+        query = urllib.parse.urlencode(
+            {
+                "assetclass": provider_asset_class,
+                "fromdate": from_date.isoformat(),
+                "todate": target_market_date.isoformat(),
+                "limit": "5000",
+            }
         )
-        last_exc = None
-        for attempt in range(max_retries):
+        source_url = (
+            f"https://api.nasdaq.com/api/quote/{urllib.parse.quote(normalized_symbol)}/historical?{query}"
+        )
+
+        if fetch_json is not None:
             try:
-                with urllib.request.urlopen(request, timeout=timeout) as response:
-                    raw_payload = response.read(8 * 1024 * 1024 + 1)
-                break
-            except urllib.error.HTTPError as exc:
-                last_exc = exc
-                if exc.code in {408, 425, 429, 500, 502, 503, 504} and attempt < max_retries - 1:
-                    continue
-                raise USProviderOperationalError(
-                    f"Nasdaq historical HTTP {exc.code} for {normalized_symbol}"
-                ) from exc
-            except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as exc:
-                last_exc = exc
-                if attempt < max_retries - 1:
-                    continue
-                raise USProviderOperationalError(
-                    f"Nasdaq historical transport error for {normalized_symbol}: {exc}"
-                ) from exc
+                document = fetch_json()
+            except TypeError:
+                document = fetch_json(source_url)
+            try:
+                payload_sha256 = hashlib.sha256(
+                    json.dumps(
+                        document,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        allow_nan=False,
+                    ).encode("utf-8")
+                ).hexdigest()
+            except (TypeError, ValueError) as exc:
+                raise USSchemaError("Nasdaq historical test payload is not canonical JSON") from exc
         else:
-            raise USProviderOperationalError(
-                f"Nasdaq historical transport error for {normalized_symbol}: {last_exc}"
-            ) from last_exc
-        if len(raw_payload) > 8 * 1024 * 1024:
-            raise USSchemaError("Nasdaq historical response is too large")
-        payload_sha256 = hashlib.sha256(raw_payload).hexdigest()
-        try:
-            document = json.loads(raw_payload.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise USSchemaError("Nasdaq historical response is not valid JSON") from exc
+            request = urllib.request.Request(
+                source_url,
+                headers={
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
+                    "Accept": "application/json, text/plain, */*",
+                    "Accept-Encoding": "identity",
+                    "Origin": "https://www.nasdaq.com",
+                    "Referer": "https://www.nasdaq.com/",
+                },
+            )
+            last_exc = None
+            for attempt in range(max_retries):
+                try:
+                    with urllib.request.urlopen(request, timeout=timeout) as response:
+                        raw_payload = response.read(8 * 1024 * 1024 + 1)
+                    break
+                except urllib.error.HTTPError as exc:
+                    last_exc = exc
+                    if exc.code in {408, 425, 429, 500, 502, 503, 504} and attempt < max_retries - 1:
+                        continue
+                    raise USProviderOperationalError(
+                        f"Nasdaq historical HTTP {exc.code} for {normalized_symbol}"
+                    ) from exc
+                except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as exc:
+                    last_exc = exc
+                    if attempt < max_retries - 1:
+                        continue
+                    raise USProviderOperationalError(
+                        f"Nasdaq historical transport error for {normalized_symbol}: {exc}"
+                    ) from exc
+            else:
+                raise USProviderOperationalError(
+                    f"Nasdaq historical transport error for {normalized_symbol}: {last_exc}"
+                ) from last_exc
+            if len(raw_payload) > 8 * 1024 * 1024:
+                raise USSchemaError("Nasdaq historical response is too large")
+            payload_sha256 = hashlib.sha256(raw_payload).hexdigest()
+            try:
+                document = json.loads(raw_payload.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise USSchemaError("Nasdaq historical response is not valid JSON") from exc
+
+        if not (
+            isinstance(document, Mapping)
+            and "data" in document
+            and document.get("data") is None
+        ):
+            break
 
     if not isinstance(document, Mapping) or not isinstance(document.get("data"), Mapping):
         raise USSchemaError(f"Nasdaq historical payload schema is invalid for {normalized_symbol}")
@@ -480,6 +488,7 @@ def fetch_nasdaq_historical_chart(
             "source_identity": f"nasdaqtrader:historical:{payload_sha256}",
             "payload_sha256": payload_sha256,
             "provider_symbol": provider_symbol,
+            "provider_asset_class": provider_asset_class,
             "target_market_date": target_market_date.isoformat(),
             "target_observation": "present" if target_market_date in prepared.index else "absent",
             "target_row_sha256": target_row_sha256,

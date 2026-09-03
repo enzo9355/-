@@ -366,6 +366,42 @@ class USMarketDataTests(unittest.TestCase):
                 fetch_json=lambda: wrong_identity,
             )
 
+    def test_nasdaq_historical_fallback_tries_etf_when_stocks_has_no_data(self):
+        target = datetime.date(2026, 9, 2)
+        urls = []
+
+        def fetch_json(url):
+            urls.append(url)
+            if "assetclass=stocks" in url:
+                return {"data": None}
+            return {
+                "data": {
+                    "symbol": "BTCK",
+                    "tradesTable": {
+                        "rows": [{
+                            "date": "09/02/2026",
+                            "open": "24.95",
+                            "high": "26.46",
+                            "low": "24.95",
+                            "close": "25.96",
+                            "volume": "2,627",
+                        }]
+                    },
+                }
+            }
+
+        result = fetch_nasdaq_historical_chart(
+            "BTCK",
+            target_market_date=target,
+            fetch_json=fetch_json,
+        )
+
+        self.assertEqual(len(urls), 2)
+        self.assertIn("assetclass=stocks", urls[0])
+        self.assertIn("assetclass=etf", urls[1])
+        self.assertEqual(result.loc[target, "Low"], 24.95)
+        self.assertEqual(result.attrs["provider_asset_class"], "etf")
+
     def test_nasdaq_historical_fallback_does_not_promote_a_stale_date(self):
         target = datetime.date(2026, 8, 21)
         document = {
