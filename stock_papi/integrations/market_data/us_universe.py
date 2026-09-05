@@ -704,6 +704,7 @@ def _sec_same_issuer_derivative_type(
         "-WT": ("WARRANT", ("-UN", "-RI")),
         "-UN": ("UNIT", ("-WT", "-RI")),
         "-RI": ("RIGHT", ("-UN", "-WT")),
+        "-RW": ("RIGHT", ("",)),
     }
     for suffix, (security_type, paired_suffixes) in suffixes.items():
         if not symbol.endswith(suffix) or len(symbol) <= len(suffix):

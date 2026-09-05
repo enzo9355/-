@@ -483,3 +483,25 @@ class USUniverseTests(unittest.TestCase):
             breakdown.security_eligibility_by_symbol["CMIIW"]["classification_method"],
             "sec_same_issuer_derivative_pair",
         )
+
+    def test_same_issuer_sec_when_issued_right_is_excluded(self):
+        from stock_papi.integrations.market_data.us_universe import parse_sec_us_universe_with_metadata
+
+        breakdown = parse_sec_us_universe_with_metadata(
+            {
+                "fields": ["cik", "name", "ticker", "exchange"],
+                "data": [
+                    [1501072, "RiverNorth Opportunities Fund, Inc.", "RIV", "NYSE"],
+                    [1501072, "RiverNorth Opportunities Fund, Inc.", "RIV.RW", "NYSE"],
+                    [2, "Standalone Corp.", "VIEW-RW", "NYSE"],
+                ],
+            },
+            scope="EQUITY_OBSERVATION",
+        )
+
+        self.assertEqual(breakdown.symbols, ["RIV", "VIEW-RW"])
+        self.assertEqual(breakdown.derivative_breakdown["RIGHT"], 1)
+        self.assertEqual(
+            breakdown.security_eligibility_by_symbol["RIV-RW"]["classification_method"],
+            "sec_same_issuer_derivative_pair",
+        )

@@ -118,6 +118,7 @@ def _provider_result(
                 "source_identity",
                 "payload_sha256",
                 "provider_symbol",
+                "provider_asset_class",
                 "target_market_date",
                 "target_row_sha256",
                 "skipped_incomplete_rows",
@@ -148,6 +149,8 @@ def _fetch_and_classify_symbol(
                     symbol,
                     target_market_date=target_market_date,
                 )
+            except USObservationUnavailable:
+                raise
             except Exception as fallback_exc:
                 raise exc from fallback_exc
         dropped_placeholder_count = int(
