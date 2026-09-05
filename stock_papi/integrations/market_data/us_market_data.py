@@ -457,6 +457,23 @@ def fetch_nasdaq_historical_chart(
         )
         if incomplete:
             if row_date == target_market_date:
+                missing_fields = [
+                    field
+                    for field, value in raw_values.items()
+                    if value is None
+                    or (isinstance(value, str) and value.strip().upper() in {"", "N/A", "NA", "--"})
+                ]
+                if missing_fields == ["Volume"]:
+                    ohlc = [
+                        _parse_nasdaq_historical_number(
+                            raw_values[field], symbol=normalized_symbol, field=field, date=row_date
+                        )
+                        for field in ("Open", "High", "Low", "Close")
+                    ]
+                    if min(ohlc) > 0 and max(ohlc) - min(ohlc) <= 1e-4:
+                        raise USObservationUnavailable(
+                            f"Nasdaq historical target has no traded volume for {normalized_symbol}"
+                        )
                 raise USSchemaError(
                     f"Nasdaq historical target row is incomplete for {normalized_symbol}"
                 )

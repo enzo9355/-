@@ -16,6 +16,7 @@ from stock_papi.batch.us_official_post_close_cli import (
 )
 from stock_papi.integrations.market_data.us_market_data import (
     USIntegrityError,
+    USObservationUnavailable,
     USSchemaError,
     fetch_direct_yahoo_chart,
     fetch_us_stock_history,
@@ -151,6 +152,7 @@ class TestUSAdversarialFailures(unittest.TestCase):
                 "source_url": "https://api.nasdaq.com/api/quote/FALLBACK/historical",
                 "payload_sha256": "a" * 64,
                 "provider_symbol": "FALLBACK",
+                "provider_asset_class": "etf",
                 "target_market_date": self.target_date.isoformat(),
                 "target_observation": "present",
                 "target_row_sha256": "b" * 64,
@@ -176,9 +178,26 @@ class TestUSAdversarialFailures(unittest.TestCase):
             "FALLBACK",
         )
         self.assertEqual(
+            result.provider_result["secondary_fallback"]["provider_asset_class"],
+            "etf",
+        )
+        self.assertEqual(
             result.provider_result["primary_failure"]["error_type"],
             "USIntegrityError",
         )
+
+    def test_official_fallback_no_observation_remains_missing_not_failure(self):
+        with patch(
+            "stock_papi.batch.us_official_post_close_cli.fetch_us_stock_history",
+            side_effect=USIntegrityError("primary integrity failure"),
+        ), patch(
+            "stock_papi.batch.us_official_post_close_cli.fetch_nasdaq_historical_chart",
+            side_effect=USObservationUnavailable("official target has no traded volume"),
+        ):
+            result = _fetch_and_classify_symbol(self.root, "SVA", self.target_date)
+
+        self.assertEqual(result.kind, "M")
+        self.assertEqual(result.reason_code, "other_legitimate_unavailable")
 
     def test_target_row_with_null_ohlc_is_schema_failure(self):
         dates = pd.date_range(end=self.target_date, periods=10, freq="B")

@@ -15,6 +15,7 @@ from stock_papi.integrations.market_data.us_market_data import (
     fetch_us_stock_history,
     _normalise_us_date,
     USIntegrityError,
+    USObservationUnavailable,
     USSchemaError,
 )
 
@@ -451,6 +452,31 @@ class USMarketDataTests(unittest.TestCase):
         with self.assertRaises(USSchemaError):
             fetch_nasdaq_historical_chart(
                 "SNSC",
+                target_market_date=target,
+                fetch_json=lambda: document,
+            )
+
+    def test_nasdaq_flat_target_with_unavailable_volume_is_no_observation(self):
+        target = datetime.date(2026, 9, 4)
+        document = {
+            "data": {
+                "symbol": "SVA",
+                "tradesTable": {
+                    "rows": [{
+                        "date": "09/04/2026",
+                        "open": "$6.47",
+                        "high": "$6.47",
+                        "low": "$6.47",
+                        "close": "$6.47",
+                        "volume": "N/A",
+                    }]
+                },
+            }
+        }
+
+        with self.assertRaises(USObservationUnavailable):
+            fetch_nasdaq_historical_chart(
+                "SVA",
                 target_market_date=target,
                 fetch_json=lambda: document,
             )
