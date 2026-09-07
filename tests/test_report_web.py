@@ -84,7 +84,7 @@ class ReportWebTests(unittest.TestCase):
             report_type="pre_market",
             published_at="2026-07-16T23:30:00Z",
             title="2026-07-16 盤前風險更新",
-            summary=["隔夜訊號分歧"],
+            summary=["隔夜觀察偏正向"],
             warnings=[],
             content=pre_market_content,
         )
@@ -341,12 +341,68 @@ class ReportWebTests(unittest.TestCase):
         self.assertEqual(post_close.status_code, 200)
         self.assertIn("台股市場、產業與量化研究日報", post_close.get_data(as_text=True))
         self.assertEqual(pre_market.status_code, 200)
-        self.assertIn("隔夜訊號分歧", pre_market.get_data(as_text=True))
+        self.assertIn("隔夜觀察偏正向", pre_market.get_data(as_text=True))
         self.assertIn("有效標的</dt><dd>1042</dd>", post_close.get_data(as_text=True))
         self.assertEqual(legacy_index.status_code, 200)
         index_html = legacy_index.get_data(as_text=True)
         self.assertIn("/reports/2026-07-15/post-close", index_html)
         self.assertIn("/reports/2026-07-16/pre-market", index_html)
+
+    def test_legacy_empty_pre_market_report_is_labeled_as_post_close_context(self):
+        temporary, objects = self._production_shaped_objects()
+        self.addCleanup(temporary.cleanup)
+        index = json.loads(objects["reports/v2/index-TW.json"])
+        pre_market = next(
+            item for item in index["reports"] if item["report_type"] == "pre_market"
+        )
+        metadata_path = f"reports/v2/{pre_market['metadata']}"
+        metadata = json.loads(objects[metadata_path])
+        metadata["content"]["overnight_overlay"] = {
+            "status": "insufficient",
+            "message": "資料不足，維持盤後觀察",
+            "as_of": "2026-07-15T23:30:00Z",
+            "available": [],
+            "unavailable": [],
+        }
+        content_bytes = json.dumps(
+            metadata["content"],
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        metadata["content_sha256"] = hashlib.sha256(content_bytes).hexdigest()
+        pre_market["content_sha256"] = metadata["content_sha256"]
+        encoded = json.dumps(
+            metadata,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        metadata_sha256 = hashlib.sha256(encoded).hexdigest()
+        pre_market["metadata"] = f"metadata/{metadata_sha256}.json"
+        pre_market["metadata_sha256"] = metadata_sha256
+        objects["reports/v2/index-TW.json"] = json.dumps(
+            index,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        objects[f"reports/v2/{pre_market['metadata']}"] = encoded
+
+        with patch.object(
+            stock_app,
+            "_gcs_get_report_v2_object",
+            side_effect=lambda path, _size: objects.get(path),
+            create=True,
+        ):
+            response = stock_app.app.test_client().get(
+                "/reports/2026-07-16/pre-market"
+            )
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        self.assertIn("此歷史盤前報告沒有隔夜資料", html)
+        self.assertIn("以下內容僅為前一交易日盤後摘要", html)
 
     def test_v2_observation_report_is_the_only_formal_report_surface(self):
         temporary, objects, metadata = self._objects()
@@ -554,7 +610,7 @@ class ReportWebTests(unittest.TestCase):
             )
 
         self.assertEqual(response.status_code, 200)
-        self.assertIn("隔夜訊號分歧", response.get_data(as_text=True))
+        self.assertIn("隔夜觀察偏正向", response.get_data(as_text=True))
 
     def test_unexpected_report_render_error_is_safe_and_correlated(self):
         temporary, objects, _metadata = self._objects()

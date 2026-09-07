@@ -22,7 +22,6 @@
   },
   "pre_market_content": {
     "core": {
-      "dashboard_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
       "market_observation": {
         "return_1d_pct": 0.42,
         "advancing_count": 612,
@@ -30,10 +29,6 @@
         "ma20_breadth_pct": 54.3,
         "realized_volatility_20d_pct": 18.2
       },
-      "industry_observations": [],
-      "heatmap": [],
-      "stock_events": [],
-      "etf_observations": [],
       "daily_focus": ["市場廣度維持中性"],
       "data_quality": {
         "coverage": 0.9971,
@@ -44,11 +39,19 @@
     },
     "base_metadata_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "overnight_overlay": {
-      "status": "mixed",
-      "message": "隔夜訊號分歧",
-      "available": ["SPY", "QQQ"],
-      "unavailable": [],
-      "as_of": "2026-07-17T00:30:00Z"
+      "status": "risk_on",
+      "message": "隔夜觀察偏正向",
+      "symbols": [
+        {"symbol": "SPY", "return_pct": 1.0, "direction": "up", "as_of": "2026-07-16"},
+        {"symbol": "QQQ", "return_pct": 0.8, "direction": "up", "as_of": "2026-07-16"},
+        {"symbol": "TSM", "return_pct": 1.2, "direction": "up", "as_of": "2026-07-16"},
+        {"symbol": "UMC", "return_pct": 0.5, "direction": "up", "as_of": "2026-07-16"},
+        {"symbol": "ASX", "return_pct": -0.3, "direction": "down", "as_of": "2026-07-16"}
+      ],
+      "as_of": "2026-07-16",
+      "previous_as_of": "2026-07-15",
+      "source_manifest": "quant/v1/manifests/US-20260716T220000Z-aaaaaaaaaaaa.json",
+      "source_manifest_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
     }
   }
 }

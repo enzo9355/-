@@ -1,4 +1,3 @@
-import copy
 import datetime
 import hashlib
 import json
@@ -71,6 +70,36 @@ def overnight(name, signal="risk_off", as_of="2026-07-14T23:30:00Z"):
     }
 
 
+def _us_source():
+    from reporting.schemas import StockSnapshot
+    from types import SimpleNamespace
+
+    manifest = SimpleNamespace(
+        market="US", market_as_of=datetime.date(2026, 7, 14),
+        manifest_path="manifests/US-20260714T220000Z-aaaaaaaaaaaa.json",
+        manifest_sha256="a" * 64,
+    )
+    stocks = []
+    for index, symbol in enumerate(("SPY", "QQQ", "TSM", "UMC", "ASX")):
+        stocks.append(StockSnapshot(
+            symbol=symbol, name=symbol, market="US", as_of=manifest.market_as_of,
+            model_version="test", daily=[
+                {"Date": "2026-07-13T00:00:00", "Close": 100.0},
+                {"Date": "2026-07-14T00:00:00", "Close": 101.0 if index < 4 else 99.0},
+            ], backtest={}, sha256="b" * 64, size=1,
+        ))
+    return SimpleNamespace(manifest=manifest, stocks=stocks)
+
+
+def _us_calendars():
+    from stock_papi.batch.calendar import TradingCalendarSet
+    from stock_papi.integrations.market_data.us_calendar import (
+        get_us_calendar_documents,
+    )
+
+    return TradingCalendarSet.from_documents(get_us_calendar_documents(2026, 2026))
+
+
 class PreMarketPipelineTests(unittest.TestCase):
     def test_overnight_fetch_enforces_timeout_size_schema_timestamp_and_freshness(self):
         spec = OvernightSourceSpec(
@@ -132,19 +161,17 @@ class PreMarketPipelineTests(unittest.TestCase):
                         notify=lambda _receipt: {},
                     ).run(now=datetime.datetime(2026, 7, 15, 0, tzinfo=UTC))
 
-    def test_partial_sources_keep_core_bytes_unchanged_and_publish_without_pdf(self):
+    def test_publishes_reduced_core_with_overnight_overlay_without_pdf(self):
         with tempfile.TemporaryDirectory() as temporary:
             base = base_receipt()
-            before = json.dumps(base["metadata"]["content"], sort_keys=True, separators=(",", ":")).encode()
             published = []
             pipeline = PreMarketPipeline(
                 Path(temporary),
                 applicable_trading_date=datetime.date(2026, 7, 15),
                 load_base=lambda: base,
-                source_loaders=[
-                    lambda: overnight("US futures", "risk_off"),
-                    lambda: (_ for _ in ()).throw(TimeoutError("provider timeout")),
-                ],
+                source_loaders=[],
+                us_source_loader=_us_source,
+                us_calendars=_us_calendars(),
                 publish=lambda metadata: published.append(metadata) or {"content_sha256": "b" * 64},
                 notify=lambda _receipt: {"sent": True},
             )
@@ -153,11 +180,16 @@ class PreMarketPipelineTests(unittest.TestCase):
 
             document = published[0]
             parsed = ReportMetadataV2.from_document(document)
-            after = json.dumps(document["content"]["core"], sort_keys=True, separators=(",", ":")).encode()
-            self.assertEqual(before, after)
+            core = document["content"]["core"]
+            self.assertEqual(set(core), {"market_observation", "data_quality", "daily_focus"})
+            self.assertEqual(core["market_observation"], base["metadata"]["content"]["market_observation"])
             self.assertEqual(parsed.product_mode, "observation")
-            self.assertEqual(document["content"]["overnight_overlay"]["status"], "risk_off")
-            self.assertEqual(len(document["content"]["overnight_overlay"]["unavailable"]), 1)
+            self.assertEqual(document["content"]["overnight_overlay"]["status"], "risk_on")
+            self.assertEqual(
+                [item["symbol"] for item in document["content"]["overnight_overlay"]["symbols"]],
+                list(("SPY", "QQQ", "TSM", "UMC", "ASX")),
+            )
+            self.assertNotIn("unavailable", document["content"]["overnight_overlay"])
             self.assertEqual(document["product_mode"], "observation")
             self.assertEqual(document["model_versions"], {})
             self.assertIsNone(document["backtest_as_of"])
@@ -169,14 +201,31 @@ class PreMarketPipelineTests(unittest.TestCase):
             self.assertNotIn("pdf_path", document)
             self.assertEqual(result["status"], "completed")
 
-    def test_all_unavailable_is_insufficient_and_rerun_does_not_duplicate_notification(self):
+    def test_missing_us_source_fails_closed_before_publish(self):
         with tempfile.TemporaryDirectory() as temporary:
             calls = []
             pipeline = PreMarketPipeline(
                 Path(temporary),
                 applicable_trading_date=datetime.date(2026, 7, 15),
                 load_base=base_receipt,
-                source_loaders=[lambda: None],
+                source_loaders=[],
+                publish=lambda metadata: calls.append("publish") or {"content_sha256": "b" * 64},
+                notify=lambda receipt: calls.append("notify") or {"sent": True},
+            )
+            with self.assertRaises(PreMarketPipelineError):
+                pipeline.run(now=datetime.datetime(2026, 7, 15, 0, tzinfo=UTC))
+            self.assertEqual(calls, [])
+
+    def test_completed_rerun_does_not_duplicate_notification(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            calls = []
+            pipeline = PreMarketPipeline(
+                Path(temporary),
+                applicable_trading_date=datetime.date(2026, 7, 15),
+                load_base=base_receipt,
+                source_loaders=[],
+                us_source_loader=_us_source,
+                us_calendars=_us_calendars(),
                 publish=lambda metadata: calls.append("publish") or {"content_sha256": "b" * 64},
                 notify=lambda receipt: calls.append("notify") or {"sent": True},
             )
@@ -184,30 +233,31 @@ class PreMarketPipelineTests(unittest.TestCase):
             second = pipeline.run(now=datetime.datetime(2026, 7, 15, 0, 5, tzinfo=UTC))
 
             overlay = first["outputs"]["metadata"]["content"]["overnight_overlay"]
-            self.assertEqual(overlay["status"], "insufficient")
-            self.assertEqual(overlay["message"], "資料不足，維持盤後觀察")
+            self.assertEqual(overlay["status"], "risk_on")
             self.assertEqual(calls, ["publish", "notify"])
             self.assertEqual(second["status"], "completed")
 
-
-
-    def test_pre_market_core_lineage_preserves_raw_observation_content(self):
+    def test_pre_market_core_only_carries_benchmark_summary_not_full_industry_events(self):
         with tempfile.TemporaryDirectory() as temporary:
             base = base_receipt()
-            raw_core_before = copy.deepcopy(base["metadata"]["content"])
             published = []
             pipeline = PreMarketPipeline(
                 Path(temporary),
                 applicable_trading_date=datetime.date(2026, 7, 15),
                 load_base=lambda: base,
-                source_loaders=[lambda: overnight("US futures", "risk_on")],
+                source_loaders=[],
+                us_source_loader=_us_source,
+                us_calendars=_us_calendars(),
                 publish=lambda metadata: published.append(metadata) or {"content_sha256": "b" * 64},
                 notify=lambda _receipt: {"sent": True},
             )
             result = pipeline.run(now=datetime.datetime(2026, 7, 15, 0, tzinfo=UTC))
             self.assertEqual(result["status"], "completed")
             core_after = published[0]["content"]["core"]
-            self.assertEqual(raw_core_before, core_after)
+            self.assertNotIn("industry_observations", core_after)
+            self.assertNotIn("stock_events", core_after)
+            self.assertNotIn("etf_observations", core_after)
+            self.assertNotIn("heatmap", core_after)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -238,6 +288,70 @@ class PreMarketCliFreshnessTests(unittest.TestCase):
         path = Path(root) / "TW-2026.json"
         path.write_text(json.dumps(document, ensure_ascii=False), encoding="utf-8")
         return path
+
+    @staticmethod
+    def _us_completed_session():
+        import zoneinfo
+
+        from stock_papi.batch.calendar import TradingCalendarSet
+        from stock_papi.integrations.market_data.us_calendar import (
+            get_us_calendar_documents,
+        )
+
+        new_york = zoneinfo.ZoneInfo("America/New_York")
+        now = datetime.datetime.now(UTC)
+        ny_now = now.astimezone(new_york)
+        calendars = TradingCalendarSet.from_documents(
+            get_us_calendar_documents(2025, 2027)
+        )
+        completed = calendars.latest_session_on_or_before(
+            ny_now.date()
+            if ny_now.time() >= datetime.time(16)
+            else ny_now.date() - datetime.timedelta(days=1)
+        )
+        previous = calendars.session_offset(completed, -1)
+        return completed, previous
+
+    @staticmethod
+    def _publish_us_quant(root, completed, previous):
+        from local_quant import publish_market_snapshot, write_stock_artifact
+
+        universe = list(("SPY", "QQQ", "TSM", "UMC", "ASX"))
+        for symbol in universe:
+            daily = [
+                {"Date": previous.isoformat(), "Close": 100.0},
+                {"Date": completed.isoformat(), "Close": 101.0},
+            ]
+            payload = {
+                "schema_version": 2,
+                "market": "US",
+                "symbol": symbol,
+                "name": symbol,
+                "as_of": completed.isoformat(),
+                "target_market_date": completed.isoformat(),
+                "observation_as_of": completed.isoformat(),
+                "latest_regular_price_date": completed.isoformat(),
+                "observation_kind": "regular_price",
+                "model_version": "test",
+                "lineage": {
+                    "source_schema_version": "us-market-data-v1",
+                    "observation_as_of": completed.isoformat(),
+                    "latest_regular_price_date": completed.isoformat(),
+                    "observation_kind": "regular_price",
+                },
+                "rows": len(daily),
+                "latest": dict(daily[-1]),
+                "backtest": {},
+                "daily": daily,
+            }
+            write_stock_artifact(root, "US", symbol, payload)
+        publish_market_snapshot(
+            Path(root),
+            "US",
+            universe,
+            generated_at=datetime.datetime.now(UTC),
+            target_market_date=completed,
+        )
 
     def _run_cli(self, root, applicable, calendars, extra=None):
         environment = os.environ.copy()
@@ -289,6 +403,8 @@ class PreMarketCliFreshnessTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             self._publish_post_close_base(root, applicable="2026-07-16")
+            completed_session, previous_session = self._us_completed_session()
+            self._publish_us_quant(root, completed_session, previous_session)
             calendar = self._calendar_artifact(temporary)
 
             completed = self._run_cli(
@@ -298,6 +414,20 @@ class PreMarketCliFreshnessTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr)
         result = json.loads(completed.stdout.strip().splitlines()[-1])
         self.assertEqual(result["status"], "completed")
+
+    def test_source_file_is_rejected_fail_closed(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+
+            completed = self._run_cli(
+                root, "2026-07-16", [], extra=["--source-file", "legacy.json"]
+            )
+
+        self.assertEqual(completed.returncode, 4)
+        self.assertIn(
+            "TW pre-market only accepts verified US quant source",
+            completed.stderr,
+        )
 
     def test_missing_calendar_artifacts_fail_before_publication(self):
         with tempfile.TemporaryDirectory() as temporary:

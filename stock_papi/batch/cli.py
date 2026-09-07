@@ -88,7 +88,15 @@ def _publish_v2_receipt(root, metadata):
 
 
 def run_pre_market(args):
+    if args.source_file:
+        raise PreMarketRefusal(
+            "unsupported_source_file",
+            "TW pre-market only accepts verified US quant source; --source-file is not supported",
+        )
     from stock_papi.batch.pre_market import PreMarketPipeline
+    from reporting.source_loader import load_report_source
+    from stock_papi.batch.calendar import TradingCalendarSet
+    from stock_papi.integrations.market_data.us_calendar import get_us_calendar_documents
 
     calendars = None
     required_base_session = None
@@ -117,6 +125,13 @@ def run_pre_market(args):
             "enabled": False,
             "reason": "notification delivery is performed after uploader verification",
         },
+        us_source_loader=lambda: load_report_source(Path(args.root), market="US"),
+        us_calendars=TradingCalendarSet.from_documents(
+            get_us_calendar_documents(
+                args.applicable_trading_date.year - 1,
+                args.applicable_trading_date.year + 1,
+            )
+        ),
     )
     if calendars is not None:
         base = pipeline.load_base()
