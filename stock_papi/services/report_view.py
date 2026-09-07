@@ -144,24 +144,52 @@ def _observation_core(value: Any, source_market_date: str) -> dict[str, Any]:
 def _overnight_overlay(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ReportWebError("Pre-market overlay 不合法")
-    available = value.get("available")
-    unavailable = value.get("unavailable")
     if (
-        value.get("status") not in {"risk_on", "risk_off", "mixed", "insufficient"}
+        value.get("status") == "insufficient"
+        and isinstance(value.get("message"), str)
+        and isinstance(value.get("as_of"), str)
+        and value.get("available") == []
+        and value.get("unavailable") == []
+    ):
+        return {
+            "status": "legacy_unavailable",
+            "message": "此歷史盤前報告沒有隔夜資料。",
+            "symbols": [],
+            "as_of": value["as_of"],
+            "previous_as_of": None,
+            "source_manifest": None,
+            "source_manifest_sha256": None,
+        }
+    symbols = value.get("symbols")
+    if (
+        value.get("status") not in {"risk_on", "risk_off", "neutral"}
         or not isinstance(value.get("message"), str)
         or not isinstance(value.get("as_of"), str)
-        or not isinstance(available, list)
-        or not isinstance(unavailable, list)
-        or len(available) > 50
-        or len(unavailable) > 50
+        or not isinstance(value.get("previous_as_of"), str)
+        or not isinstance(symbols, list)
+        or len(symbols) != 5
+        or {item.get("symbol") for item in symbols if isinstance(item, dict)}
+        != {"SPY", "QQQ", "TSM", "UMC", "ASX"}
+        or not isinstance(value.get("source_manifest"), str)
+        or not re.fullmatch(r"quant/v1/manifests/US-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}\.json", value["source_manifest"])
+        or not re.fullmatch(r"[0-9a-f]{64}", str(value.get("source_manifest_sha256") or ""))
+        or any(
+            not isinstance(item, dict)
+            or type(item.get("return_pct")) not in (int, float)
+            or item.get("direction") not in {"up", "down", "unchanged"}
+            or item.get("as_of") != value.get("as_of")
+            for item in symbols
+        )
     ):
         raise ReportWebError("Pre-market overlay schema 不合法")
     return {
         "status": value["status"],
         "message": value["message"],
-        "available": list(available),
-        "unavailable": list(unavailable),
+        "symbols": list(symbols),
         "as_of": value["as_of"],
+        "previous_as_of": value["previous_as_of"],
+        "source_manifest": value["source_manifest"],
+        "source_manifest_sha256": value["source_manifest_sha256"],
     }
 
 
@@ -190,7 +218,24 @@ def build_observation_report_view(
             or base_metadata_sha256 != expected_base_metadata_sha256
         ):
             raise ReportWebError("Pre-market report base 不合法")
-        core = _observation_core(content.get("core"), source_market_date)
+        try:
+            core_value = content.get("core")
+            if not isinstance(core_value, dict):
+                raise ValueError
+            for key in ("market_observation", "data_quality", "daily_focus"):
+                if key not in core_value:
+                    raise ValueError
+            core = {
+                "market_observation": dict(core_value["market_observation"]),
+                "industry_observations": [], "heatmap": [], "stock_events": [],
+                "trading_status_observations": [], "etf_observations": [],
+                "daily_focus": list(core_value["daily_focus"]),
+                "data_quality": dict(core_value["data_quality"]),
+            }
+            if not _valid_core_items(core):
+                raise ValueError
+        except (TypeError, ValueError):
+            raise ReportWebError("Pre-market benchmark summary 不合法") from None
         overlay = _overnight_overlay(content.get("overnight_overlay"))
     else:
         raise ReportWebError("Observation report type 不支援")

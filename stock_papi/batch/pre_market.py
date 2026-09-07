@@ -3,15 +3,48 @@
 import datetime
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
+import re
+import zoneinfo
 
 from stock_papi.batch.runtime import acquire_job_lock, job_namespace
 from stock_papi.batch.status import PipelineStatusWriter
-from stock_papi.integrations.market_data.overnight import (
-    OvernightSourceError,
-    validate_overnight_document,
-)
+
+
+NEW_YORK = zoneinfo.ZoneInfo("America/New_York")
+OVERNIGHT_SYMBOLS = ("SPY", "QQQ", "TSM", "UMC", "ASX")
+
+
+def _valid_overlay(value):
+    if not isinstance(value, dict):
+        return False
+    symbols = value.get("symbols")
+    return (
+        value.get("status") in {"risk_on", "risk_off", "neutral"}
+        and isinstance(value.get("message"), str)
+        and isinstance(value.get("as_of"), str)
+        and isinstance(value.get("previous_as_of"), str)
+        and re.fullmatch(
+            r"quant/v1/manifests/US-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}\.json",
+            str(value.get("source_manifest") or ""),
+        )
+        is not None
+        and re.fullmatch(r"[0-9a-f]{64}", str(value.get("source_manifest_sha256") or ""))
+        is not None
+        and isinstance(symbols, list)
+        and len(symbols) == len(OVERNIGHT_SYMBOLS)
+        and {item.get("symbol") for item in symbols if isinstance(item, dict)}
+        == set(OVERNIGHT_SYMBOLS)
+        and all(
+            isinstance(item, dict)
+            and type(item.get("return_pct")) in (int, float)
+            and item.get("direction") in {"up", "down", "unchanged"}
+            and item.get("as_of") == value.get("as_of")
+            for item in symbols
+        )
+    )
 
 
 class PreMarketPipelineError(RuntimeError):
@@ -52,7 +85,8 @@ class PreMarketPipeline:
         source_loaders,
         publish,
         notify,
-        max_source_age=datetime.timedelta(hours=18),
+        us_source_loader=None,
+        us_calendars=None,
     ):
         if (
             type(applicable_trading_date) is not datetime.date
@@ -61,8 +95,7 @@ class PreMarketPipeline:
             or not all(callable(loader) for loader in source_loaders)
             or not callable(publish)
             or not callable(notify)
-            or not isinstance(max_source_age, datetime.timedelta)
-            or not datetime.timedelta(0) < max_source_age <= datetime.timedelta(days=2)
+            or (us_source_loader is not None and not callable(us_source_loader))
         ):
             raise ValueError("invalid pre-market pipeline configuration")
         self.root = Path(root)
@@ -71,7 +104,8 @@ class PreMarketPipeline:
         self.source_loaders = tuple(source_loaders)
         self.publish = publish
         self.notify = notify
-        self.max_source_age = max_source_age
+        self.us_source_loader = us_source_loader
+        self.us_calendars = us_calendars
 
     def _base(self):
         receipt = self.load_base()
@@ -107,6 +141,77 @@ class PreMarketPipeline:
             raise PreMarketPipelineError("verified post-close base is invalid")
         return receipt
 
+    def _overnight_observation(self, now):
+        if self.us_source_loader is None or self.us_calendars is None:
+            raise PreMarketPipelineError("verified US quant source is missing")
+        try:
+            source = self.us_source_loader()
+            manifest = source.manifest
+            if (
+                manifest.market != "US"
+                or not re.fullmatch(
+                    r"manifests/US-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}\.json",
+                    str(manifest.manifest_path),
+                )
+                or not re.fullmatch(r"[0-9a-f]{64}", str(manifest.manifest_sha256))
+            ):
+                raise ValueError("US manifest identity is invalid")
+            ny_now = now.astimezone(NEW_YORK)
+            completed = self.us_calendars.latest_session_on_or_before(
+                ny_now.date() if ny_now.time() >= datetime.time(16) else ny_now.date() - datetime.timedelta(days=1)
+            )
+            previous = self.us_calendars.session_offset(completed, -1)
+            if manifest.market_as_of != completed:
+                raise ValueError("US quant source is not the latest completed session")
+            by_symbol = {stock.symbol: stock for stock in source.stocks}
+            if not set(OVERNIGHT_SYMBOLS).issubset(by_symbol):
+                raise ValueError("US overnight universe is incomplete")
+            rows = {}
+            for symbol in OVERNIGHT_SYMBOLS:
+                stock = by_symbol[symbol]
+                if stock.observation_kind != "regular_price" or stock.as_of != completed:
+                    raise ValueError("US overnight row date is invalid")
+                points = {}
+                for row in stock.daily:
+                    date_text = str(row.get("Date") or "").split("T", 1)[0]
+                    try:
+                        date = datetime.date.fromisoformat(date_text)
+                    except ValueError:
+                        continue
+                    close = row.get("Close")
+                    if isinstance(close, (int, float)) and not isinstance(close, bool) and close > 0:
+                        points[date] = float(close)
+                if completed not in points or previous not in points:
+                    raise ValueError("US overnight rows do not contain two valid sessions")
+                change = (points[completed] / points[previous] - 1) * 100
+                if not math.isfinite(change):
+                    raise ValueError("US overnight return is invalid")
+                rows[symbol] = {
+                    "symbol": symbol,
+                    "return_pct": round(change, 4),
+                    "direction": "up" if change > 0 else "down" if change < 0 else "unchanged",
+                    "as_of": completed.isoformat(),
+                }
+            rising = sum(item["direction"] == "up" for item in rows.values())
+            falling = sum(item["direction"] == "down" for item in rows.values())
+            status = "risk_on" if rising >= 4 else "risk_off" if falling >= 4 else "neutral"
+            message = {
+                "risk_on": "隔夜觀察偏正向",
+                "risk_off": "隔夜觀察偏保守",
+                "neutral": "隔夜觀察中性",
+            }[status]
+            return {
+                "status": status,
+                "message": message,
+                "symbols": [rows[symbol] for symbol in OVERNIGHT_SYMBOLS],
+                "as_of": completed.isoformat(),
+                "previous_as_of": previous.isoformat(),
+                "source_manifest": f"quant/v1/{manifest.manifest_path}",
+                "source_manifest_sha256": manifest.manifest_sha256,
+            }
+        except Exception as exc:
+            raise PreMarketPipelineError("verified US overnight observation is unavailable") from exc
+
     def run(self, *, now=None):
         checked_at = now or datetime.datetime.now(datetime.timezone.utc)
         if checked_at.tzinfo is None or checked_at.utcoffset() is None:
@@ -141,7 +246,14 @@ class PreMarketPipeline:
                 if any(state.get(key) != value for key, value in identity.items()):
                     raise PreMarketPipelineError("pre-market checkpoint identity mismatch")
                 if state.get("status") == "completed":
-                    return state
+                    overlay = (
+                        state.get("outputs", {}).get("metadata", {})
+                        .get("content", {})
+                        .get("overnight_overlay")
+                    )
+                    if _valid_overlay(overlay):
+                        return state
+                    raise PreMarketPipelineError("pre-market checkpoint is from an obsolete contract")
             else:
                 state = {
                     "schema_version": 1,
@@ -161,35 +273,17 @@ class PreMarketPipeline:
 
             try:
                 if "metadata" not in state["completed_stages"]:
-                    available = []
-                    unavailable = []
-                    for index, loader in enumerate(self.source_loaders):
-                        try:
-                            document = loader()
-                            if document is None:
-                                raise OvernightSourceError("source unavailable")
-                            available.append(
-                                validate_overnight_document(
-                                    document,
-                                    now=checked_at,
-                                    max_age=self.max_source_age,
-                                )
-                            )
-                        except Exception as exc:
-                            unavailable.append(
-                                {"source_index": index, "error_type": type(exc).__name__}
-                            )
-                    signals = {item["signal"] for item in available}
-                    if not available:
-                        status = "insufficient"
-                        message = "資料不足，維持盤後觀察"
-                    elif signals == {"risk_on"}:
-                        status, message = "risk_on", "隔夜風險偏正向"
-                    elif signals == {"risk_off"}:
-                        status, message = "risk_off", "隔夜風險偏保守"
-                    else:
-                        status, message = "mixed", "隔夜訊號分歧"
-                    core = json.loads(_canonical(base_metadata["content"]).decode("utf-8"))
+                    overnight = self._overnight_observation(checked_at)
+                    base_core = base_metadata["content"]
+                    market = base_core.get("market_observation")
+                    quality = base_core.get("data_quality", {})
+                    if not isinstance(market, dict):
+                        raise PreMarketPipelineError("TW benchmark summary is missing")
+                    core = {
+                        "market_observation": dict(market),
+                        "data_quality": dict(quality) if isinstance(quality, dict) else {},
+                        "daily_focus": list(base_core.get("daily_focus") or [])[:1],
+                    }
                     metadata = {
                         "schema_version": 2,
                         "product_mode": "observation",
@@ -221,23 +315,13 @@ class PreMarketPipeline:
                             base_metadata["prediction_capability"]
                         ),
                         "title": "ABSORB 盤前風險更新",
-                        "summary": [message],
-                        "warnings": (
-                            []
-                            if not unavailable
-                            else [f"{len(unavailable)} 個隔夜來源不可用"]
-                        ),
+                        "summary": [overnight["message"]],
+                        "warnings": [],
                         "content": {
                             "core": core,
                             "base_metadata_sha256": base["metadata_sha256"],
                             "overnight_overlay": {
-                                "status": status,
-                                "message": message,
-                                "available": available,
-                                "unavailable": unavailable,
-                                "as_of": checked_at.astimezone(
-                                    datetime.timezone.utc
-                                ).isoformat().replace("+00:00", "Z"),
+                                **overnight,
                             },
                         },
                     }
@@ -246,6 +330,13 @@ class PreMarketPipeline:
                     save()
                     writer.record("aggregation", now=checked_at)
                 metadata = state["outputs"]["metadata"]
+                overlay = (
+                    metadata.get("content", {}).get("overnight_overlay")
+                    if isinstance(metadata, dict) and isinstance(metadata.get("content"), dict)
+                    else None
+                )
+                if not _valid_overlay(overlay):
+                    raise PreMarketPipelineError("pre-market checkpoint is from an obsolete contract")
                 if "publish" not in state["completed_stages"]:
                     receipt = self.publish(metadata)
                     _canonical(receipt)

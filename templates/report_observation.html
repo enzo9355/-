@@ -20,6 +20,26 @@
     </section>
   {% endif %}
 
+  {% if report.report_type == 'pre_market' %}
+    {% set overnight = report.overnight_overlay %}
+    <section class="panel" aria-labelledby="overnight-detail-title">
+      <h2 id="overnight-detail-title">隔夜觀察</h2>
+      {% if overnight.status == 'legacy_unavailable' %}
+      <p>以下內容僅為前一交易日盤後摘要，不是盤前訊號。</p>
+      {% else %}
+      <p>{{ overnight.message }}｜觀察日 {{ overnight.as_of }}，前一有效交易日 {{ overnight.previous_as_of }}</p>
+      <div class="report-meta">{% for item in overnight.symbols %}<div><dt>{{ item.symbol }}</dt><dd>{{ ('%+.2f%%' if item.direction in ('up', 'down') else '%.2f%%')|format(item.return_pct) }}（{{ '上漲' if item.direction == 'up' else '下跌' if item.direction == 'down' else '持平' }}）</dd></div>{% endfor %}</div>
+      <p class="muted small">來源 manifest {{ overnight.source_manifest }}｜SHA-256 {{ overnight.source_manifest_sha256 }}</p>
+      {% endif %}
+    </section>
+    {% set content = report.core %}
+    {% set market = content.market_observation %}
+    <section class="panel" aria-labelledby="tw-benchmark-title">
+      <h2 id="tw-benchmark-title">前一日台股基準</h2>
+      <dl class="report-meta"><div><dt>單日中位報酬</dt><dd>{{ '%+.2f%%'|format(market.return_1d_pct) if market.return_1d_pct is not none else '資料不足' }}</dd></div><div><dt>上漲／下跌家數</dt><dd>{{ market.advancing_count }}／{{ market.declining_count }}</dd></div><div><dt>資料基準日</dt><dd>{{ report.source_market_date }}</dd></div></dl>
+    </section>
+    <p><a class="button button-secondary" href="{{ url_for('post_close_report_page', trading_date=report.source_market_date) }}">閱讀完整盤後報告</a></p>
+  {% else %}
   {% set content = report.core %}
   {% set market = content.market_observation %}
   {% set market_count = (market.advancing_count or 0) + (market.declining_count or 0) + (market.unchanged_count or 0) %}
@@ -79,5 +99,6 @@
   </section>
 
   <section class="panel risk-panel"><h2>方法限制</h2><p>本頁只整理已發生的市場資料。資料可能因交易所揭露時差、來源缺漏或市場休市而延遲；任何事件條件都不是買賣指令。</p></section>
+  {% endif %}
 </article>
 {% endblock %}
