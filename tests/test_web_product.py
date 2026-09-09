@@ -972,6 +972,28 @@ class WebProductTests(unittest.TestCase):
         ):
             self.assertIn(marker, html)
 
+    def test_us_index_switch_does_not_depend_on_chart_library(self):
+        script = Path(stock_app.app.static_folder, "app.js").read_text(
+            encoding="utf-8"
+        )
+        start = script.index("function initUsIndexChart")
+        end = script.index("\n}", start)
+        body = script[start:end]
+
+        # The three verified index forecasts are server-rendered with `hidden`
+        # on all but the first panel, so only this initializer can reveal them.
+        # Gating it on the third-party chart library would make the Nasdaq and
+        # Dow forecasts unreachable whenever that CDN script fails to load.
+        guard = body[: body.index("const select")]
+        self.assertNotIn("window.LightweightCharts", guard)
+
+        select_body = body[body.index("const select") :]
+        pressed = select_body.index('setAttribute("aria-pressed"')
+        panel = select_body.index("dataset.usIndexPanel")
+        chart = select_body.index("window.LightweightCharts")
+        self.assertLess(pressed, chart)
+        self.assertLess(panel, chart)
+
     def test_us_stocks_disables_tw_dashboard_hydration(self):
         client = stock_app.app.test_client()
         with patch.object(

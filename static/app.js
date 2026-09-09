@@ -538,19 +538,12 @@ function initUsIndexChart() {
   const container = bySelector("#us-index-chart");
   const source = bySelector("#us-index-chart-data");
   const tabs = document.querySelectorAll("[data-us-index-tab]");
-  if (!container || !source || !tabs.length || !window.LightweightCharts) return;
+  if (!source || !tabs.length) return;
   const items = JSON.parse(source.textContent);
   let activeChart = null;
   const select = (symbol) => {
     const item = items.find((value) => value.symbol === symbol);
     if (!item) return;
-    if (activeChart) activeChart.chart.remove();
-    container.replaceChildren();
-    activeChart = createPriceChart(container, {
-      candles: item.candles,
-      prediction: item.line,
-    }, { compact: true, predictionMarker: true });
-    if (activeChart) activeChart.chart.timeScale().fitContent();
     tabs.forEach((tab) => {
       const active = tab.dataset.usIndexTab === symbol;
       tab.classList.toggle("active", active);
@@ -559,6 +552,14 @@ function initUsIndexChart() {
     document.querySelectorAll("[data-us-index-panel]").forEach((panel) => {
       panel.hidden = panel.dataset.usIndexPanel !== symbol;
     });
+    if (!container || !window.LightweightCharts) return;
+    if (activeChart) activeChart.chart.remove();
+    container.replaceChildren();
+    activeChart = createPriceChart(container, {
+      candles: item.candles,
+      prediction: item.line,
+    }, { compact: true, predictionMarker: true });
+    if (activeChart) activeChart.chart.timeScale().fitContent();
   };
   tabs.forEach((tab) => tab.addEventListener("click", () => select(tab.dataset.usIndexTab)));
   select(tabs[0].dataset.usIndexTab);
